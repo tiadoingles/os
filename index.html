@@ -13,7 +13,13 @@
       theme: {
         extend: {
           colors: {
-            brand: { DEFAULT: "#ea5167", dark: "#d13c53", light: "#fdeef1" },
+            brand: { DEFAULT: "#ea5167", dark: "#d13c53", light: "#fbe7e4" },
+            bg: "#f6f3ee",        // fundo quente da aplicação
+            sidebar: "#ffffff",
+            card: "#ffffff",
+            line: "#ece7de",      // bordas
+            ink: "#39352f",       // texto principal
+            muted: "#8f887d",     // texto secundário
           },
           fontFamily: {
             sans: ['ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'Helvetica', 'Arial', 'sans-serif'],
@@ -22,7 +28,7 @@
       },
     };
   </script>
-  <link rel="stylesheet" href="./styles.css?v=4" />
+  <link rel="stylesheet" href="./styles.css?v=5" />
 
   <script type="importmap">
   {
@@ -36,15 +42,15 @@
   }
   </script>
 
-  <script src="./config.js?v=4"></script>
+  <script src="./config.js?v=5"></script>
 </head>
-<body class="bg-slate-50 text-slate-800 font-sans antialiased">
+<body class="bg-bg text-ink font-sans antialiased">
   <div id="app">
-    <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;color:#94a3b8;font-size:14px">
+    <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;color:#8f887d;font-size:14px;background:#f6f3ee">
       Carregando…
     </div>
   </div>
   <noscript style="display:block;padding:24px;text-align:center">Este sistema precisa de JavaScript habilitado.</noscript>
-  <script type="module" src="./app.js?v=4"></script>
+  <script type="module" src="./app.js?v=5"></script>
 </body>
 </html>

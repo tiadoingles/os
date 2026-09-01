@@ -32,25 +32,34 @@ const STATUSES = [
   ["rascunho", "Rascunho"],
   ["arquivado", "Arquivado"],
 ];
+const PILL_OK = "bg-[#e7efe1] text-[#5e7a52]";
+const PILL_WARN = "bg-[#efe9cf] text-[#7c7440]";
+const PILL_ERR = "bg-[#f4e0db] text-[#a44b43]";
+const PILL_NEUTRAL = "bg-black/[0.05] text-muted";
+
 const STATUS_STYLE = {
-  publicado: "bg-emerald-100 text-emerald-700",
-  rascunho: "bg-amber-100 text-amber-700",
-  arquivado: "bg-slate-200 text-slate-600",
+  publicado: PILL_OK,
+  rascunho: PILL_WARN,
+  arquivado: PILL_NEUTRAL,
 };
 const ROLE_LABEL = { leitor: "Leitor", editor: "Editor", admin: "Admin" };
 
-const FUTURE_SECTORS = [
-  { nome: "Financeiro", icone: "💰" },
-  { nome: "Comercial", icone: "📈" },
-  { nome: "CS / Suporte", icone: "🤝" },
-  { nome: "Conteúdo", icone: "✍️" },
+// Setores do menu lateral. `path` ativo; `wip` = página "em construção".
+const SETORES = [
+  { nome: "Base de Conhecimento", icone: "📚", path: "/" },
+  { nome: "Pedir a IA", icone: "✨", path: "/pedir-ia" },
+  { nome: "Ferramentas", icone: "🧰", path: "/ferramentas" },
+  { nome: "Financeiro", icone: "💰", path: "/financeiro", wip: "Contas, faturamento, comissões e relatórios financeiros da empresa." },
+  { nome: "Comercial", icone: "📈", path: "/comercial", wip: "Funil de vendas, leads, calls, scripts e acompanhamento de metas." },
+  { nome: "CS / Suporte", icone: "🤝", path: "/cs-suporte", wip: "Onboarding de alunas, acompanhamento, retenção e atendimento." },
+  { nome: "Conteúdo", icone: "✍️", path: "/conteudo", wip: "Calendário editorial, produção de conteúdo, YouTube e social." },
 ];
 
 const FERRAMENTA_STATUS = {
-  conectada: { label: "Conectada", cls: "bg-emerald-100 text-emerald-700", dot: "bg-emerald-500" },
-  erro: { label: "Erro", cls: "bg-red-100 text-red-700", dot: "bg-red-500" },
-  desconectada: { label: "Desconectada", cls: "bg-slate-200 text-slate-600", dot: "bg-slate-400" },
-  nao_configurada: { label: "Não configurada", cls: "bg-amber-100 text-amber-700", dot: "bg-amber-500" },
+  conectada: { label: "Conectada", cls: PILL_OK, dot: "bg-[#7d9b6e]" },
+  erro: { label: "Erro", cls: PILL_ERR, dot: "bg-[#c56b5f]" },
+  desconectada: { label: "Desconectada", cls: PILL_NEUTRAL, dot: "bg-[#b3aca0]" },
+  nao_configurada: { label: "Não configurada", cls: PILL_WARN, dot: "bg-[#bfa94e]" },
 };
 const FERRAMENTA_CATEGORIAS = [
   ["infra", "Infra da OS"],
@@ -348,8 +357,8 @@ function Btn({ variant = "primary", as = "button", href, loading, disabled, chil
     "inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed";
   const styles = {
     primary: "bg-brand text-white hover:bg-brand-dark shadow-sm",
-    ghost: "bg-white text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50",
-    subtle: "bg-slate-100 text-slate-700 hover:bg-slate-200",
+    ghost: "bg-white text-ink ring-1 ring-line hover:bg-black/[0.04]",
+    subtle: "bg-black/[0.05] text-ink hover:bg-line",
     danger: "bg-white text-red-600 ring-1 ring-red-200 hover:bg-red-50",
   };
   const c = cx(base, styles[variant], cls);
@@ -362,16 +371,16 @@ function Btn({ variant = "primary", as = "button", href, loading, disabled, chil
 function Field({ label, hint, children, required }) {
   return html`
     <label class="block">
-      <span class="mb-1 block text-sm font-medium text-slate-700">
+      <span class="mb-1 block text-sm font-medium text-ink">
         ${label}${required ? html`<span class="text-brand"> *</span>` : null}
       </span>
       ${children}
-      ${hint ? html`<span class="mt-1 block text-xs text-slate-400">${hint}</span>` : null}
+      ${hint ? html`<span class="mt-1 block text-xs text-muted">${hint}</span>` : null}
     </label>`;
 }
 
 const inputCls =
-  "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 placeholder-slate-400 focus:border-brand focus:ring-brand";
+  "w-full rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink placeholder-muted/70 focus:border-brand focus:ring-brand";
 
 function Badge({ children, class: cls }) {
   return html`<span class=${cx("inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium", cls)}>${children}</span>`;
@@ -379,15 +388,15 @@ function Badge({ children, class: cls }) {
 
 function Empty({ icon = "🗂️", title, children }) {
   return html`
-    <div class="rounded-xl border border-dashed border-slate-300 bg-white/60 px-6 py-14 text-center">
+    <div class="rounded-xl border border-dashed border-line bg-card/70 px-6 py-14 text-center">
       <div class="text-4xl">${icon}</div>
-      <div class="mt-3 font-medium text-slate-700">${title}</div>
-      ${children ? html`<div class="mx-auto mt-1 max-w-md text-sm text-slate-500">${children}</div>` : null}
+      <div class="mt-3 font-medium text-ink">${title}</div>
+      ${children ? html`<div class="mx-auto mt-1 max-w-md text-sm text-muted">${children}</div>` : null}
     </div>`;
 }
 
 function Splash() {
-  return html`<div class="flex min-h-screen items-center justify-center text-slate-400 text-sm">
+  return html`<div class="flex min-h-screen items-center justify-center text-muted text-sm">
     <span class="spinner mr-2"></span> Carregando…
   </div>`;
 }
@@ -415,14 +424,14 @@ function Modal({ title, onClose, children, wide }) {
     return () => removeEventListener("keydown", on);
   }, [onClose]);
   return html`
-    <div class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-4 sm:p-8" onClick=${onClose}>
+    <div class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/30 p-4 sm:p-8" onClick=${onClose}>
       <div
-        class=${cx("w-full rounded-2xl bg-white shadow-xl ring-1 ring-black/5", wide ? "max-w-2xl" : "max-w-lg")}
+        class=${cx("w-full rounded-2xl bg-white shadow-xl ring-1 ring-line", wide ? "max-w-2xl" : "max-w-lg")}
         onClick=${(e) => e.stopPropagation()}
       >
-        <div class="flex items-center justify-between border-b border-slate-100 px-5 py-3.5">
-          <h3 class="font-semibold text-slate-800">${title}</h3>
-          <button class="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600" onClick=${onClose}>✕</button>
+        <div class="flex items-center justify-between border-b border-line px-5 py-3.5">
+          <h3 class="font-semibold text-ink">${title}</h3>
+          <button class="rounded-md p-1 text-muted hover:bg-black/[0.06] hover:text-ink/75" onClick=${onClose}>✕</button>
         </div>
         <div class="px-5 py-4">${children}</div>
       </div>
@@ -460,14 +469,14 @@ function Login() {
   }
 
   return html`
-    <div class="flex min-h-screen items-center justify-center bg-gradient-to-b from-white to-slate-100 px-4">
+    <div class="flex min-h-screen items-center justify-center bg-gradient-to-b from-card to-bg px-4">
       <div class="w-full max-w-sm">
         <div class="mb-6 text-center">
           <div class="text-4xl">📚</div>
-          <h1 class="mt-2 text-lg font-semibold text-slate-800">Sistema Operacional</h1>
-          <p class="text-sm text-slate-500">Tia do Inglês — Base de Conhecimento</p>
+          <h1 class="mt-2 text-lg font-semibold text-ink">Sistema Operacional</h1>
+          <p class="text-sm text-muted">Tia do Inglês — Base de Conhecimento</p>
         </div>
-        <form onSubmit=${submit} class="space-y-4 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+        <form onSubmit=${submit} class="space-y-4 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-line">
           <${Field} label="E-mail" required>
             <input class=${inputCls} type="email" autocomplete="username" required
               value=${email} onInput=${(e) => setEmail(e.target.value)} />
@@ -480,7 +489,7 @@ function Login() {
           <${Btn} type="submit" loading=${busy} class="w-full">
             ${mode === "login" ? "Entrar" : "Enviar link de redefinição"}
           <//>
-          <button type="button" class="w-full text-center text-xs text-slate-400 hover:text-slate-600"
+          <button type="button" class="w-full text-center text-xs text-muted hover:text-ink/75"
             onClick=${() => setMode(mode === "login" ? "reset" : "login")}>
             ${mode === "login" ? "Esqueci minha senha" : "← Voltar ao login"}
           </button>
@@ -491,79 +500,75 @@ function Login() {
 
 /* ============================ Shell ============================ */
 
-function Shell({ me, sections, route, children }) {
-  const [open, setOpen] = useState(false);
-  const activeSlug = route.parts[0] === "secao" ? route.parts[1] : null;
-  const onHome = route.path === "/" || route.path === "";
+function iniciais(txt) {
+  const p = (txt || "").trim().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  return ((p[0] || "?")[0] + (p[1] ? p[1][0] : "")).toUpperCase();
+}
 
-  const navItem = (label, icon, target, active, disabled) => html`
-    <a
-      href=${disabled ? undefined : "#" + target}
-      onClick=${() => setOpen(false)}
+function Shell({ me, route, children }) {
+  const [open, setOpen] = useState(false);
+  const p0 = route.parts[0] || "";
+  const bcActive = p0 === "" || p0 === "secao" || p0 === "doc" || p0 === "novo";
+
+  const navItem = (label, icon, target, active) => html`
+    <a href=${"#" + target} onClick=${() => setOpen(false)}
       class=${cx(
-        "flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition",
-        disabled
-          ? "cursor-default text-slate-300"
-          : active
-          ? "bg-brand-light font-medium text-brand-dark"
-          : "text-slate-600 hover:bg-slate-100"
-      )}
-    >
-      <span class="text-base">${icon}</span><span class="truncate">${label}</span>
-      ${disabled ? html`<span class="ml-auto text-[10px] uppercase tracking-wide text-slate-300">em breve</span>` : null}
+        "flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition",
+        active ? "bg-brand-light font-medium text-brand-dark" : "text-ink/70 hover:bg-black/[0.04]"
+      )}>
+      <span class="w-5 text-center text-[15px] leading-none">${icon}</span>
+      <span class="truncate">${label}</span>
     </a>`;
 
   const sidebar = html`
     <div class="flex h-full flex-col">
-      <a href="#/" onClick=${() => setOpen(false)} class="flex items-center gap-2 px-4 py-4">
-        <span class="text-2xl">📚</span>
-        <span class="text-sm font-semibold leading-tight text-slate-800">Sistema<br/>Operacional</span>
-      </a>
-      <nav class="flex-1 space-y-0.5 overflow-y-auto px-2 pb-4">
-        ${navItem("Início", "🏠", "/", onHome)}
-        <div class="px-3 pb-1 pt-4 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Base de Conhecimento</div>
-        ${sections.map((s) => navItem(s.nome, s.icone || "📄", "/secao/" + s.slug, activeSlug === s.slug))}
-        <div class="px-3 pb-1 pt-4 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Setores</div>
-        ${navItem("Ferramentas", "🧰", "/ferramentas", route.path === "/ferramentas")}
-        ${FUTURE_SECTORS.map((s) => navItem(s.nome, s.icone, "#", false, true))}
+      <div class="flex items-center gap-3 border-b border-line px-4 py-4">
+        <div class="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-brand-light text-sm font-semibold text-brand-dark">
+          ${iniciais(me.nome || me.email)}
+        </div>
+        <div class="min-w-0">
+          <div class="truncate text-sm font-semibold text-ink">${me.nome || me.email}</div>
+          <div class="text-xs text-muted">${ROLE_LABEL[me.role]}</div>
+        </div>
+      </div>
+
+      <nav class="flex-1 space-y-0.5 overflow-y-auto px-2 py-3">
+        ${SETORES.map((s) => navItem(
+          s.nome, s.icone, s.path,
+          s.path === "/" ? bcActive : route.path === s.path
+        ))}
       </nav>
-      <div class="border-t border-slate-100 p-2">
-        ${me.role === "admin" && navItem("Administração", "⚙️", "/admin", route.path === "/admin")}
+
+      <div class="space-y-0.5 border-t border-line px-2 py-2">
+        ${me.role === "admin" ? navItem("Administração", "⚙️", "/admin", route.path === "/admin") : null}
         ${navItem("Meu perfil", "👤", "/perfil", route.path === "/perfil")}
-        <button
-          class="mt-1 flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-slate-600 hover:bg-slate-100"
-          onClick=${async () => { await sb.auth.signOut(); }}
-        >
-          <span class="text-base">🚪</span> Sair
-        </button>
+        ${cfg.AUTH_MODE === "open" ? null : html`
+          <button
+            class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-ink/70 hover:bg-black/[0.04]"
+            onClick=${async () => { await sb.auth.signOut(); location.hash = "/"; }}>
+            <span class="w-5 text-center text-[15px] leading-none">↩︎</span> Sair
+          </button>`}
       </div>
     </div>`;
 
   return html`
     <div class="min-h-screen lg:flex">
-      <!-- Desktop sidebar -->
-      <aside class="hidden w-64 shrink-0 border-r border-slate-200 bg-white lg:block">
+      <aside class="hidden w-60 shrink-0 border-r border-line bg-sidebar lg:block">
         <div class="sticky top-0 h-screen">${sidebar}</div>
       </aside>
 
-      <!-- Mobile top bar -->
-      <div class="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3 lg:hidden">
-        <a href="#/" class="flex items-center gap-2"><span class="text-xl">📚</span><span class="text-sm font-semibold">Sistema Operacional</span></a>
-        <button class="rounded-md p-2 text-slate-500 hover:bg-slate-100" onClick=${() => setOpen(true)}>☰</button>
+      <div class="flex items-center justify-between border-b border-line bg-sidebar px-4 py-3 lg:hidden">
+        <span class="text-sm font-semibold text-ink">Sistema Operacional</span>
+        <button class="rounded-md p-2 text-muted hover:bg-black/[0.04]" onClick=${() => setOpen(true)}>☰</button>
       </div>
       ${open && html`
         <div class="fixed inset-0 z-40 lg:hidden">
-          <div class="absolute inset-0 bg-slate-900/40" onClick=${() => setOpen(false)}></div>
-          <div class="absolute left-0 top-0 h-full w-72 bg-white shadow-xl">${sidebar}</div>
+          <div class="absolute inset-0 bg-ink/30" onClick=${() => setOpen(false)}></div>
+          <div class="absolute left-0 top-0 h-full w-72 bg-sidebar shadow-xl">${sidebar}</div>
         </div>`}
 
       <main class="min-w-0 flex-1">
-        <div class="mx-auto max-w-5xl px-4 py-6 sm:px-6 lg:px-10 lg:py-10">
-          <div class="mb-6 flex items-center justify-between gap-3">
-            <div class="text-xs text-slate-400">
-              ${me.nome || me.email} · <span class="font-medium text-slate-500">${ROLE_LABEL[me.role]}</span>
-            </div>
-          </div>
+        <div class="mx-auto max-w-5xl px-4 py-7 sm:px-6 lg:px-10 lg:py-10">
           ${children}
         </div>
       </main>
@@ -603,8 +608,8 @@ function Dashboard({ me, sections }) {
 
   return html`
     <div>
-      <h1 class="text-2xl font-semibold text-slate-800">Base de Conhecimento</h1>
-      <p class="mt-1 max-w-2xl text-sm text-slate-500">
+      <h1 class="text-2xl font-semibold text-ink">Base de Conhecimento</h1>
+      <p class="mt-1 max-w-2xl text-sm text-muted">
         Tudo sobre a empresa, a metodologia, o produto, a cliente e os resultados — para que todas as áreas
         conheçam bem o que fazemos e como pensamos.
       </p>
@@ -617,25 +622,25 @@ function Dashboard({ me, sections }) {
       ${results !== null
         ? html`
           <div class="mt-6">
-            <div class="mb-2 text-sm font-medium text-slate-500">${results.length} resultado(s) para “${search.trim()}”</div>
+            <div class="mb-2 text-sm font-medium text-muted">${results.length} resultado(s) para “${search.trim()}”</div>
             <${DocTable} docs=${results} />
           </div>`
         : html`
           <div class="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             ${sections.map((s) => html`
-              <a href=${"#/secao/" + s.slug} class="group rounded-xl border border-slate-200 bg-white p-4 transition hover:border-brand/40 hover:shadow-sm">
-                <div class="flex items-center gap-2 text-lg">${s.icone || "📄"}<span class="text-base font-semibold text-slate-800">${s.nome}</span></div>
-                <p class="mt-1.5 line-clamp-3 text-sm text-slate-500">${s.descricao}</p>
-                <div class="mt-3 text-xs text-slate-400">
+              <a href=${"#/secao/" + s.slug} class="group rounded-xl border border-line bg-white p-4 transition hover:border-brand/40 hover:shadow-sm">
+                <div class="flex items-center gap-2 text-lg">${s.icone || "📄"}<span class="text-base font-semibold text-ink">${s.nome}</span></div>
+                <p class="mt-1.5 line-clamp-3 text-sm text-muted">${s.descricao}</p>
+                <div class="mt-3 text-xs text-muted">
                   ${countsReady ? (counts.current[s.id] || 0) + " documento(s)" : "…"}
                 </div>
               </a>`)}
           </div>
 
           <div class="mt-10">
-            <h2 class="mb-3 text-sm font-semibold uppercase tracking-wider text-slate-400">Atualizados recentemente</h2>
+            <h2 class="mb-3 text-sm font-semibold uppercase tracking-wider text-muted">Atualizados recentemente</h2>
             ${recent === null
-              ? html`<div class="text-sm text-slate-400"><span class="spinner mr-2"></span>Carregando…</div>`
+              ? html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
               : recent.length === 0
               ? html`<${Empty} title="Nenhum documento ainda" icon="📭">${me.role !== "leitor" ? "Abra uma seção e clique em “Novo documento”." : "Peça a um editor para publicar os primeiros materiais."}<//>`
               : html`<${DocTable} docs=${recent} showSection />`}
@@ -680,8 +685,8 @@ function SectionPage({ slug, me, sections, onSectionsChanged }) {
     <div>
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div class="flex items-center gap-2 text-sm text-slate-400"><a href="#/" class="hover:text-slate-600">Base de Conhecimento</a> / <span>${section.nome}</span></div>
-          <h1 class="mt-1 flex items-center gap-2 text-2xl font-semibold text-slate-800">${section.icone || "📄"} ${section.nome}</h1>
+          <div class="flex items-center gap-2 text-sm text-muted"><a href="#/" class="hover:text-ink/75">Base de Conhecimento</a> / <span>${section.nome}</span></div>
+          <h1 class="mt-1 flex items-center gap-2 text-2xl font-semibold text-ink">${section.icone || "📄"} ${section.nome}</h1>
         </div>
         <div class="flex gap-2">
           ${canEdit && html`<${Btn} variant="ghost" onClick=${() => setEditing(true)}>Editar descrição<//>`}
@@ -689,7 +694,7 @@ function SectionPage({ slug, me, sections, onSectionsChanged }) {
         </div>
       </div>
 
-      <p class="rich mt-3 max-w-3xl text-sm text-slate-600">${section.descricao || "—"}</p>
+      <p class="rich mt-3 max-w-3xl text-sm text-ink/75">${section.descricao || "—"}</p>
 
       <div class="mt-6 flex flex-wrap gap-2">
         <select class=${cx(inputCls, "w-auto")} value=${kindFilter} onChange=${(e) => setKindFilter(e.target.value)}>
@@ -709,7 +714,7 @@ function SectionPage({ slug, me, sections, onSectionsChanged }) {
 
       <div class="mt-4">
         ${docs === null
-          ? html`<div class="text-sm text-slate-400"><span class="spinner mr-2"></span>Carregando…</div>`
+          ? html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
           : filtered.length === 0
           ? html`<${Empty} title="Nenhum documento" icon="🗂️">${canEdit ? "Clique em “Novo documento” para adicionar o primeiro material desta seção." : "Ainda não há documentos publicados aqui."}<//>`
           : html`<${DocTable} docs=${filtered} />`}
@@ -749,9 +754,9 @@ function SectionEditModal({ section, onClose, onSaved }) {
 function DocTable({ docs, showSection }) {
   if (!docs.length) return null;
   return html`
-    <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+    <div class="overflow-x-auto rounded-xl border border-line bg-white">
       <table class="w-full min-w-[640px] text-left text-sm">
-        <thead class="border-b border-slate-100 text-xs uppercase tracking-wide text-slate-400">
+        <thead class="border-b border-line text-xs uppercase tracking-wide text-muted">
           <tr>
             <th class="px-4 py-3 font-medium">Documento</th>
             ${showSection ? html`<th class="px-4 py-3 font-medium">Seção</th>` : null}
@@ -761,19 +766,19 @@ function DocTable({ docs, showSection }) {
             <th class="px-4 py-3 font-medium">Status</th>
           </tr>
         </thead>
-        <tbody class="divide-y divide-slate-50">
+        <tbody class="divide-y divide-line">
           ${docs.map((d) => html`
-            <tr key=${d.id} class="cursor-pointer hover:bg-slate-50" onClick=${() => go("/doc/" + d.id)}>
+            <tr key=${d.id} class="cursor-pointer hover:bg-black/[0.04]" onClick=${() => go("/doc/" + d.id)}>
               <td class="px-4 py-3">
-                <div class="font-medium text-slate-800">${d.titulo}</div>
+                <div class="font-medium text-ink">${d.titulo}</div>
                 ${d.tags && d.tags.length
-                  ? html`<div class="mt-1 flex flex-wrap gap-1">${d.tags.map((t) => html`<${Badge} class="bg-slate-100 text-slate-500">${t}<//>`)}</div>`
+                  ? html`<div class="mt-1 flex flex-wrap gap-1">${d.tags.map((t) => html`<${Badge} class="bg-black/[0.05] text-muted">${t}<//>`)}</div>`
                   : null}
               </td>
-              ${showSection ? html`<td class="px-4 py-3 text-slate-500">${d.section.icone} ${d.section.nome}</td>` : null}
-              <td class="px-4 py-3 text-slate-500">${KIND_ICON[d.kind]} ${KIND_LABEL[d.kind]}</td>
-              <td class="px-4 py-3 text-slate-500">${d.responsavel ? (d.responsavel.nome || d.responsavel.email) : "—"}</td>
-              <td class="px-4 py-3 text-slate-500">${fmtDate(d.updated_at)}</td>
+              ${showSection ? html`<td class="px-4 py-3 text-muted">${d.section.icone} ${d.section.nome}</td>` : null}
+              <td class="px-4 py-3 text-muted">${KIND_ICON[d.kind]} ${KIND_LABEL[d.kind]}</td>
+              <td class="px-4 py-3 text-muted">${d.responsavel ? (d.responsavel.nome || d.responsavel.email) : "—"}</td>
+              <td class="px-4 py-3 text-muted">${fmtDate(d.updated_at)}</td>
               <td class="px-4 py-3"><${Badge} class=${STATUS_STYLE[d.status]}>${STATUSES.find((s) => s[0] === d.status)[1]}<//></td>
             </tr>`)}
         </tbody>
@@ -801,7 +806,7 @@ function Markdown({ text }) {
     try { return sanitizeHtml(marked.parse(text || "")); }
     catch (_) { return "<pre>" + (text || "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) + "</pre>"; }
   }, [text]);
-  return html`<div class="prose-doc rounded-xl border border-slate-200 bg-white p-5" dangerouslySetInnerHTML=${{ __html: htmlStr }}></div>`;
+  return html`<div class="prose-doc rounded-xl border border-line bg-white p-5" dangerouslySetInnerHTML=${{ __html: htmlStr }}></div>`;
 }
 
 function FilePreview({ version }) {
@@ -833,7 +838,7 @@ function FilePreview({ version }) {
     return html`
       <div>
         ${emb
-          ? html`<div class="aspect-video w-full overflow-hidden rounded-xl border border-slate-200">
+          ? html`<div class="aspect-video w-full overflow-hidden rounded-xl border border-line">
               <iframe src=${emb} class="h-full w-full" allow="fullscreen; picture-in-picture" allowfullscreen></iframe>
             </div>`
           : null}
@@ -844,20 +849,20 @@ function FilePreview({ version }) {
   }
 
   if (err) return html`<div class="text-sm text-red-600">Não foi possível carregar o arquivo: ${err}</div>`;
-  if (!url) return html`<div class="text-sm text-slate-400"><span class="spinner mr-2"></span>Preparando arquivo…</div>`;
+  if (!url) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Preparando arquivo…</div>`;
 
   const mime = version.mime_type || "";
   let preview = null;
-  if (mime.startsWith("image/")) preview = html`<img src=${url} class="max-h-[70vh] rounded-xl border border-slate-200" />`;
-  else if (mime === "application/pdf") preview = html`<iframe src=${url} class="h-[75vh] w-full rounded-xl border border-slate-200"></iframe>`;
+  if (mime.startsWith("image/")) preview = html`<img src=${url} class="max-h-[70vh] rounded-xl border border-line" />`;
+  else if (mime === "application/pdf") preview = html`<iframe src=${url} class="h-[75vh] w-full rounded-xl border border-line"></iframe>`;
   else if (mime.startsWith("audio/")) preview = html`<audio src=${url} controls class="w-full"></audio>`;
-  else if (mime.startsWith("video/")) preview = html`<video src=${url} controls class="max-h-[70vh] w-full rounded-xl border border-slate-200"></video>`;
+  else if (mime.startsWith("video/")) preview = html`<video src=${url} controls class="max-h-[70vh] w-full rounded-xl border border-line"></video>`;
 
   return html`
     <div>
       ${preview}
       <${Btn} variant="ghost" as="a" href=${url} target="_blank" rel="noopener" download=${version.file_name || ""} class=${preview ? "mt-3" : ""}>
-        ⬇️ Baixar ${version.file_name || "arquivo"} ${version.file_size ? html`<span class="text-slate-400">(${fmtSize(version.file_size)})</span>` : null}
+        ⬇️ Baixar ${version.file_name || "arquivo"} ${version.file_size ? html`<span class="text-muted">(${fmtSize(version.file_size)})</span>` : null}
       <//>
     </div>`;
 }
@@ -888,7 +893,7 @@ function DocDetail({ id, me, sections }) {
   useEffect(() => { setDoc(null); setNotFound(false); load(); }, [load]);
 
   if (notFound) return html`<${Empty} title="Documento não encontrado" icon="🔍"><a class="text-brand" href="#/">Voltar ao início</a><//>`;
-  if (!doc) return html`<div class="text-sm text-slate-400"><span class="spinner mr-2"></span>Carregando…</div>`;
+  if (!doc) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
 
   const canEdit = me.role !== "leitor";
   const canDelete = me.role === "admin";
@@ -909,13 +914,13 @@ function DocDetail({ id, me, sections }) {
 
   return html`
     <div>
-      <div class="flex items-center gap-2 text-sm text-slate-400">
-        <a href="#/" class="hover:text-slate-600">Base de Conhecimento</a> /
-        <a href=${"#/secao/" + doc.section.slug} class="hover:text-slate-600">${doc.section.nome}</a>
+      <div class="flex items-center gap-2 text-sm text-muted">
+        <a href="#/" class="hover:text-ink/75">Base de Conhecimento</a> /
+        <a href=${"#/secao/" + doc.section.slug} class="hover:text-ink/75">${doc.section.nome}</a>
       </div>
 
       <div class="mt-2 flex flex-wrap items-start justify-between gap-3">
-        <h1 class="text-2xl font-semibold text-slate-800">${doc.titulo}</h1>
+        <h1 class="text-2xl font-semibold text-ink">${doc.titulo}</h1>
         <div class="flex flex-wrap gap-2">
           ${canEdit && html`<${Btn} variant="ghost" onClick=${() => setShowEdit(true)}>Editar<//>`}
           ${canEdit && html`<${Btn} onClick=${() => setShowNewVersion(true)}>+ Nova versão<//>`}
@@ -923,7 +928,7 @@ function DocDetail({ id, me, sections }) {
         </div>
       </div>
 
-      <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+      <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
         <${Badge} class=${STATUS_STYLE[doc.status]}>${STATUSES.find((s) => s[0] === doc.status)[1]}<//>
         ${doc.origem === "skill-sync" && html`<${Badge} class="bg-indigo-100 text-indigo-700">🔄 sincronizada</${Badge}>`}
         <span>${KIND_ICON[doc.kind]} ${KIND_LABEL[doc.kind]}</span>
@@ -931,35 +936,35 @@ function DocDetail({ id, me, sections }) {
         <span>·</span><span>Atualizado ${fmtDate(doc.updated_at, true)}</span>
       </div>
 
-      ${doc.descricao ? html`<p class="rich mt-4 max-w-3xl text-sm text-slate-600">${doc.descricao}</p>` : null}
+      ${doc.descricao ? html`<p class="rich mt-4 max-w-3xl text-sm text-ink/75">${doc.descricao}</p>` : null}
       ${doc.tags && doc.tags.length
-        ? html`<div class="mt-3 flex flex-wrap gap-1">${doc.tags.map((t) => html`<${Badge} class="bg-slate-100 text-slate-500">${t}<//>`)}</div>`
+        ? html`<div class="mt-3 flex flex-wrap gap-1">${doc.tags.map((t) => html`<${Badge} class="bg-black/[0.05] text-muted">${t}<//>`)}</div>`
         : null}
 
       <div class="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
         <div class="min-w-0">
-          <h2 class="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-400">
+          <h2 class="mb-2 text-sm font-semibold uppercase tracking-wider text-muted">
             ${shown && shown.id === (doc.current && doc.current.id) ? "Versão atual" : "Versão " + (shown ? shown.versao : "")}
           </h2>
           <${FilePreview} version=${shown} />
         </div>
 
         <div class="min-w-0">
-          <h2 class="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-400">Histórico de versões</h2>
+          <h2 class="mb-2 text-sm font-semibold uppercase tracking-wider text-muted">Histórico de versões</h2>
           <ul class="space-y-1.5">
             ${versions.map((v) => html`
               <li key=${v.id}>
                 <button
                   class=${cx("w-full rounded-lg border px-3 py-2 text-left text-sm transition",
-                    v.id === selVersion ? "border-brand/40 bg-brand-light" : "border-slate-200 bg-white hover:bg-slate-50")}
+                    v.id === selVersion ? "border-brand/40 bg-brand-light" : "border-line bg-white hover:bg-black/[0.04]")}
                   onClick=${() => setSelVersion(v.id)}
                 >
                   <div class="flex items-center justify-between">
-                    <span class="font-medium text-slate-700">v${v.versao}${doc.current && doc.current.id === v.id ? " · atual" : ""}</span>
-                    <span class="text-xs text-slate-400">${fmtDate(v.uploaded_at)}</span>
+                    <span class="font-medium text-ink">v${v.versao}${doc.current && doc.current.id === v.id ? " · atual" : ""}</span>
+                    <span class="text-xs text-muted">${fmtDate(v.uploaded_at)}</span>
                   </div>
-                  <div class="truncate text-xs text-slate-500">${v.external_url ? "🔗 " + (v.file_name || v.external_url) : v.conteudo_md != null ? "📝 " + (v.file_name || "texto") : (v.file_name || "arquivo")}</div>
-                  ${v.changelog ? html`<div class="mt-0.5 text-xs text-slate-400">${v.changelog}</div>` : null}
+                  <div class="truncate text-xs text-muted">${v.external_url ? "🔗 " + (v.file_name || v.external_url) : v.conteudo_md != null ? "📝 " + (v.file_name || "texto") : (v.file_name || "arquivo")}</div>
+                  ${v.changelog ? html`<div class="mt-0.5 text-xs text-muted">${v.changelog}</div>` : null}
                 </button>
               </li>`)}
           </ul>
@@ -968,11 +973,11 @@ function DocDetail({ id, me, sections }) {
 
       ${me.role !== "leitor" && activity.length > 0 && html`
         <div class="mt-10">
-          <h2 class="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-400">Atividade</h2>
-          <ul class="space-y-1 text-sm text-slate-500">
+          <h2 class="mb-2 text-sm font-semibold uppercase tracking-wider text-muted">Atividade</h2>
+          <ul class="space-y-1 text-sm text-muted">
             ${activity.map((a) => html`<li key=${a.id}>
-              <span class="text-slate-700">${a.autor ? (a.autor.nome || a.autor.email) : "alguém"}</span>
-              ${" "}${a.action.replace("_", " ")} · <span class="text-slate-400">${fmtDate(a.created_at, true)}</span>
+              <span class="text-ink">${a.autor ? (a.autor.nome || a.autor.email) : "alguém"}</span>
+              ${" "}${a.action.replace("_", " ")} · <span class="text-muted">${fmtDate(a.created_at, true)}</span>
             </li>`)}
           </ul>
         </div>`}
@@ -992,7 +997,7 @@ function SourceInput({ value, onChange }) {
   const v = value;
   const tab = (m, label) => html`
     <button type="button" onClick=${() => onChange({ ...v, mode: m })}
-      class=${cx("rounded-lg px-3 py-1.5", v.mode === m ? "bg-brand text-white" : "bg-slate-100 text-slate-600")}>${label}</button>`;
+      class=${cx("rounded-lg px-3 py-1.5", v.mode === m ? "bg-brand text-white" : "bg-black/[0.05] text-ink/75")}>${label}</button>`;
   return html`
     <div class="space-y-3">
       <div class="flex flex-wrap gap-2 text-sm">
@@ -1001,9 +1006,9 @@ function SourceInput({ value, onChange }) {
       ${v.mode === "file"
         ? html`
           <div>
-            <input type="file" class="block w-full text-sm text-slate-600 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-100 file:px-3 file:py-2 file:text-sm file:font-medium hover:file:bg-slate-200"
+            <input type="file" class="block w-full text-sm text-ink/75 file:mr-3 file:rounded-lg file:border-0 file:bg-black/[0.05] file:px-3 file:py-2 file:text-sm file:font-medium hover:file:bg-line"
               onChange=${(e) => onChange({ ...v, file: e.target.files[0] || null })} />
-            <p class="mt-1 text-xs text-slate-400">PDF, DOCX, TXT, imagem, áudio ou vídeo — até 50 MB. Para vídeos/áudios grandes, use um link (YouTube não listado, Loom, Drive).</p>
+            <p class="mt-1 text-xs text-muted">PDF, DOCX, TXT, imagem, áudio ou vídeo — até 50 MB. Para vídeos/áudios grandes, use um link (YouTube não listado, Loom, Drive).</p>
             ${v.file && v.file.size > MAX_UPLOAD ? html`<p class="mt-1 text-xs text-red-600">Arquivo acima de 50 MB. Use um link.</p>` : null}
           </div>`
         : v.mode === "link"
@@ -1018,7 +1023,7 @@ function SourceInput({ value, onChange }) {
           <div class="space-y-2">
             <textarea class=${cx(inputCls, "min-h-[220px] font-mono text-xs")} placeholder="Escreva em Markdown…"
               value=${v.conteudo_md || ""} onInput=${(e) => onChange({ ...v, conteudo_md: e.target.value })}></textarea>
-            <p class="text-xs text-slate-400">Aceita Markdown (títulos, listas, tabelas, links, código). É renderizado formatado na página do documento.</p>
+            <p class="text-xs text-muted">Aceita Markdown (títulos, listas, tabelas, links, código). É renderizado formatado na página do documento.</p>
           </div>`}
     </div>`;
 }
@@ -1180,11 +1185,11 @@ function NewDocPage({ me, sections, query }) {
 
   return html`
     <form onSubmit=${save}>
-      <h1 class="text-2xl font-semibold text-slate-800">Novo documento</h1>
+      <h1 class="text-2xl font-semibold text-ink">Novo documento</h1>
       <div class="mt-5 max-w-2xl space-y-5">
         <${DocFields} f=${f} setF=${setF} sections=${sections} profiles=${profiles} />
         <div>
-          <span class="mb-1 block text-sm font-medium text-slate-700">Arquivo, link ou texto <span class="text-brand">*</span></span>
+          <span class="mb-1 block text-sm font-medium text-ink">Arquivo, link ou texto <span class="text-brand">*</span></span>
           <${SourceInput} value=${src} onChange=${setSrc} />
         </div>
         <div class="flex gap-2">
@@ -1227,19 +1232,19 @@ function ProfilePage({ me, onProfileChanged }) {
 
   return html`
     <div class="max-w-lg">
-      <h1 class="text-2xl font-semibold text-slate-800">Meu perfil</h1>
+      <h1 class="text-2xl font-semibold text-ink">Meu perfil</h1>
       <div class="mt-6 space-y-6">
-        <div class="rounded-xl border border-slate-200 bg-white p-5">
-          <div class="text-sm text-slate-500">E-mail</div>
-          <div class="font-medium text-slate-800">${me.email}</div>
-          <div class="mt-1 text-xs text-slate-400">Papel: ${ROLE_LABEL[me.role]}</div>
+        <div class="rounded-xl border border-line bg-white p-5">
+          <div class="text-sm text-muted">E-mail</div>
+          <div class="font-medium text-ink">${me.email}</div>
+          <div class="mt-1 text-xs text-muted">Papel: ${ROLE_LABEL[me.role]}</div>
         </div>
-        <div class="rounded-xl border border-slate-200 bg-white p-5">
+        <div class="rounded-xl border border-line bg-white p-5">
           <${Field} label="Nome"><input class=${inputCls} value=${nome} onInput=${(e) => setNome(e.target.value)} /><//>
           <div class="mt-3"><${Btn} loading=${busy} onClick=${saveName}>Salvar nome<//></div>
         </div>
-        <div class="rounded-xl border border-slate-200 bg-white p-5">
-          <h2 class="mb-3 font-medium text-slate-800">Trocar senha</h2>
+        <div class="rounded-xl border border-line bg-white p-5">
+          <h2 class="mb-3 font-medium text-ink">Trocar senha</h2>
           <div class="space-y-3">
             <${Field} label="Nova senha"><input class=${inputCls} type="password" value=${pw} onInput=${(e) => setPw(e.target.value)} /><//>
             <${Field} label="Repita a nova senha"><input class=${inputCls} type="password" value=${pw2} onInput=${(e) => setPw2(e.target.value)} /><//>
@@ -1279,33 +1284,33 @@ function AdminPage({ me }) {
   return html`
     <div>
       <div class="flex items-center justify-between">
-        <h1 class="text-2xl font-semibold text-slate-800">Administração</h1>
+        <h1 class="text-2xl font-semibold text-ink">Administração</h1>
         <${Btn} onClick=${() => setShowCreate(true)}>+ Novo usuário<//>
       </div>
-      <p class="mt-1 text-sm text-slate-500">Crie contas, defina papéis e gere senhas temporárias. Não é necessário e-mail de confirmação.</p>
+      <p class="mt-1 text-sm text-muted">Crie contas, defina papéis e gere senhas temporárias. Não é necessário e-mail de confirmação.</p>
 
-      <div class="mt-6 overflow-x-auto rounded-xl border border-slate-200 bg-white">
+      <div class="mt-6 overflow-x-auto rounded-xl border border-line bg-white">
         ${users === null
-          ? html`<div class="p-6 text-sm text-slate-400"><span class="spinner mr-2"></span>Carregando…</div>`
+          ? html`<div class="p-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
           : html`
           <table class="w-full min-w-[640px] text-left text-sm">
-            <thead class="border-b border-slate-100 text-xs uppercase tracking-wide text-slate-400">
+            <thead class="border-b border-line text-xs uppercase tracking-wide text-muted">
               <tr><th class="px-4 py-3 font-medium">Pessoa</th><th class="px-4 py-3 font-medium">Papel</th><th class="px-4 py-3 font-medium">Desde</th><th class="px-4 py-3"></th></tr>
             </thead>
-            <tbody class="divide-y divide-slate-50">
+            <tbody class="divide-y divide-line">
               ${users.map((u) => html`
                 <tr key=${u.id}>
-                  <td class="px-4 py-3"><div class="font-medium text-slate-800">${u.nome || "—"}</div><div class="text-xs text-slate-400">${u.email}</div></td>
+                  <td class="px-4 py-3"><div class="font-medium text-ink">${u.nome || "—"}</div><div class="text-xs text-muted">${u.email}</div></td>
                   <td class="px-4 py-3">
                     <select class=${cx(inputCls, "w-auto py-1")} value=${u.role} disabled=${u.id === me.id}
                       onChange=${(e) => setRole(u, e.target.value)}>
                       <option value="leitor">Leitor</option><option value="editor">Editor</option><option value="admin">Admin</option>
                     </select>
                   </td>
-                  <td class="px-4 py-3 text-slate-500">${fmtDate(u.created_at)}</td>
+                  <td class="px-4 py-3 text-muted">${fmtDate(u.created_at)}</td>
                   <td class="px-4 py-3 text-right">
                     <div class="flex justify-end gap-2">
-                      <button class="text-xs text-slate-500 hover:text-slate-800" onClick=${() => resetPw(u)}>Nova senha</button>
+                      <button class="text-xs text-muted hover:text-ink" onClick=${() => resetPw(u)}>Nova senha</button>
                       ${u.id !== me.id ? html`<button class="text-xs text-red-500 hover:text-red-700" onClick=${() => removeUser(u)}>Excluir</button>` : null}
                     </div>
                   </td>
@@ -1319,8 +1324,8 @@ function AdminPage({ me }) {
 
       ${tempResult && html`
         <${Modal} title="Senha temporária" onClose=${() => setTempResult(null)}>
-          <p class="text-sm text-slate-600">Envie estes dados para <b>${tempResult.email}</b> por um canal seguro. Peça para trocar a senha em “Meu perfil” no primeiro acesso.</p>
-          <div class="mt-3 rounded-lg bg-slate-50 p-3 font-mono text-sm">
+          <p class="text-sm text-ink/75">Envie estes dados para <b>${tempResult.email}</b> por um canal seguro. Peça para trocar a senha em “Meu perfil” no primeiro acesso.</p>
+          <div class="mt-3 rounded-lg bg-black/[0.03] p-3 font-mono text-sm">
             <div>E-mail: ${tempResult.email}</div>
             <div>Senha: <b>${tempResult.senha}</b></div>
           </div>
@@ -1371,7 +1376,7 @@ function statusDaFerramenta(f) {
 
 function StatusBadge({ status }) {
   if (status === "checando")
-    return html`<${Badge} class="bg-slate-100 text-slate-500"><span class="spinner mr-1" style="width:12px;height:12px"></span>checando<//>`;
+    return html`<${Badge} class="bg-black/[0.05] text-muted"><span class="spinner mr-1" style="width:12px;height:12px"></span>checando<//>`;
   const s = FERRAMENTA_STATUS[status] || FERRAMENTA_STATUS.desconectada;
   return html`<${Badge} class=${s.cls}><span class=${cx("mr-1.5 inline-block h-1.5 w-1.5 rounded-full", s.dot)}></span>${s.label}<//>`;
 }
@@ -1409,7 +1414,7 @@ function FerramentasPage({ me }) {
   useEffect(() => { if (tools && tools.length) runChecks(tools); /* eslint-disable-next-line */ }, [tools === null]);
 
   if (tools === null)
-    return html`<div class="text-sm text-slate-400"><span class="spinner mr-2"></span>Carregando…</div>`;
+    return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
 
   const cats = [...new Set(tools.map((f) => f.categoria))];
   const filtered = tools.filter((f) =>
@@ -1423,8 +1428,8 @@ function FerramentasPage({ me }) {
     <div>
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 class="flex items-center gap-2 text-2xl font-semibold text-slate-800">🧰 Ferramentas</h1>
-          <p class="mt-1 max-w-2xl text-sm text-slate-500">
+          <h1 class="flex items-center gap-2 text-2xl font-semibold text-ink">🧰 Ferramentas</h1>
+          <p class="mt-1 max-w-2xl text-sm text-muted">
             Tudo que a OS usa ou que fica conectado à operação, com o status atual e o que cada uma faz aqui.
           </p>
         </div>
@@ -1436,9 +1441,9 @@ function FerramentasPage({ me }) {
 
       <div class="mt-4 flex flex-wrap gap-2 text-xs">
         ${Object.entries(resumo).map(([s, n]) => html`
-          <button class="inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 ring-1 ring-slate-200 hover:bg-slate-50"
+          <button class="inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 ring-1 ring-line hover:bg-black/[0.04]"
             onClick=${() => setStatusFilter(statusFilter === s ? "" : s)}>
-            <span class=${cx("inline-block h-1.5 w-1.5 rounded-full", (FERRAMENTA_STATUS[s] || {}).dot || "bg-slate-400")}></span>
+            <span class=${cx("inline-block h-1.5 w-1.5 rounded-full", (FERRAMENTA_STATUS[s] || {}).dot || "bg-[#b3aca0]")}></span>
             ${(FERRAMENTA_STATUS[s] || {}).label || s}: <b>${n}</b>
           </button>`)}
       </div>
@@ -1456,17 +1461,17 @@ function FerramentasPage({ me }) {
 
       <div class="mt-4 space-y-2">
         ${filtered.map((f) => html`
-          <div key=${f.id} class="rounded-xl border border-slate-200 bg-white p-4">
+          <div key=${f.id} class="rounded-xl border border-line bg-white p-4">
             <div class="flex flex-wrap items-start justify-between gap-3">
               <div class="min-w-0">
                 <div class="flex flex-wrap items-center gap-2">
-                  <span class="font-medium text-slate-800">${f.nome}</span>
+                  <span class="font-medium text-ink">${f.nome}</span>
                   <${StatusBadge} status=${statusDaFerramenta(f)} />
-                  <${Badge} class="bg-slate-100 text-slate-500">${CAT_LABEL[f.categoria] || f.categoria}<//>
-                  <span class="text-[11px] uppercase tracking-wide text-slate-300">${f.check_type === "auto" ? "auto" : "manual"}</span>
+                  <${Badge} class="bg-black/[0.05] text-muted">${CAT_LABEL[f.categoria] || f.categoria}<//>
+                  <span class="text-[11px] uppercase tracking-wide text-muted/60">${f.check_type === "auto" ? "auto" : "manual"}</span>
                 </div>
-                <p class="rich mt-1.5 text-sm text-slate-600">${f.descricao_os || "—"}</p>
-                <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
+                <p class="rich mt-1.5 text-sm text-ink/75">${f.descricao_os || "—"}</p>
+                <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
                   ${f.responsavel ? html`<span>Responsável: ${f.responsavel.nome || f.responsavel.email}</span>` : null}
                   ${f.check_type === "auto" && f.ultimo_check_at
                     ? html`<span>Verificado ${fmtDate(f.ultimo_check_at, true)}${f.ultimo_check_detalhe ? " · " + f.ultimo_check_detalhe : ""}</span>` : null}
@@ -1474,7 +1479,7 @@ function FerramentasPage({ me }) {
                   ${f.url ? html`<a href=${f.url} target="_blank" rel="noopener" class="text-brand hover:underline">abrir ↗</a>` : null}
                 </div>
               </div>
-              ${canEdit && html`<button class="shrink-0 text-xs text-slate-400 hover:text-slate-700" onClick=${() => setEditing(f)}>editar</button>`}
+              ${canEdit && html`<button class="shrink-0 text-xs text-muted hover:text-ink" onClick=${() => setEditing(f)}>editar</button>`}
             </div>
           </div>`)}
         ${filtered.length === 0 ? html`<${Empty} title="Nada com esse filtro" icon="🔍" />` : null}
@@ -1582,7 +1587,7 @@ function FerramentaModal({ ferramenta, me, onClose, onSaved }) {
             <${Field} label="Nota (opcional)"><input class=${inputCls} value=${f.status_manual_nota} onInput=${set("status_manual_nota")} /><//>
           </div>
         ` : html`
-          <div class="space-y-3 rounded-lg bg-slate-50 p-3">
+          <div class="space-y-3 rounded-lg bg-black/[0.03] p-3">
             <${Field} label="Tipo de checagem" hint="Só endereços que respondem CORS podem ser testados pelo navegador (Supabase, a Edge Function e o site no GitHub Pages).">
               <select class=${inputCls} value=${f.check_kind} onChange=${set("check_kind")}>
                 <option value="supabase_rest">Supabase REST</option>
@@ -1606,6 +1611,55 @@ function FerramentaModal({ ferramenta, me, onClose, onSaved }) {
     <//>`;
 }
 
+/* ============================ Setores em construção / Pedir a IA ============================ */
+
+function SetorEmConstrucao({ setor }) {
+  return html`
+    <div>
+      <h1 class="flex items-center gap-2 text-2xl font-semibold text-ink">${setor.icone} ${setor.nome}</h1>
+      <div class="mt-6 rounded-2xl border border-dashed border-line bg-card/70 px-6 py-14 text-center">
+        <div class="text-4xl">🚧</div>
+        <div class="mt-3 font-medium text-ink">Setor em construção</div>
+        <p class="mx-auto mt-1 max-w-md text-sm text-muted">${setor.wip}</p>
+        <p class="mx-auto mt-3 max-w-md text-xs text-muted">
+          A estrutura já está no menu. O conteúdo entra nas próximas etapas da OS.
+        </p>
+      </div>
+    </div>`;
+}
+
+function PedirIA() {
+  return html`
+    <div class="max-w-2xl">
+      <h1 class="flex items-center gap-2 text-2xl font-semibold text-ink">✨ Pedir a IA</h1>
+      <p class="mt-1 text-sm text-muted">
+        Um lugar para perguntar em linguagem natural e receber respostas com base no que a empresa já
+        documentou (marca, metodologia, avatar, playbooks de venda, YouTube, etc.).
+      </p>
+
+      <div class="mt-6 rounded-2xl border border-line bg-card p-5">
+        <div class="text-sm font-medium text-ink">Em construção</div>
+        <p class="mt-1 text-sm text-muted">
+          O chat que responde aqui dentro entra numa próxima etapa (depende de uma chave de IA da empresa).
+          Enquanto isso, use o Claude diretamente — todas as skills da empresa já estão carregadas nele.
+        </p>
+        <div class="mt-4 flex flex-wrap gap-2">
+          <${Btn} as="a" href="https://claude.ai" target="_blank" rel="noopener">Abrir o Claude ↗<//>
+          <${Btn} variant="ghost" as="a" href="#/">Ver a Base de Conhecimento<//>
+        </div>
+      </div>
+
+      <div class="mt-4 rounded-2xl border border-line bg-card p-5">
+        <div class="text-sm font-medium text-ink">Como pedir bem</div>
+        <ul class="mt-2 space-y-1.5 text-sm text-muted">
+          <li>• Diga o contexto: para quem é, onde vai ser usado, qual o objetivo.</li>
+          <li>• Aponte a fonte: "com base no documento de marca", "seguindo a metodologia".</li>
+          <li>• Peça o formato: bullet points, script, e-mail, tabela.</li>
+        </ul>
+      </div>
+    </div>`;
+}
+
 /* ============================ Router / App ============================ */
 
 function Router({ route, me, sections, reload }) {
@@ -1615,8 +1669,11 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "doc") return html`<${DocDetail} id=${p1} me=${me} sections=${sections} />`;
   if (p0 === "novo") return html`<${NewDocPage} me=${me} sections=${sections} query=${route.query} />`;
   if (p0 === "ferramentas") return html`<${FerramentasPage} me=${me} />`;
+  if (p0 === "pedir-ia") return html`<${PedirIA} />`;
   if (p0 === "perfil") return html`<${ProfilePage} me=${me} onProfileChanged=${reload} />`;
   if (p0 === "admin" && me.role === "admin") return html`<${AdminPage} me=${me} />`;
+  const setor = SETORES.find((s) => s.path === route.path && s.wip);
+  if (setor) return html`<${SetorEmConstrucao} setor=${setor} />`;
   return html`<${Empty} title="Página não encontrada" icon="🧭"><a class="text-brand" href="#/">Voltar ao início</a><//>`;
 }
 
@@ -1632,6 +1689,19 @@ function App() {
     const { data: sub } = sb.auth.onAuthStateChange((_event, s) => setSession(s ?? null));
     return () => sub.subscription.unsubscribe();
   }, []);
+
+  // Período de testes: entrada liberada. Sem sessão, entra sozinho com a conta compartilhada.
+  const openMode = cfg.AUTH_MODE === "open" && cfg.GUEST_EMAIL && cfg.GUEST_PASSWORD;
+  useEffect(() => {
+    if (!openMode || session !== null) return;
+    let done = false;
+    setTimeout(async () => {
+      if (done) return;
+      const { error } = await sb.auth.signInWithPassword({ email: cfg.GUEST_EMAIL, password: cfg.GUEST_PASSWORD });
+      if (error) notify("Falha ao abrir a sessão de testes: " + error.message, "err");
+    }, 0);
+    return () => { done = true; };
+  }, [session, openMode]);
 
   const loadProfile = useCallback(async (sess) => {
     if (!sess) return;
@@ -1663,22 +1733,22 @@ function App() {
   }, [session, loadProfile]);
 
   if (session === undefined) return html`<${Splash} /><${Toaster} />`;
-  if (!session) return html`<${Login} /><${Toaster} />`;
+  if (!session) return openMode ? html`<${Splash} /><${Toaster} />` : html`<${Login} /><${Toaster} />`;
   if (!me) {
     return html`
-      <div class="flex min-h-screen flex-col items-center justify-center gap-3 text-sm text-slate-500">
+      <div class="flex min-h-screen flex-col items-center justify-center gap-3 text-sm text-muted">
         ${meError
           ? html`
             <div>Não foi possível carregar seu perfil.</div>
             <${Btn} variant="ghost" onClick=${() => loadProfile(session)}>Tentar de novo<//>
-            <button class="text-xs text-slate-400 hover:text-slate-600" onClick=${() => sb.auth.signOut()}>Sair</button>`
+            <button class="text-xs text-muted hover:text-ink/75" onClick=${() => sb.auth.signOut()}>Sair</button>`
           : html`<span class="spinner mr-2"></span> Carregando…`}
       </div>
       <${Toaster} />`;
   }
 
   return html`
-    <${Shell} me=${me} sections=${sections} route=${route}>
+    <${Shell} me=${me} route=${route}>
       <${Router} route=${route} me=${me} sections=${sections} reload=${reload} />
     <//>
     <${Toaster} />`;

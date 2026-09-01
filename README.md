@@ -20,6 +20,13 @@ no menu como "em breve" e serão adicionados nos próximos módulos.
 - **Segurança**: todo acesso a dados passa por Row Level Security (RLS). A
   `ANON KEY` em `config.js` é pública por design.
 
+### Acesso (período de testes)
+
+`config.js` está com `AUTH_MODE: "open"`: a tela de login some e o app entra sozinho
+com a conta compartilhada `teste@os.tiadoingles.com.br` (papel **editor**). Para
+voltar a exigir login, troque para `AUTH_MODE: "login"`. As regras de RLS continuam
+valendo — o acesso "aberto" é só a conveniência de não digitar login.
+
 ### Papéis
 
 | Papel  | Pode |
