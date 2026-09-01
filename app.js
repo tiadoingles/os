@@ -1251,36 +1251,61 @@ function Router({ route, me, sections, reload }) {
 }
 
 function App() {
-  const [session, setSession] = useState(undefined);
+  const [session, setSession] = useState(undefined); // undefined = ainda carregando
   const [me, setMe] = useState(null);
+  const [meError, setMeError] = useState(false);
   const [sections, setSections] = useState([]);
   const route = useRoute();
 
+  // onAuthStateChange dispara INITIAL_SESSION ao assinar — não é preciso getSession().
   useEffect(() => {
-    sb.auth.getSession().then(({ data }) => setSession(data.session ?? null));
-    const { data: sub } = sb.auth.onAuthStateChange((_e, s) => setSession(s ?? null));
+    const { data: sub } = sb.auth.onAuthStateChange((_event, s) => setSession(s ?? null));
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  const reload = useCallback(async () => {
-    if (!session) return;
-    const [{ data: prof }, secs] = await Promise.all([
-      sb.from("profiles").select("*").eq("id", session.user.id).single(),
-      fetchSections().catch(() => []),
-    ]);
-    setMe(prof || null);
-    setSections(secs);
-  }, [session]);
+  const loadProfile = useCallback(async (sess) => {
+    if (!sess) return;
+    setMeError(false);
+    try {
+      const [{ data: prof, error }, secs] = await Promise.all([
+        sb.from("profiles").select("*").eq("id", sess.user.id).single(),
+        fetchSections().catch(() => []),
+      ]);
+      if (error) throw error;
+      setMe(prof || null);
+      setSections(secs);
+    } catch (e) {
+      setMeError(true);
+      notify(errMsg(e), "err");
+    }
+  }, []);
+
+  // reload() para atualizações manuais (fora do contexto do callback de auth).
+  const reload = useCallback(() => loadProfile(session), [loadProfile, session]);
 
   useEffect(() => {
     if (session === undefined) return;
-    if (!session) { setMe(null); return; }
-    reload().catch((e) => notify(errMsg(e), "err"));
-  }, [session, reload]);
+    if (!session) { setMe(null); setMeError(false); return; }
+    // setTimeout(0): tira as chamadas ao Supabase de dentro do "lock" que o
+    // GoTrue mantém enquanto processa o evento SIGNED_IN (evita travar no 1º login).
+    const t = setTimeout(() => loadProfile(session), 0);
+    return () => clearTimeout(t);
+  }, [session, loadProfile]);
 
   if (session === undefined) return html`<${Splash} /><${Toaster} />`;
   if (!session) return html`<${Login} /><${Toaster} />`;
-  if (!me) return html`<${Splash} /><${Toaster} />`;
+  if (!me) {
+    return html`
+      <div class="flex min-h-screen flex-col items-center justify-center gap-3 text-sm text-slate-500">
+        ${meError
+          ? html`
+            <div>Não foi possível carregar seu perfil.</div>
+            <${Btn} variant="ghost" onClick=${() => loadProfile(session)}>Tentar de novo<//>
+            <button class="text-xs text-slate-400 hover:text-slate-600" onClick=${() => sb.auth.signOut()}>Sair</button>`
+          : html`<span class="spinner mr-2"></span> Carregando…`}
+      </div>
+      <${Toaster} />`;
+  }
 
   return html`
     <${Shell} me=${me} sections=${sections} route=${route}>
