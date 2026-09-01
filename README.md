@@ -4,6 +4,10 @@ Aplicação interna da empresa. **Módulo 1: Base de Conhecimento** — tudo sob
 empresa, metodologia, produto, cliente e resultados, com biblioteca de documentos
 versionada.
 
+A seção **Skills e Playbooks** guarda as skills do Claude da empresa como
+documentos em Markdown, sincronizadas automaticamente a partir dos arquivos-fonte
+(ver [`scripts/README.md`](scripts/README.md)).
+
 Os setores **Financeiro, Comercial, CS/Suporte, Conteúdo e Ferramentas** aparecem
 no menu como "em breve" e serão adicionados nos próximos módulos.
 

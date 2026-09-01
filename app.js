@@ -2,6 +2,9 @@ import { render } from "preact";
 import { useState, useEffect, useMemo, useCallback, useRef } from "preact/hooks";
 import { html } from "htm/preact";
 import { createClient } from "@supabase/supabase-js";
+import { marked } from "marked";
+
+marked.setOptions({ gfm: true, breaks: false });
 
 /* ============================ Setup ============================ */
 
@@ -121,10 +124,10 @@ async function signedUrl(path) {
 /* ============================ Data layer ============================ */
 
 const DOC_SELECT =
-  "id, titulo, descricao, kind, tags, status, created_at, updated_at, " +
+  "id, titulo, descricao, kind, tags, status, origem, chave_externa, created_at, updated_at, " +
   "responsavel:responsavel_id(id,nome,email), " +
   "section:section_id(id,slug,nome,icone), " +
-  "current:current_version_id(id,versao,storage_path,external_url,file_name,mime_type,file_size)";
+  "current:current_version_id(id,versao,storage_path,external_url,conteudo_md,file_name,mime_type,file_size)";
 
 async function fetchSections() {
   const { data, error } = await sb.from("kb_sections").select("*").order("ordem");
@@ -205,8 +208,11 @@ async function insertVersion({ docId, sectionSlug, versao, source, meId, changel
   } else if (source.external_url) {
     row.external_url = source.external_url.trim();
     row.file_name = (source.link_label || "").trim() || null;
+  } else if (source.conteudo_md) {
+    row.conteudo_md = source.conteudo_md;
+    row.file_name = (source.link_label || "").trim() || null;
   } else {
-    throw new Error("Envie um arquivo ou informe um link.");
+    throw new Error("Envie um arquivo, informe um link ou escreva o texto.");
   }
   const { error } = await sb.from("kb_document_versions").insert(row);
   if (error) throw error;
@@ -705,6 +711,29 @@ function DocTable({ docs, showSection }) {
     </div>`;
 }
 
+function sanitizeHtml(dirty) {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = dirty;
+  tpl.content.querySelectorAll("script,style,iframe,object,embed,link,meta,form").forEach((n) => n.remove());
+  tpl.content.querySelectorAll("*").forEach((el) => {
+    [...el.attributes].forEach((a) => {
+      const n = a.name.toLowerCase();
+      if (n.startsWith("on")) el.removeAttribute(a.name);
+      if ((n === "href" || n === "src") && /^\s*javascript:/i.test(a.value)) el.removeAttribute(a.name);
+    });
+    if (el.tagName === "A") { el.setAttribute("target", "_blank"); el.setAttribute("rel", "noopener nofollow"); }
+  });
+  return tpl.innerHTML;
+}
+
+function Markdown({ text }) {
+  const htmlStr = useMemo(() => {
+    try { return sanitizeHtml(marked.parse(text || "")); }
+    catch (_) { return "<pre>" + (text || "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) + "</pre>"; }
+  }, [text]);
+  return html`<div class="prose-doc rounded-xl border border-slate-200 bg-white p-5" dangerouslySetInnerHTML=${{ __html: htmlStr }}></div>`;
+}
+
 function FilePreview({ version }) {
   const [url, setUrl] = useState(null);
   const [err, setErr] = useState(null);
@@ -715,7 +744,19 @@ function FilePreview({ version }) {
     }
   }, [version && version.id]);
 
-  if (!version) return html`<${Empty} title="Sem arquivo nesta versão" icon="📄" />`;
+  if (!version) return html`<${Empty} title="Sem conteúdo nesta versão" icon="📄" />`;
+
+  if (version.conteudo_md != null) {
+    return html`
+      <div>
+        <${Markdown} text=${version.conteudo_md} />
+        <${Btn} variant="ghost" as="a" class="mt-3"
+          href=${"data:text/markdown;charset=utf-8," + encodeURIComponent(version.conteudo_md)}
+          target="_blank" rel="noopener" download=${(version.file_name || "documento") + ".md"}>
+          ⬇️ Baixar .md
+        <//>
+      </div>`;
+  }
 
   if (version.external_url) {
     const emb = embedUrl(version.external_url);
@@ -814,6 +855,7 @@ function DocDetail({ id, me, sections }) {
 
       <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
         <${Badge} class=${STATUS_STYLE[doc.status]}>${STATUSES.find((s) => s[0] === doc.status)[1]}<//>
+        ${doc.origem === "skill-sync" && html`<${Badge} class="bg-indigo-100 text-indigo-700">🔄 sincronizada</${Badge}>`}
         <span>${KIND_ICON[doc.kind]} ${KIND_LABEL[doc.kind]}</span>
         <span>·</span><span>Responsável: ${doc.responsavel ? (doc.responsavel.nome || doc.responsavel.email) : "—"}</span>
         <span>·</span><span>Atualizado ${fmtDate(doc.updated_at, true)}</span>
@@ -824,15 +866,15 @@ function DocDetail({ id, me, sections }) {
         ? html`<div class="mt-3 flex flex-wrap gap-1">${doc.tags.map((t) => html`<${Badge} class="bg-slate-100 text-slate-500">${t}<//>`)}</div>`
         : null}
 
-      <div class="mt-6 grid gap-6 lg:grid-cols-[1fr_280px]">
-        <div>
+      <div class="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
+        <div class="min-w-0">
           <h2 class="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-400">
             ${shown && shown.id === (doc.current && doc.current.id) ? "Versão atual" : "Versão " + (shown ? shown.versao : "")}
           </h2>
           <${FilePreview} version=${shown} />
         </div>
 
-        <div>
+        <div class="min-w-0">
           <h2 class="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-400">Histórico de versões</h2>
           <ul class="space-y-1.5">
             ${versions.map((v) => html`
@@ -846,7 +888,7 @@ function DocDetail({ id, me, sections }) {
                     <span class="font-medium text-slate-700">v${v.versao}${doc.current && doc.current.id === v.id ? " · atual" : ""}</span>
                     <span class="text-xs text-slate-400">${fmtDate(v.uploaded_at)}</span>
                   </div>
-                  <div class="truncate text-xs text-slate-500">${v.external_url ? "🔗 " + (v.file_name || v.external_url) : (v.file_name || "arquivo")}</div>
+                  <div class="truncate text-xs text-slate-500">${v.external_url ? "🔗 " + (v.file_name || v.external_url) : v.conteudo_md != null ? "📝 " + (v.file_name || "texto") : (v.file_name || "arquivo")}</div>
                   ${v.changelog ? html`<div class="mt-0.5 text-xs text-slate-400">${v.changelog}</div>` : null}
                 </button>
               </li>`)}
@@ -876,15 +918,15 @@ function DocDetail({ id, me, sections }) {
 }
 
 function SourceInput({ value, onChange }) {
-  // value: { mode: 'file'|'link', file, external_url, link_label }
+  // value: { mode: 'file'|'link'|'texto', file, external_url, conteudo_md, link_label }
   const v = value;
+  const tab = (m, label) => html`
+    <button type="button" onClick=${() => onChange({ ...v, mode: m })}
+      class=${cx("rounded-lg px-3 py-1.5", v.mode === m ? "bg-brand text-white" : "bg-slate-100 text-slate-600")}>${label}</button>`;
   return html`
     <div class="space-y-3">
-      <div class="flex gap-2 text-sm">
-        <button type="button" onClick=${() => onChange({ ...v, mode: "file" })}
-          class=${cx("rounded-lg px-3 py-1.5", v.mode === "file" ? "bg-brand text-white" : "bg-slate-100 text-slate-600")}>Enviar arquivo</button>
-        <button type="button" onClick=${() => onChange({ ...v, mode: "link" })}
-          class=${cx("rounded-lg px-3 py-1.5", v.mode === "link" ? "bg-brand text-white" : "bg-slate-100 text-slate-600")}>Usar link</button>
+      <div class="flex flex-wrap gap-2 text-sm">
+        ${tab("file", "Enviar arquivo")} ${tab("link", "Usar link")} ${tab("texto", "Escrever texto")}
       </div>
       ${v.mode === "file"
         ? html`
@@ -894,12 +936,19 @@ function SourceInput({ value, onChange }) {
             <p class="mt-1 text-xs text-slate-400">PDF, DOCX, TXT, imagem, áudio ou vídeo — até 50 MB. Para vídeos/áudios grandes, use um link (YouTube não listado, Loom, Drive).</p>
             ${v.file && v.file.size > MAX_UPLOAD ? html`<p class="mt-1 text-xs text-red-600">Arquivo acima de 50 MB. Use um link.</p>` : null}
           </div>`
-        : html`
+        : v.mode === "link"
+        ? html`
           <div class="space-y-2">
             <input class=${inputCls} placeholder="https://…" value=${v.external_url || ""}
               onInput=${(e) => onChange({ ...v, external_url: e.target.value })} />
             <input class=${inputCls} placeholder="Rótulo do link (opcional, ex.: “Aula 3 — YouTube”)" value=${v.link_label || ""}
               onInput=${(e) => onChange({ ...v, link_label: e.target.value })} />
+          </div>`
+        : html`
+          <div class="space-y-2">
+            <textarea class=${cx(inputCls, "min-h-[220px] font-mono text-xs")} placeholder="Escreva em Markdown…"
+              value=${v.conteudo_md || ""} onInput=${(e) => onChange({ ...v, conteudo_md: e.target.value })}></textarea>
+            <p class="text-xs text-slate-400">Aceita Markdown (títulos, listas, tabelas, links, código). É renderizado formatado na página do documento.</p>
           </div>`}
     </div>`;
 }
@@ -909,6 +958,10 @@ function sourceFromInput(v) {
     if (!v.file) throw new Error("Selecione um arquivo.");
     if (v.file.size > MAX_UPLOAD) throw new Error("Arquivo acima de 50 MB. Use um link.");
     return { file: v.file };
+  }
+  if (v.mode === "texto") {
+    if (!v.conteudo_md || !v.conteudo_md.trim()) throw new Error("Escreva o texto do documento.");
+    return { conteudo_md: v.conteudo_md };
   }
   if (!v.external_url || !/^https?:\/\//i.test(v.external_url.trim())) throw new Error("Informe um link válido (http/https).");
   return { external_url: v.external_url, link_label: v.link_label };
@@ -1061,7 +1114,7 @@ function NewDocPage({ me, sections, query }) {
       <div class="mt-5 max-w-2xl space-y-5">
         <${DocFields} f=${f} setF=${setF} sections=${sections} profiles=${profiles} />
         <div>
-          <span class="mb-1 block text-sm font-medium text-slate-700">Arquivo ou link <span class="text-brand">*</span></span>
+          <span class="mb-1 block text-sm font-medium text-slate-700">Arquivo, link ou texto <span class="text-brand">*</span></span>
           <${SourceInput} value=${src} onChange=${setSrc} />
         </div>
         <div class="flex gap-2">
