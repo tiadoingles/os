@@ -350,6 +350,18 @@ async function adminCall(body) {
   return data;
 }
 
+// Edge Function "ai": classify (sugere seção) e ask (pergunta sobre a base).
+async function aiCall(action, extra = {}) {
+  const { data, error } = await sb.functions.invoke("ai", { body: { action, ...extra } });
+  if (error) {
+    let msg = error.message;
+    try { const j = await error.context.json(); if (j && j.error) msg = j.error; } catch (_) { /* ignore */ }
+    throw new Error(msg);
+  }
+  if (data && data.error && data.configured !== false) throw new Error(data.error);
+  return data;
+}
+
 /* ============================ UI primitives ============================ */
 
 function Btn({ variant = "primary", as = "button", href, loading, disabled, children, class: cls, ...rest }) {
@@ -1145,6 +1157,47 @@ function DocFields({ f, setF, sections, profiles }) {
     </div>`;
 }
 
+function SugestaoIA({ f, src, sections, onApply }) {
+  const [busy, setBusy] = useState(false);
+  const [sug, setSug] = useState(null);       // { secao_slug, secao_nome, motivo, confianca, tags_sugeridas }
+  const [naoConfig, setNaoConfig] = useState(false);
+
+  async function sugerir() {
+    setBusy(true); setSug(null);
+    try {
+      const texto = src.mode === "texto" ? (src.conteudo_md || "") : (f.descricao || "");
+      const d = await aiCall("classify", { titulo: f.titulo, texto });
+      if (d && d.configured === false) { setNaoConfig(true); return; }
+      setSug(d);
+    } catch (e) { notify(errMsg(e), "err"); }
+    finally { setBusy(false); }
+  }
+
+  const alvo = sug && sections.find((s) => s.slug === sug.secao_slug);
+
+  return html`
+    <div class="rounded-xl border border-line bg-black/[0.02] p-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <${Btn} variant="ghost" loading=${busy} disabled=${!f.titulo.trim()} onClick=${sugerir}>✨ Sugerir categoria (IA)<//>
+        ${!f.titulo.trim() ? html`<span class="text-xs text-muted">preencha o título primeiro</span>` : null}
+        ${naoConfig ? html`<span class="text-xs text-muted">IA ainda não conectada</span>` : null}
+      </div>
+      ${sug && html`
+        <div class="mt-3 text-sm">
+          <div>
+            Sugestão: <b>${alvo ? alvo.nome : (sug.secao_nome || "—")}</b>
+            ${sug.motivo ? html`<span class="text-muted"> — ${sug.motivo}</span>` : null}
+          </div>
+          ${sug.tags_sugeridas && sug.tags_sugeridas.length
+            ? html`<div class="mt-1 text-xs text-muted">Tags sugeridas: ${sug.tags_sugeridas.join(", ")}</div>` : null}
+          <div class="mt-2 flex gap-2">
+            <${Btn} disabled=${!alvo} onClick=${() => { onApply(alvo.id, sug.tags_sugeridas || []); setSug(null); }}>Aplicar<//>
+            <${Btn} variant="subtle" onClick=${() => setSug(null)}>Ignorar<//>
+          </div>
+        </div>`}
+    </div>`;
+}
+
 function NewDocPage({ me, sections, query }) {
   const [f, setF] = useState({
     titulo: "",
@@ -1188,6 +1241,12 @@ function NewDocPage({ me, sections, query }) {
       <h1 class="text-2xl font-semibold text-ink">Novo documento</h1>
       <div class="mt-5 max-w-2xl space-y-5">
         <${DocFields} f=${f} setF=${setF} sections=${sections} profiles=${profiles} />
+        <${SugestaoIA} f=${f} src=${src} sections=${sections}
+          onApply=${(sid, tags) => setF((cur) => ({
+            ...cur,
+            section_id: sid,
+            tags: [...new Set([...(cur.tags ? cur.tags.split(",").map((t) => t.trim()).filter(Boolean) : []), ...tags])].join(", "),
+          }))} />
         <div>
           <span class="mb-1 block text-sm font-medium text-ink">Arquivo, link ou texto <span class="text-brand">*</span></span>
           <${SourceInput} value=${src} onChange=${setSrc} />
@@ -1629,33 +1688,64 @@ function SetorEmConstrucao({ setor }) {
 }
 
 function PedirIA() {
+  const [pergunta, setPergunta] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [resp, setResp] = useState(null);   // { resposta, fontes }
+  const [configured, setConfigured] = useState(null); // null=checando, bool
+
+  useEffect(() => {
+    aiCall("status").then((d) => setConfigured(!!(d && d.configured))).catch(() => setConfigured(false));
+  }, []);
+
+  async function perguntar(e) {
+    e && e.preventDefault();
+    if (!pergunta.trim()) return;
+    setBusy(true); setResp(null);
+    try {
+      const d = await aiCall("ask", { pergunta: pergunta.trim() });
+      if (d && d.configured === false) { setConfigured(false); return; }
+      setResp(d);
+    } catch (e2) { notify(errMsg(e2), "err"); }
+    finally { setBusy(false); }
+  }
+
   return html`
     <div class="max-w-2xl">
       <h1 class="flex items-center gap-2 text-2xl font-semibold text-ink">✨ Pedir a IA</h1>
       <p class="mt-1 text-sm text-muted">
-        Um lugar para perguntar em linguagem natural e receber respostas com base no que a empresa já
-        documentou (marca, metodologia, avatar, playbooks de venda, YouTube, etc.).
+        Pergunte em linguagem natural. A resposta é montada a partir dos documentos publicados na Base de Conhecimento.
       </p>
 
-      <div class="mt-6 rounded-2xl border border-line bg-card p-5">
-        <div class="text-sm font-medium text-ink">Em construção</div>
-        <p class="mt-1 text-sm text-muted">
-          O chat que responde aqui dentro entra numa próxima etapa (depende de uma chave de IA da empresa).
-          Enquanto isso, use o Claude diretamente — todas as skills da empresa já estão carregadas nele.
-        </p>
-        <div class="mt-4 flex flex-wrap gap-2">
-          <${Btn} as="a" href="https://claude.ai" target="_blank" rel="noopener">Abrir o Claude ↗<//>
-          <${Btn} variant="ghost" as="a" href="#/">Ver a Base de Conhecimento<//>
-        </div>
-      </div>
+      ${configured === false && html`
+        <div class="mt-5 rounded-2xl border border-[#efd9d3] bg-[#faefec] p-5">
+          <div class="text-sm font-medium text-ink">IA ainda não conectada</div>
+          <p class="mt-1 text-sm text-muted">
+            Falta o segredo <code class="rounded bg-black/[0.05] px-1">ANTHROPIC_API_KEY</code> nas Edge Functions do Supabase.
+            Depois de adicioná-lo, esta página funciona sozinha.
+          </p>
+        </div>`}
 
-      <div class="mt-4 rounded-2xl border border-line bg-card p-5">
-        <div class="text-sm font-medium text-ink">Como pedir bem</div>
-        <ul class="mt-2 space-y-1.5 text-sm text-muted">
-          <li>• Diga o contexto: para quem é, onde vai ser usado, qual o objetivo.</li>
-          <li>• Aponte a fonte: "com base no documento de marca", "seguindo a metodologia".</li>
-          <li>• Peça o formato: bullet points, script, e-mail, tabela.</li>
-        </ul>
+      <form onSubmit=${perguntar} class="mt-5">
+        <textarea class=${cx(inputCls, "min-h-[110px]")} placeholder="Ex.: Qual o tom de voz da marca para e-mails de vendas?"
+          value=${pergunta} onInput=${(e) => setPergunta(e.target.value)}
+          onKeyDown=${(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) perguntar(e); }} disabled=${configured === false}></textarea>
+        <div class="mt-2 flex items-center gap-2">
+          <${Btn} type="submit" loading=${busy} disabled=${configured === false}>Perguntar<//>
+          <span class="text-xs text-muted">⌘/Ctrl + Enter</span>
+        </div>
+      </form>
+
+      ${resp && html`
+        <div class="mt-5 rounded-2xl border border-line bg-card p-5">
+          <${Markdown} text=${resp.resposta} />
+          ${resp.fontes && resp.fontes.length ? html`
+            <div class="mt-4 border-t border-line pt-3 text-xs text-muted">
+              Fontes: ${resp.fontes.map((f, i) => html`<span>${i ? " · " : ""}${f.titulo}${f.secao ? " (" + f.secao + ")" : ""}</span>`)}
+            </div>` : null}
+        </div>`}
+
+      <div class="mt-4 text-xs text-muted">
+        Cada pergunta consome créditos da conta Anthropic da empresa.
       </div>
     </div>`;
 }
