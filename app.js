@@ -44,8 +44,27 @@ const FUTURE_SECTORS = [
   { nome: "Comercial", icone: "📈" },
   { nome: "CS / Suporte", icone: "🤝" },
   { nome: "Conteúdo", icone: "✍️" },
-  { nome: "Ferramentas", icone: "🧰" },
 ];
+
+const FERRAMENTA_STATUS = {
+  conectada: { label: "Conectada", cls: "bg-emerald-100 text-emerald-700", dot: "bg-emerald-500" },
+  erro: { label: "Erro", cls: "bg-red-100 text-red-700", dot: "bg-red-500" },
+  desconectada: { label: "Desconectada", cls: "bg-slate-200 text-slate-600", dot: "bg-slate-400" },
+  nao_configurada: { label: "Não configurada", cls: "bg-amber-100 text-amber-700", dot: "bg-amber-500" },
+};
+const FERRAMENTA_CATEGORIAS = [
+  ["infra", "Infra da OS"],
+  ["automacao", "Automação"],
+  ["dados", "Dados / Conhecimento"],
+  ["produtividade", "Produtividade"],
+  ["conteudo", "Conteúdo"],
+  ["marketing", "Marketing"],
+  ["financeiro", "Financeiro"],
+  ["comunicacao", "Comunicação"],
+  ["ia", "IA / Desenvolvimento"],
+  ["outros", "Outros"],
+];
+const CAT_LABEL = Object.fromEntries(FERRAMENTA_CATEGORIAS);
 
 const MAX_UPLOAD = 50 * 1024 * 1024; // 50 MB
 
@@ -169,6 +188,56 @@ async function fetchProfiles() {
     .from("profiles").select("id,nome,email,role").order("nome", { nullsFirst: false });
   if (error) throw error;
   return data || [];
+}
+
+/* ---- Ferramentas ---- */
+
+async function fetchFerramentas() {
+  const { data, error } = await sb
+    .from("os_ferramentas")
+    .select("*, responsavel:responsavel_id(id,nome,email)")
+    .order("ordem")
+    .order("nome");
+  if (error) throw error;
+  return data || [];
+}
+
+// Checagem automática feita no navegador. Só funciona para os endpoints que
+// respondem com CORS: o próprio Supabase, a Edge Function e o site no GitHub Pages.
+async function checkFerramenta(f) {
+  const t0 = performance.now();
+  try {
+    let resp;
+    if (f.check_kind === "supabase_rest") {
+      // consulta leve num endpoint real: 200 = serviço no ar (RLS pode devolver [])
+      resp = await fetch(cfg.SUPABASE_URL + "/rest/v1/kb_sections?select=id&limit=1", {
+        headers: { apikey: cfg.SUPABASE_ANON_KEY, Authorization: "Bearer " + cfg.SUPABASE_ANON_KEY },
+        cache: "no-store",
+      });
+    } else if (f.check_kind === "edge_function") {
+      resp = await fetch(f.check_url, { method: "OPTIONS", cache: "no-store" });
+    } else {
+      resp = await fetch(f.check_url, { method: "GET", cache: "no-store" });
+    }
+    const ms = Math.round(performance.now() - t0);
+    const ok = resp.ok || resp.status === 200 || resp.status === 204;
+    return {
+      status: ok ? "conectada" : "erro",
+      detalhe: `HTTP ${resp.status} · ${ms} ms`,
+    };
+  } catch (e) {
+    const ms = Math.round(performance.now() - t0);
+    return { status: "erro", detalhe: `${String(e && e.message || e).slice(0, 120)} · ${ms} ms` };
+  }
+}
+
+async function persistFerramentaCheck(id, res) {
+  const { error } = await sb.from("os_ferramentas").update({
+    ultimo_status: res.status,
+    ultimo_check_at: new Date().toISOString(),
+    ultimo_check_detalhe: res.detalhe,
+  }).eq("id", id);
+  if (error) throw error;
 }
 
 async function fetchActivity(docId) {
@@ -454,7 +523,8 @@ function Shell({ me, sections, route, children }) {
         ${navItem("Início", "🏠", "/", onHome)}
         <div class="px-3 pb-1 pt-4 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Base de Conhecimento</div>
         ${sections.map((s) => navItem(s.nome, s.icone || "📄", "/secao/" + s.slug, activeSlug === s.slug))}
-        <div class="px-3 pb-1 pt-4 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Outros setores</div>
+        <div class="px-3 pb-1 pt-4 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Setores</div>
+        ${navItem("Ferramentas", "🧰", "/ferramentas", route.path === "/ferramentas")}
         ${FUTURE_SECTORS.map((s) => navItem(s.nome, s.icone, "#", false, true))}
       </nav>
       <div class="border-t border-slate-100 p-2">
@@ -1290,6 +1360,252 @@ function CreateUserModal({ onClose, onCreated }) {
     <//>`;
 }
 
+/* ============================ Ferramentas ============================ */
+
+function statusDaFerramenta(f) {
+  // Para 'auto' usa o último resultado da checagem; para 'manual' usa o status marcado.
+  if (f._checando) return "checando";
+  if (f.check_type === "auto") return f.ultimo_status || "desconectada";
+  return f.status_manual;
+}
+
+function StatusBadge({ status }) {
+  if (status === "checando")
+    return html`<${Badge} class="bg-slate-100 text-slate-500"><span class="spinner mr-1" style="width:12px;height:12px"></span>checando<//>`;
+  const s = FERRAMENTA_STATUS[status] || FERRAMENTA_STATUS.desconectada;
+  return html`<${Badge} class=${s.cls}><span class=${cx("mr-1.5 inline-block h-1.5 w-1.5 rounded-full", s.dot)}></span>${s.label}<//>`;
+}
+
+function FerramentasPage({ me }) {
+  const [tools, setTools] = useState(null);
+  const [catFilter, setCatFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [checking, setChecking] = useState(false);
+  const [editing, setEditing] = useState(null); // ferramenta ou {novo:true}
+  const canEdit = me.role !== "leitor";
+
+  const load = useCallback(async () => {
+    try { setTools(await fetchFerramentas()); }
+    catch (e) { notify(errMsg(e), "err"); setTools([]); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const runChecks = useCallback(async (list) => {
+    const autos = (list || []).filter((f) => f.check_type === "auto" && f.check_url);
+    if (!autos.length) return;
+    setChecking(true);
+    setTools((cur) => cur.map((f) => autos.find((a) => a.id === f.id) ? { ...f, _checando: true } : f));
+    for (const f of autos) {
+      const res = await checkFerramenta(f);
+      setTools((cur) => cur.map((x) => x.id === f.id
+        ? { ...x, _checando: false, ultimo_status: res.status, ultimo_check_at: new Date().toISOString(), ultimo_check_detalhe: res.detalhe }
+        : x));
+      if (canEdit) { try { await persistFerramentaCheck(f.id, res); } catch (_) { /* segue mesmo sem salvar */ } }
+    }
+    setChecking(false);
+  }, [canEdit]);
+
+  // roda a checagem automática assim que a lista carrega
+  useEffect(() => { if (tools && tools.length) runChecks(tools); /* eslint-disable-next-line */ }, [tools === null]);
+
+  if (tools === null)
+    return html`<div class="text-sm text-slate-400"><span class="spinner mr-2"></span>Carregando…</div>`;
+
+  const cats = [...new Set(tools.map((f) => f.categoria))];
+  const filtered = tools.filter((f) =>
+    (!catFilter || f.categoria === catFilter) &&
+    (!statusFilter || statusDaFerramenta(f) === statusFilter));
+
+  const resumo = {};
+  tools.forEach((f) => { const s = f.check_type === "auto" ? (f.ultimo_status || "desconectada") : f.status_manual; resumo[s] = (resumo[s] || 0) + 1; });
+
+  return html`
+    <div>
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 class="flex items-center gap-2 text-2xl font-semibold text-slate-800">🧰 Ferramentas</h1>
+          <p class="mt-1 max-w-2xl text-sm text-slate-500">
+            Tudo que a OS usa ou que fica conectado à operação, com o status atual e o que cada uma faz aqui.
+          </p>
+        </div>
+        <div class="flex gap-2">
+          <${Btn} variant="ghost" loading=${checking} onClick=${() => runChecks(tools)}>↻ Verificar agora<//>
+          ${canEdit && html`<${Btn} onClick=${() => setEditing({ novo: true })}>+ Nova ferramenta<//>`}
+        </div>
+      </div>
+
+      <div class="mt-4 flex flex-wrap gap-2 text-xs">
+        ${Object.entries(resumo).map(([s, n]) => html`
+          <button class="inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 ring-1 ring-slate-200 hover:bg-slate-50"
+            onClick=${() => setStatusFilter(statusFilter === s ? "" : s)}>
+            <span class=${cx("inline-block h-1.5 w-1.5 rounded-full", (FERRAMENTA_STATUS[s] || {}).dot || "bg-slate-400")}></span>
+            ${(FERRAMENTA_STATUS[s] || {}).label || s}: <b>${n}</b>
+          </button>`)}
+      </div>
+
+      <div class="mt-4 flex flex-wrap gap-2">
+        <select class=${cx(inputCls, "w-auto")} value=${catFilter} onChange=${(e) => setCatFilter(e.target.value)}>
+          <option value="">Todas as categorias</option>
+          ${cats.map((c) => html`<option value=${c}>${CAT_LABEL[c] || c}</option>`)}
+        </select>
+        <select class=${cx(inputCls, "w-auto")} value=${statusFilter} onChange=${(e) => setStatusFilter(e.target.value)}>
+          <option value="">Todos os status</option>
+          ${Object.keys(FERRAMENTA_STATUS).map((s) => html`<option value=${s}>${FERRAMENTA_STATUS[s].label}</option>`)}
+        </select>
+      </div>
+
+      <div class="mt-4 space-y-2">
+        ${filtered.map((f) => html`
+          <div key=${f.id} class="rounded-xl border border-slate-200 bg-white p-4">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="font-medium text-slate-800">${f.nome}</span>
+                  <${StatusBadge} status=${statusDaFerramenta(f)} />
+                  <${Badge} class="bg-slate-100 text-slate-500">${CAT_LABEL[f.categoria] || f.categoria}<//>
+                  <span class="text-[11px] uppercase tracking-wide text-slate-300">${f.check_type === "auto" ? "auto" : "manual"}</span>
+                </div>
+                <p class="rich mt-1.5 text-sm text-slate-600">${f.descricao_os || "—"}</p>
+                <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
+                  ${f.responsavel ? html`<span>Responsável: ${f.responsavel.nome || f.responsavel.email}</span>` : null}
+                  ${f.check_type === "auto" && f.ultimo_check_at
+                    ? html`<span>Verificado ${fmtDate(f.ultimo_check_at, true)}${f.ultimo_check_detalhe ? " · " + f.ultimo_check_detalhe : ""}</span>` : null}
+                  ${f.check_type === "manual" && f.status_manual_nota ? html`<span>${f.status_manual_nota}</span>` : null}
+                  ${f.url ? html`<a href=${f.url} target="_blank" rel="noopener" class="text-brand hover:underline">abrir ↗</a>` : null}
+                </div>
+              </div>
+              ${canEdit && html`<button class="shrink-0 text-xs text-slate-400 hover:text-slate-700" onClick=${() => setEditing(f)}>editar</button>`}
+            </div>
+          </div>`)}
+        ${filtered.length === 0 ? html`<${Empty} title="Nada com esse filtro" icon="🔍" />` : null}
+      </div>
+
+      ${editing && html`<${FerramentaModal} ferramenta=${editing.novo ? null : editing} me=${me}
+        onClose=${() => setEditing(null)}
+        onSaved=${async () => { setEditing(null); await load(); }} />`}
+    </div>`;
+}
+
+function FerramentaModal({ ferramenta, me, onClose, onSaved }) {
+  const novo = !ferramenta;
+  const [f, setF] = useState(ferramenta ? {
+    nome: ferramenta.nome, categoria: ferramenta.categoria, descricao_os: ferramenta.descricao_os || "",
+    url: ferramenta.url || "", responsavel_id: ferramenta.responsavel ? ferramenta.responsavel.id : "",
+    check_type: ferramenta.check_type, check_kind: ferramenta.check_kind || "http_generico",
+    check_url: ferramenta.check_url || "", status_manual: ferramenta.status_manual,
+    status_manual_nota: ferramenta.status_manual_nota || "",
+  } : {
+    nome: "", categoria: "outros", descricao_os: "", url: "", responsavel_id: "",
+    check_type: "manual", check_kind: "http_generico", check_url: "",
+    status_manual: "nao_configurada", status_manual_nota: "",
+  });
+  const [profiles, setProfiles] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  useEffect(() => { fetchProfiles().then(setProfiles).catch(() => {}); }, []);
+
+  async function save() {
+    setBusy(true);
+    try {
+      if (!f.nome.trim()) throw new Error("Informe o nome.");
+      const row = {
+        nome: f.nome.trim(), categoria: f.categoria, descricao_os: f.descricao_os.trim(),
+        url: f.url.trim() || null, responsavel_id: f.responsavel_id || null,
+        check_type: f.check_type,
+        check_kind: f.check_type === "auto" ? f.check_kind : null,
+        check_url: f.check_type === "auto" ? (f.check_url.trim() || null) : null,
+        status_manual: f.status_manual,
+        status_manual_nota: f.status_manual_nota.trim(),
+      };
+      if (novo) {
+        row.slug = f.nome.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") + "-" + Math.random().toString(36).slice(2, 6);
+        row.ordem = 100;
+        const { error } = await sb.from("os_ferramentas").insert(row);
+        if (error) throw error;
+      } else {
+        const { error } = await sb.from("os_ferramentas").update(row).eq("id", ferramenta.id);
+        if (error) throw error;
+      }
+      notify(novo ? "Ferramenta adicionada." : "Ferramenta atualizada.", "ok");
+      await onSaved();
+    } catch (e) { notify(errMsg(e), "err"); }
+    finally { setBusy(false); }
+  }
+
+  async function remover() {
+    if (!confirm(`Remover "${ferramenta.nome}" da lista?`)) return;
+    setBusy(true);
+    try {
+      const { error } = await sb.from("os_ferramentas").delete().eq("id", ferramenta.id);
+      if (error) throw error;
+      notify("Ferramenta removida.", "ok");
+      await onSaved();
+    } catch (e) { notify(errMsg(e), "err"); }
+    finally { setBusy(false); }
+  }
+
+  return html`
+    <${Modal} title=${novo ? "Nova ferramenta" : "Editar — " + ferramenta.nome} onClose=${onClose} wide>
+      <div class="space-y-4">
+        <${Field} label="Nome" required><input class=${inputCls} value=${f.nome} onInput=${set("nome")} /><//>
+        <div class="grid gap-4 sm:grid-cols-2">
+          <${Field} label="Categoria">
+            <select class=${inputCls} value=${f.categoria} onChange=${set("categoria")}>
+              ${FERRAMENTA_CATEGORIAS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
+            </select>
+          <//>
+          <${Field} label="Responsável">
+            <select class=${inputCls} value=${f.responsavel_id} onChange=${set("responsavel_id")}>
+              <option value="">—</option>
+              ${profiles.map((p) => html`<option value=${p.id}>${p.nome || p.email}</option>`)}
+            </select>
+          <//>
+        </div>
+        <${Field} label="O que faz na OS"><textarea class=${cx(inputCls, "min-h-[90px]")} value=${f.descricao_os} onInput=${set("descricao_os")}></textarea><//>
+        <${Field} label="Link (dashboard / site)"><input class=${inputCls} placeholder="https://…" value=${f.url} onInput=${set("url")} /><//>
+
+        <${Field} label="Como o status é verificado">
+          <select class=${inputCls} value=${f.check_type} onChange=${set("check_type")}>
+            <option value="manual">Manual — alguém marca o status</option>
+            <option value="auto">Automático — a OS testa o endereço</option>
+          </select>
+        <//>
+
+        ${f.check_type === "manual" ? html`
+          <div class="grid gap-4 sm:grid-cols-2">
+            <${Field} label="Status">
+              <select class=${inputCls} value=${f.status_manual} onChange=${set("status_manual")}>
+                ${Object.keys(FERRAMENTA_STATUS).map((s) => html`<option value=${s}>${FERRAMENTA_STATUS[s].label}</option>`)}
+              </select>
+            <//>
+            <${Field} label="Nota (opcional)"><input class=${inputCls} value=${f.status_manual_nota} onInput=${set("status_manual_nota")} /><//>
+          </div>
+        ` : html`
+          <div class="space-y-3 rounded-lg bg-slate-50 p-3">
+            <${Field} label="Tipo de checagem" hint="Só endereços que respondem CORS podem ser testados pelo navegador (Supabase, a Edge Function e o site no GitHub Pages).">
+              <select class=${inputCls} value=${f.check_kind} onChange=${set("check_kind")}>
+                <option value="supabase_rest">Supabase REST</option>
+                <option value="edge_function">Edge Function</option>
+                <option value="github_pages">GitHub Pages / site</option>
+                <option value="http_generico">HTTP genérico (pode não funcionar por CORS)</option>
+              </select>
+            <//>
+            <${Field} label="URL a testar"><input class=${inputCls} placeholder="https://…" value=${f.check_url} onInput=${set("check_url")} /><//>
+          </div>
+        `}
+
+        <div class="flex items-center justify-between gap-2 pt-1">
+          <div>${!novo && me.role === "admin" ? html`<${Btn} variant="danger" onClick=${remover} loading=${busy}>Remover<//>` : null}</div>
+          <div class="flex gap-2">
+            <${Btn} variant="subtle" onClick=${onClose}>Cancelar<//>
+            <${Btn} loading=${busy} onClick=${save}>Salvar<//>
+          </div>
+        </div>
+      </div>
+    <//>`;
+}
+
 /* ============================ Router / App ============================ */
 
 function Router({ route, me, sections, reload }) {
@@ -1298,6 +1614,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "secao") return html`<${SectionPage} slug=${p1} me=${me} sections=${sections} onSectionsChanged=${reload} />`;
   if (p0 === "doc") return html`<${DocDetail} id=${p1} me=${me} sections=${sections} />`;
   if (p0 === "novo") return html`<${NewDocPage} me=${me} sections=${sections} query=${route.query} />`;
+  if (p0 === "ferramentas") return html`<${FerramentasPage} me=${me} />`;
   if (p0 === "perfil") return html`<${ProfilePage} me=${me} onProfileChanged=${reload} />`;
   if (p0 === "admin" && me.role === "admin") return html`<${AdminPage} me=${me} />`;
   return html`<${Empty} title="Página não encontrada" icon="🧭"><a class="text-brand" href="#/">Voltar ao início</a><//>`;
