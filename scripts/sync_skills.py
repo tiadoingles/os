@@ -16,22 +16,25 @@ import urllib.request, urllib.error, urllib.parse
 
 HOME = os.path.expanduser("~")
 CONFIG = os.environ.get("SYNC_CONFIG", os.path.join(HOME, "tia-do-ingles-os", ".sync", "config.env"))
-SECTION_SLUG = "skills-e-playbooks"
+DEFAULT_SECAO = "skills-e-playbooks"
 
-# Skills sincronizadas. Para incluir uma nova skill, adicione uma linha: (nome, titulo, categoria)
+# Skills sincronizadas: (nome, titulo, categoria, secao_slug).
+# `secao_slug` decide em qual seção da Base de Conhecimento o documento nasce.
+# Só é aplicada na criação — se o documento já existe, mudar aqui NÃO move sozinho
+# (mova pelo botão "Editar" na página, ou apague e deixe o sync recriar).
 ALLOWLIST = [
-    ("corretor-tarefas-alunos",            "Corretor de Tarefas de Alunas",              "feedback"),
-    ("depoimentos-tia-do-ingles",          "Banco de Depoimentos de Alunas",             "prova-social"),
-    ("agente-vendas-high-ticket-mentoria", "Agente de Vendas High Ticket — Mentoria",     "vendas"),
-    ("agente-vendas-low-ticket",           "Agente de Vendas Low Ticket",                 "vendas"),
-    ("avatar-tia-do-ingles",               "Avatar / Cliente Ideal",                      "avatar"),
-    ("documento-de-marca-tia-do-ingles",   "Documento de Marca",                          "marca"),
-    ("metodologia-tia-do-ingles",          "Metodologia — Pensamento Pedagógico",         "metodologia"),
-    ("mypa",                               "MYPA — Alfabeto Fonético",                    "metodologia"),
-    ("tia-do-ingles-materials",            "Materiais e Roteiros de Aula",                "metodologia"),
-    ("tia-feedback-engine",                "Feedback Engine — Sistema de Feedback",       "feedback"),
-    ("transcricao-calls-closer",           "Transcrição de Calls de Vendas",             "vendas"),
-    ("youtube-viral-tia",                  "YouTube Viral — Playbook",                    "conteudo"),
+    ("corretor-tarefas-alunos",            "Corretor de Tarefas de Alunas",          "feedback",     "metodologia"),
+    ("depoimentos-tia-do-ingles",          "Banco de Depoimentos de Alunas",         "prova-social", "resultados-e-provas"),
+    ("agente-vendas-high-ticket-mentoria", "Agente de Vendas High Ticket — Mentoria", "vendas",       "skills-e-playbooks"),
+    ("agente-vendas-low-ticket",           "Agente de Vendas Low Ticket",            "vendas",       "skills-e-playbooks"),
+    ("avatar-tia-do-ingles",               "Avatar / Cliente Ideal",                 "avatar",       "cliente-e-avatar"),
+    ("documento-de-marca-tia-do-ingles",   "Documento de Marca",                     "marca",        "documentacao-e-processos"),
+    ("metodologia-tia-do-ingles",          "Metodologia — Pensamento Pedagógico",     "metodologia",  "metodologia"),
+    ("mypa",                               "MYPA — Alfabeto Fonético",               "metodologia",  "metodologia"),
+    ("tia-do-ingles-materials",            "Materiais e Roteiros de Aula",           "metodologia",  "metodologia"),
+    ("tia-feedback-engine",                "Feedback Engine — Sistema de Feedback",   "feedback",     "metodologia"),
+    ("transcricao-calls-closer",           "Transcrição de Calls de Vendas",         "vendas",       "skills-e-playbooks"),
+    ("youtube-viral-tia",                  "YouTube Viral — Playbook",               "conteudo",     "skills-e-playbooks"),
 ]
 
 # Onde o Claude guarda as pastas de skills (padrões glob). Cada match contém <skill>/SKILL.md
@@ -203,8 +206,8 @@ def main():
     args = p.parse_args()
 
     if args.list:
-        for name, _titulo, _cat in ALLOWLIST:
-            print(f"{name:40} {find_skill_dir(name) or '*** NÃO ENCONTRADA ***'}")
+        for name, _titulo, _cat, secao in ALLOWLIST:
+            print(f"{name:40} [{secao:24}] {find_skill_dir(name) or '*** NÃO ENCONTRADA ***'}")
         extra = all_skill_names_on_disk() - {n for n, *_ in ALLOWLIST}
         if extra:
             print("\nSkills no disco fora do allowlist (edite ALLOWLIST em sync_skills.py p/ incluir):")
@@ -216,18 +219,19 @@ def main():
     log(f"login como {cfg['SYNC_EMAIL']}")
     api = API(cfg, get_token(cfg))
 
-    secs = api.get(f"/kb_sections?slug=eq.{SECTION_SLUG}&select=id")
-    if not secs:
-        sys.exit(f"seção '{SECTION_SLUG}' não existe no banco")
-    section_id = secs[0]["id"]
+    secs = api.get("/kb_sections?select=id,slug")
+    sec_by_slug = {s["slug"]: s["id"] for s in (secs or [])}
+    if DEFAULT_SECAO not in sec_by_slug:
+        sys.exit(f"seção '{DEFAULT_SECAO}' não existe no banco")
 
     created = updated = unchanged = missing = 0
-    for name, titulo, categoria in ALLOWLIST:
+    for name, titulo, categoria, secao in ALLOWLIST:
         d = find_skill_dir(name)
         if not d:
             log(f"[--] {name}: fonte não encontrada no disco — pulada")
             missing += 1
             continue
+        section_id = sec_by_slug.get(secao) or sec_by_slug[DEFAULT_SECAO]
         md = build_md(name, titulo, categoria, d)
         sha = hashlib.sha256(md.encode("utf-8")).hexdigest()
         key = f"skill:{name}"
@@ -236,7 +240,7 @@ def main():
         is_new_doc = not docs
         if is_new_doc:
             if args.dry_run:
-                log(f"[NOVO] {name} (dry-run)")
+                log(f"[NOVO] {name} → {secao} (dry-run)")
                 created += 1
                 continue
             row = api.post("/kb_documents", {
