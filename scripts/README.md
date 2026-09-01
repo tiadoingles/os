@@ -29,7 +29,17 @@ python3 ~/tia-do-ingles-os/scripts/sync_skills.py --dry-run  # simula
 python3 ~/tia-do-ingles-os/scripts/sync_skills.py --list     # mostra onde achou cada skill
 ```
 
-## Automação (roda sozinho 3x/dia)
+## Automação
+
+### Opção A (recomendada) — Tarefa agendada do Claude
+
+Já configurada: tarefa `sync-skills-os`, roda todo dia às 07:15, gerenciável na
+seção **"Scheduled"** da barra lateral do app do Claude. Ela só roda **com o app
+do Claude aberto** (se estava fechado no horário, roda no próximo abrir). Não
+instala nada no sistema. Nada a fazer aqui além de deixar o app abrir de vez em
+quando.
+
+### Opção B — LaunchAgent do macOS (roda mesmo com o Claude fechado)
 
 ```bash
 cp ~/tia-do-ingles-os/scripts/br.com.tiadoingles.os-skillsync.plist ~/Library/LaunchAgents/
@@ -37,13 +47,7 @@ launchctl load ~/Library/LaunchAgents/br.com.tiadoingles.os-skillsync.plist
 ```
 
 Roda às 08:00, 14:00 e 20:00 (e ao ligar o Mac). Log em `.sync/last-run.log`.
-
-Para desligar:
-
-```bash
-launchctl unload ~/Library/LaunchAgents/br.com.tiadoingles.os-skillsync.plist
-rm ~/Library/LaunchAgents/br.com.tiadoingles.os-skillsync.plist
-```
+Desligar: `launchctl unload ...` e apagar o arquivo de `~/Library/LaunchAgents/`.
 
 ## Adicionar / remover skills da sincronização
 
