@@ -44,15 +44,66 @@ const STATUS_STYLE = {
 };
 const ROLE_LABEL = { leitor: "Leitor", editor: "Editor", admin: "Admin" };
 
-// Setores do menu lateral. `path` ativo; `wip` = página "em construção".
-const SETORES = [
-  { nome: "Base de Conhecimento", icone: "📚", path: "/" },
-  { nome: "Pedir a IA", icone: "✨", path: "/pedir-ia" },
-  { nome: "Ferramentas", icone: "🧰", path: "/ferramentas" },
-  { nome: "Financeiro", icone: "💰", path: "/financeiro", wip: "Contas, faturamento, comissões e relatórios financeiros da empresa." },
-  { nome: "Comercial", icone: "📈", path: "/comercial", wip: "Funil de vendas, leads, calls, scripts e acompanhamento de metas." },
-  { nome: "CS / Suporte", icone: "🤝", path: "/cs-suporte", wip: "Onboarding de alunas, acompanhamento, retenção e atendimento." },
-  { nome: "Conteúdo", icone: "✍️", path: "/conteudo", wip: "Calendário editorial, produção de conteúdo, YouTube e social." },
+// Estrutura do menu lateral. O grupo "bc" é a Base de Conhecimento (já funcional).
+// Cada `item` de grupo abre em #/<grupo>/<slug>; os que ainda não têm tela mostram
+// a página "Módulo em construção" com a descrição e as fontes de dados.
+const NAV = [
+  { id: "bc", nome: "Base de Conhecimento", icone: "📚", path: "/",
+    hint: "Todos os documentos, com tags e organização por seção." },
+
+  { id: "agenda", nome: "Agenda", icone: "📅", itens: [
+    { slug: "feriados", nome: "Feriados", desc: "Calendário de feriados nacionais e pontos facultativos." },
+    { slug: "datas-importantes", nome: "Datas importantes", desc: "Lançamentos, prazos, eventos e marcos da empresa." },
+  ]},
+
+  { id: "pedagogico", nome: "Pedagógico", icone: "🎓", itens: [
+    { slug: "materiais", nome: "Materiais (Base/Consulta)",
+      desc: "Biblioteca pedagógica para consulta: metodologia, MYPA, roteiros e apostilas do método." },
+    { slug: "gerador-materiais", nome: "Gerador de Materiais",
+      desc: "Cria roteiros de aula e materiais didáticos seguindo o método (skills tia-do-ingles-materials / fluxo-semanal-mentoria)." },
+    { slug: "gerador-feedbacks", nome: "Gerador de Feedbacks",
+      desc: "Corrige e gera feedback da produção das alunas como a Tia faria (skill tia-feedback-engine) — a incorporar no sistema." },
+  ]},
+
+  { id: "cs", nome: "CS / Suporte", icone: "🤝", itens: [
+    { slug: "pesquisas", nome: "Pesquisas de Alunos",
+      desc: "Principais insights e as pesquisas completas.",
+      links: [
+        ["Pesquisa Alunos Mentoria Fluent Mind", "https://docs.google.com/spreadsheets/d/1EUgDyUOo2pe4I790h-iuhbyf_t4GncDPLBIcOCeAAaA/edit"],
+        ["Pesquisa Módulo PNL — Método Tia do Inglês", "https://docs.google.com/spreadsheets/d/1-WLmTHOTT7rISrdWwEezmjNGejlnET2gUGBZr9IwVYc/edit"],
+        ["Pesquisa Módulo PNL — Mentoria Fluent Mind", "https://docs.google.com/spreadsheets/d/1EiUPy0HWwkYZ0H-02OaoPbOqHZsYrYQE-OWB-RPIDH8/edit"],
+        ["Pesquisa Método/Decole/Memorização", "https://docs.google.com/spreadsheets/d/1NMxKjDJx5j0G3X5mVCBgWTzMWDTbJsQQ-HEvk6yPTL4/edit"],
+      ] },
+    { slug: "mentorados", nome: "Lista de Mentorados",
+      desc: "Lista puxada da planilha de mentorados, sempre atualizada.",
+      links: [["Planilha de Mentorados", "https://docs.google.com/spreadsheets/d/1CZ4qfhjEhrxtnTMBITRjOUy9o_I8LEPRoD6nuSrLdvs/edit?gid=1320664660"]] },
+    { slug: "nps", nome: "NPS", desc: "Acompanhamento do NPS das alunas ao longo do tempo." },
+    { slug: "presenca", nome: "Presença nas Práticas",
+      desc: "Presença em Sessões Práticas, Arenas de Conversação e Fluent Labs." },
+    { slug: "vencimentos", nome: "Vencimentos e Renovações",
+      desc: "Da planilha de mentorados: acessos vencidos e os que vencem em 30 ou 60 dias.",
+      links: [["Planilha de Mentorados", "https://docs.google.com/spreadsheets/d/1CZ4qfhjEhrxtnTMBITRjOUy9o_I8LEPRoD6nuSrLdvs/edit?gid=1320664660"]] },
+  ]},
+
+  { id: "comercial", nome: "Comercial", icone: "📈", itens: [
+    { slug: "vendas", nome: "Vendas", desc: "Volume e evolução de vendas." },
+    { slug: "faturamento", nome: "Faturamento Bruto", desc: "Faturamento bruto por período." },
+    { slug: "cash-collected", nome: "Cash Collected", desc: "Dinheiro efetivamente recebido." },
+    { slug: "conversao-closer", nome: "Taxa de Conversão Closer", desc: "Conversão por closer e por período." },
+    { slug: "ferramentas", nome: "Ferramentas", desc: "Análise de Calls e Apresentação do Closer." },
+  ]},
+
+  { id: "financeiro", nome: "Financeiro", icone: "💰", itens: [
+    { slug: "cobrancas", nome: "Cobranças", desc: "Inadimplentes e datas de pagamentos recorrentes." },
+    { slug: "fluxo-caixa", nome: "Fluxo de Caixa", desc: "Entradas e saídas ao longo do tempo." },
+    { slug: "dre", nome: "DRE", desc: "Demonstração de resultados." },
+  ]},
+
+  { id: "conteudo", nome: "Conteúdo", icone: "✍️", itens: [
+    { slug: "instagram", nome: "Métricas Instagram", desc: "Alcance, engajamento e crescimento no Instagram." },
+    { slug: "gerador-conteudos", nome: "Gerador de conteúdos",
+      desc: "Gera ideias e conteúdos a partir dos insights das pesquisas de alunos." },
+  ]},
 ];
 
 const FERRAMENTA_STATUS = {
@@ -521,8 +572,11 @@ function Shell({ me, route, children }) {
   const [open, setOpen] = useState(false);
   const p0 = route.parts[0] || "";
   const bcActive = p0 === "" || p0 === "secao" || p0 === "doc" || p0 === "novo";
+  const [openGroups, setOpenGroups] = useState(() => new Set([p0]));
+  useEffect(() => { setOpenGroups((s) => new Set([...s, p0])); }, [p0]);
+  const toggle = (id) => setOpenGroups((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
-  const navItem = (label, icon, target, active) => html`
+  const linkItem = (label, icon, target, active) => html`
     <a href=${"#" + target} onClick=${() => setOpen(false)}
       class=${cx(
         "flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition",
@@ -531,6 +585,35 @@ function Shell({ me, route, children }) {
       <span class="w-5 text-center text-[15px] leading-none">${icon}</span>
       <span class="truncate">${label}</span>
     </a>`;
+
+  const grupo = (g) => {
+    if (g.id === "bc") return linkItem(g.nome, g.icone, "/", bcActive);
+    const aberto = openGroups.has(g.id);
+    const algumAtivo = p0 === g.id;
+    return html`
+      <div>
+        <button onClick=${() => toggle(g.id)}
+          class=${cx("flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition",
+            algumAtivo ? "font-medium text-brand-dark" : "text-ink/70 hover:bg-black/[0.04]")}>
+          <span class="w-5 text-center text-[15px] leading-none">${g.icone}</span>
+          <span class="flex-1 truncate text-left">${g.nome}</span>
+          <span class="text-xs text-muted">${aberto ? "▾" : "▸"}</span>
+        </button>
+        ${aberto ? html`
+          <div class="mb-1 ml-4 space-y-0.5 border-l border-line pl-2">
+            ${g.itens.map((it) => {
+              const target = "/" + g.id + "/" + it.slug;
+              const active = route.path === target;
+              return html`
+                <a href=${"#" + target} onClick=${() => setOpen(false)}
+                  class=${cx("block truncate rounded-lg px-3 py-1.5 text-sm transition",
+                    active ? "bg-brand-light font-medium text-brand-dark" : "text-ink/60 hover:bg-black/[0.04]")}>
+                  ${it.nome}
+                </a>`;
+            })}
+          </div>` : null}
+      </div>`;
+  };
 
   const sidebar = html`
     <div class="flex h-full flex-col">
@@ -545,15 +628,15 @@ function Shell({ me, route, children }) {
       </div>
 
       <nav class="flex-1 space-y-0.5 overflow-y-auto px-2 py-3">
-        ${SETORES.map((s) => navItem(
-          s.nome, s.icone, s.path,
-          s.path === "/" ? bcActive : route.path === s.path
-        ))}
+        ${linkItem("Pedir a IA", "✨", "/pedir-ia", route.path === "/pedir-ia")}
+        <div class="my-1 border-t border-line"></div>
+        ${NAV.map(grupo)}
       </nav>
 
       <div class="space-y-0.5 border-t border-line px-2 py-2">
-        ${me.role === "admin" ? navItem("Administração", "⚙️", "/admin", route.path === "/admin") : null}
-        ${navItem("Meu perfil", "👤", "/perfil", route.path === "/perfil")}
+        ${linkItem("Ferramentas", "🧰", "/ferramentas", route.path === "/ferramentas")}
+        ${me.role === "admin" ? linkItem("Administração", "⚙️", "/admin", route.path === "/admin") : null}
+        ${linkItem("Meu perfil", "👤", "/perfil", route.path === "/perfil")}
         ${cfg.AUTH_MODE === "open" ? null : html`
           <button
             class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-ink/70 hover:bg-black/[0.04]"
@@ -1672,16 +1755,25 @@ function FerramentaModal({ ferramenta, me, onClose, onSaved }) {
 
 /* ============================ Setores em construção / Pedir a IA ============================ */
 
-function SetorEmConstrucao({ setor }) {
+function ModuloEmConstrucao({ grupo, item }) {
   return html`
     <div>
-      <h1 class="flex items-center gap-2 text-2xl font-semibold text-ink">${setor.icone} ${setor.nome}</h1>
-      <div class="mt-6 rounded-2xl border border-dashed border-line bg-card/70 px-6 py-14 text-center">
+      <div class="text-sm text-muted">${grupo.icone} ${grupo.nome}</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">${item.nome}</h1>
+      <div class="mt-6 rounded-2xl border border-dashed border-line bg-card/70 px-6 py-12 text-center">
         <div class="text-4xl">🚧</div>
-        <div class="mt-3 font-medium text-ink">Setor em construção</div>
-        <p class="mx-auto mt-1 max-w-md text-sm text-muted">${setor.wip}</p>
-        <p class="mx-auto mt-3 max-w-md text-xs text-muted">
-          A estrutura já está no menu. O conteúdo entra nas próximas etapas da OS.
+        <div class="mt-3 font-medium text-ink">Módulo em construção</div>
+        <p class="mx-auto mt-1 max-w-lg text-sm text-muted">${item.desc}</p>
+        ${item.links && item.links.length ? html`
+          <div class="mx-auto mt-4 max-w-lg text-left">
+            <div class="text-xs font-semibold uppercase tracking-wide text-muted">Fontes de dados</div>
+            <ul class="mt-1 space-y-1 text-sm">
+              ${item.links.map(([label, url]) => html`
+                <li>· <a href=${url} target="_blank" rel="noopener" class="text-brand hover:underline">${label} ↗</a></li>`)}
+            </ul>
+          </div>` : null}
+        <p class="mx-auto mt-4 max-w-lg text-xs text-muted">
+          A estrutura já está no menu. Este módulo entra numa próxima etapa.
         </p>
       </div>
     </div>`;
@@ -1763,8 +1855,10 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "pedir-ia") return html`<${PedirIA} />`;
   if (p0 === "perfil") return html`<${ProfilePage} me=${me} onProfileChanged=${reload} />`;
   if (p0 === "admin" && me.role === "admin") return html`<${AdminPage} me=${me} />`;
-  const setor = SETORES.find((s) => s.path === route.path && s.wip);
-  if (setor) return html`<${SetorEmConstrucao} setor=${setor} />`;
+  const grupo = NAV.find((g) => g.id === p0 && g.itens);
+  const item = grupo && grupo.itens.find((it) => it.slug === p1);
+  if (grupo && item) return html`<${ModuloEmConstrucao} grupo=${grupo} item=${item} />`;
+  if (grupo) return html`<${ModuloEmConstrucao} grupo=${grupo} item=${grupo.itens[0]} />`;
   return html`<${Empty} title="Página não encontrada" icon="🧭"><a class="text-brand" href="#/">Voltar ao início</a><//>`;
 }
 
