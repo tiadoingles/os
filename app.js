@@ -1972,6 +1972,113 @@ function InstagramPage() {
     </div>`;
 }
 
+/* ============================ CS · Pesquisas de Alunos ============================ */
+
+async function fetchPesquisas() {
+  const { data, error } = await sb
+    .from("pesquisa_avatar")
+    .select("*")
+    .order("ordem", { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+function tempoDesde(iso) {
+  if (!iso) return null;
+  const dias = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+  if (dias <= 0) return "hoje";
+  if (dias === 1) return "ontem";
+  if (dias < 30) return `há ${dias} dias`;
+  const meses = Math.floor(dias / 30);
+  if (meses < 12) return `há ${meses} ${meses === 1 ? "mês" : "meses"}`;
+  const anos = Math.floor(dias / 365);
+  return `há ${anos} ${anos === 1 ? "ano" : "anos"}`;
+}
+
+function PesquisaCard({ p }) {
+  const janelaMs = (p.janela_dias || 30) * 86400000;
+  const recente = p.ultima_resposta_em && Date.now() - new Date(p.ultima_resposta_em).getTime() < janelaMs;
+  const ativo = !!p.ativo || !!recente;
+
+  let pill, pillCls;
+  if (!p.total_respostas) { pill = "AGUARDANDO"; pillCls = PILL_WARN; }
+  else if (ativo) { pill = "ATIVO"; pillCls = PILL_OK; }
+  else { pill = "SEM RESPOSTAS NOVAS"; pillCls = PILL_NEUTRAL; }
+
+  return html`
+    <div class="flex min-w-0 flex-col rounded-2xl border border-line bg-card p-5">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="text-base font-semibold leading-tight text-ink">${p.titulo}</h3>
+          ${p.aba ? html`<div class="mt-0.5 text-[11px] text-muted">${p.aba}</div>` : null}
+        </div>
+        <span class=${cx("shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold tracking-wide", pillCls)}>
+          ${ativo && p.total_respostas ? "● " : ""}${pill}
+        </span>
+      </div>
+
+      <div class="mt-3 grid grid-cols-2 gap-3">
+        <div class="rounded-xl border border-line bg-white/60 px-3 py-2">
+          <div class="text-[11px] uppercase tracking-wide text-muted">Última resposta</div>
+          <div class="mt-0.5 text-sm font-medium text-ink">
+            ${p.ultima_resposta_em ? fmtDate(p.ultima_resposta_em, true) : "—"}
+          </div>
+          ${p.ultima_resposta_em ? html`<div class="text-[11px] text-muted">${tempoDesde(p.ultima_resposta_em)}</div>` : null}
+        </div>
+        <div class="rounded-xl border border-line bg-white/60 px-3 py-2">
+          <div class="text-[11px] uppercase tracking-wide text-muted">Respostas</div>
+          <div class="mt-0.5 text-sm font-medium text-ink">${nf(p.total_respostas)}</div>
+        </div>
+      </div>
+
+      ${p.resumo_md
+        ? html`<div class="prose-doc mt-3 min-w-0 text-sm" dangerouslySetInnerHTML=${{ __html: mdToHtml(p.resumo_md) }}></div>`
+        : html`<p class="mt-3 text-sm text-muted">Resumo do avatar ainda não gerado.</p>`}
+
+      <div class="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3 text-[11px] text-muted">
+        <span>${p.resumo_atualizado_em ? "Resumo atualizado " + fmtDate(p.resumo_atualizado_em) : ""}</span>
+        ${p.fonte_url ? html`<a href=${p.fonte_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">abrir pesquisa ↗</a>` : null}
+      </div>
+    </div>`;
+}
+
+function mdToHtml(text) {
+  try { return sanitizeHtml(marked.parse(text || "")); }
+  catch (_) { return "<pre>" + (text || "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) + "</pre>"; }
+}
+
+function PesquisasPage() {
+  const [rows, setRows] = useState(null);
+  useEffect(() => {
+    fetchPesquisas().then(setRows).catch((e) => { notify(errMsg(e), "err"); setRows([]); });
+  }, []);
+
+  if (!rows) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
+
+  const ativos = rows.filter((r) => r.total_respostas && (r.ativo || (r.ultima_resposta_em && Date.now() - new Date(r.ultima_resposta_em).getTime() < (r.janela_dias || 30) * 86400000))).length;
+  const totalResp = rows.reduce((a, r) => a + (r.total_respostas || 0), 0);
+  const ult = rows.map((r) => r.resumo_atualizado_em).filter(Boolean).sort().pop();
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">🤝 CS / Suporte</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">Pesquisas de Alunos</h1>
+      <p class="mt-1 text-xs text-muted">
+        Avatar por curso, com sinal de atividade e data da última resposta ·
+        ${ativos}/${rows.length} pesquisas ativas · ${nf(totalResp)} respostas no total${ult ? " · resumos atualizados " + fmtDate(ult) : ""}
+      </p>
+
+      <div class="mt-5 grid gap-4 lg:grid-cols-2">
+        ${rows.map((p) => html`<${PesquisaCard} key=${p.chave} p=${p} />`)}
+      </div>
+
+      <p class="mt-4 text-xs text-muted">
+        Fonte: formulários de pesquisa no Google Drive. Atualização automática diária (tarefa <code class="rounded bg-black/[0.05] px-1">sync-pesquisas-os</code>):
+        recalcula contagem, data da última resposta, o sinal ATIVO e regenera o resumo do avatar.
+      </p>
+    </div>`;
+}
+
 /* ============================ App externo incorporado ============================ */
 
 // Incorpora um app externo em iframe, ocupando a área toda, com barra de "voltar".
@@ -2014,6 +2121,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "perfil") return html`<${ProfilePage} me=${me} onProfileChanged=${reload} />`;
   if (p0 === "admin" && me.role === "admin") return html`<${AdminPage} me=${me} />`;
   if (p0 === "conteudo" && p1 === "instagram") return html`<${InstagramPage} />`;
+  if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
   if (p0 === "pedagogico" && p1 === "gerador-feedbacks")
     return html`<${EmbedExterno} titulo="Gerador de Feedbacks" icone="🎓" src="https://name-tia-ai-web.onrender.com/dashboard" />`;
   const grupo = NAV.find((g) => g.id === p0 && g.itens);
