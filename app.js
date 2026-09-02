@@ -2083,6 +2083,158 @@ function PesquisasPage() {
     </div>`;
 }
 
+/* ============================ Conteúdo · Gerador de Conteúdos ============================ */
+
+const INSIGHT_CATS = [
+  ["dor", "Dores", "😣"],
+  ["desejo", "Desejos", "✨"],
+  ["mito", "Mitos", "🚫"],
+  ["escolha", "Por que nos escolheram", "❤️"],
+  ["curiosidade", "Curiosidades", "🔎"],
+  ["insight", "Insights", "💡"],
+];
+
+async function fetchInsights() {
+  const { data, error } = await sb.from("conteudo_insights").select("*")
+    .order("categoria", { ascending: true }).order("ordem", { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+function GeradorConteudosPage() {
+  const [rows, setRows] = useState(null);
+  const [sel, setSel] = useState(() => new Set(INSIGHT_CATS.map(([k]) => k)));
+  const [formato, setFormato] = useState("video"); // video | carrossel
+  const [canal, setCanal] = useState("instagram"); // instagram | youtube
+  const [busy, setBusy] = useState(false);
+  const [ideias, setIdeias] = useState(null);
+  const [configured, setConfigured] = useState(null);
+
+  useEffect(() => {
+    fetchInsights().then(setRows).catch((e) => { notify(errMsg(e), "err"); setRows([]); });
+    aiCall("status").then((d) => setConfigured(!!(d && d.configured))).catch(() => setConfigured(false));
+  }, []);
+  useEffect(() => { if (formato === "carrossel" && canal !== "instagram") setCanal("instagram"); }, [formato]);
+
+  if (!rows) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
+
+  const porCat = {};
+  for (const r of rows) (porCat[r.categoria] = porCat[r.categoria] || []).push(r);
+  const atualizado = rows.length ? rows.map((r) => r.atualizado_em).sort().pop() : null;
+  const toggle = (k) => setSel((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
+
+  async function gerar() {
+    if (!sel.size) { notify("Selecione ao menos uma categoria.", "err"); return; }
+    setBusy(true); setIdeias(null);
+    try {
+      const cats = INSIGHT_CATS.filter(([k]) => sel.has(k));
+      const bloco = cats.map(([k, label]) => {
+        const its = (porCat[k] || []).map((r) => `- ${r.texto}${r.detalhe ? ` (${r.detalhe})` : ""}`).join("\n");
+        return `### ${label}\n${its}`;
+      }).join("\n\n");
+      const fmt = formato === "video"
+        ? (canal === "youtube" ? "vídeo para o YouTube" : "vídeo curto (Reels) para o Instagram")
+        : "carrossel para o Instagram";
+      const pergunta = [
+        `Você é estrategista de conteúdo da Tia do Inglês (método de inglês para adultos; mentora Marcela Miranda, "a Tia"; produto principal: Mentoria Fluent Mind).`,
+        `Com base nos insights abaixo, tirados das pesquisas com alunas da Mentoria, gere 10 ideias de conteúdo em formato de ${fmt}.`,
+        ``,
+        `INSIGHTS SELECIONADOS:`,
+        bloco,
+        ``,
+        `Regras da resposta:`,
+        `- Liste 10 ideias numeradas de 1 a 10.`,
+        `- Para cada ideia: **gancho/título** que para o scroll + 1 linha de ângulo (qual dor/desejo/mito ela ataca) + ${formato === "video" ? "sugestão da primeira frase falada (3 primeiros segundos)" : "ideia da capa e quantos cards"}.`,
+        `- Público: mulher adulta, de 40 a 60+ anos, que entende um pouco de inglês mas trava para falar.`,
+        `- Tom acolhedor e direto, linguagem de redes sociais. Nada de clichê genérico de "aprenda inglês agora".`,
+        `- Varie entre as categorias selecionadas.`,
+        `- Responda em português do Brasil, em Markdown.`,
+      ].join("\n");
+      const d = await aiCall("ask", { pergunta });
+      if (d && d.configured === false) { setConfigured(false); return; }
+      setIdeias(d && d.resposta ? d.resposta : "");
+    } catch (e) { notify(errMsg(e), "err"); }
+    finally { setBusy(false); }
+  }
+
+  const Radio = ({ val, cur, set, children }) => html`
+    <button type="button" onClick=${() => set(val)}
+      class=${cx("rounded-lg border px-3 py-1.5 text-sm transition",
+        cur === val ? "border-brand bg-brand-light font-medium text-brand-dark" : "border-line text-ink/70 hover:bg-black/[0.04]")}>
+      ${children}
+    </button>`;
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">✍️ Conteúdo</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">Gerador de Conteúdos</h1>
+      <p class="mt-1 text-xs text-muted">
+        As principais respostas das pesquisas com alunas da Mentoria, organizadas para virar pauta${atualizado ? " · atualizado " + fmtDate(atualizado) : ""}.
+      </p>
+
+      <div class="mt-5 grid gap-4 lg:grid-cols-2">
+        ${INSIGHT_CATS.map(([k, label, emoji]) => html`
+          <div class="rounded-2xl border border-line bg-card p-5">
+            <div class="text-sm font-semibold text-ink">${emoji} ${label}</div>
+            <ol class="mt-2 space-y-1.5 text-sm">
+              ${(porCat[k] || []).map((r) => html`
+                <li class="flex gap-2">
+                  <span class="w-4 shrink-0 text-right text-xs text-muted">${r.ordem}</span>
+                  <span class="min-w-0"><span class="text-ink">${r.texto}</span>${r.detalhe ? html`<span class="text-muted"> — ${r.detalhe}</span>` : null}</span>
+                </li>`)}
+            </ol>
+          </div>`)}
+      </div>
+
+      <h2 class="mt-9 text-sm font-semibold uppercase tracking-wider text-muted">Gerar ideias de conteúdo</h2>
+      <div class="mt-3 rounded-2xl border border-line bg-card p-5">
+        ${configured === false ? html`
+          <div class="mb-4 rounded-xl border border-[#efd9d3] bg-[#faefec] p-4 text-sm text-muted">
+            A IA ainda não está conectada (falta o segredo <code class="rounded bg-black/[0.05] px-1">ANTHROPIC_API_KEY</code>).
+          </div>` : null}
+
+        <div class="text-xs font-medium uppercase tracking-wide text-muted">1. Base das ideias</div>
+        <div class="mt-2 flex flex-wrap gap-2">
+          ${INSIGHT_CATS.map(([k, label, emoji]) => html`
+            <button type="button" onClick=${() => toggle(k)}
+              class=${cx("rounded-full border px-3 py-1.5 text-sm transition",
+                sel.has(k) ? "border-brand bg-brand-light font-medium text-brand-dark" : "border-line text-ink/60 hover:bg-black/[0.04]")}>
+              ${emoji} ${label}
+            </button>`)}
+        </div>
+
+        <div class="mt-4 flex flex-wrap gap-x-8 gap-y-4">
+          <div>
+            <div class="text-xs font-medium uppercase tracking-wide text-muted">2. Formato</div>
+            <div class="mt-2 flex gap-2">
+              <${Radio} val="video" cur=${formato} set=${setFormato}>🎬 Vídeo<//>
+              <${Radio} val="carrossel" cur=${formato} set=${setFormato}>🖼️ Carrossel<//>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs font-medium uppercase tracking-wide text-muted">3. Canal</div>
+            <div class="mt-2 flex gap-2">
+              <${Radio} val="instagram" cur=${canal} set=${setCanal}>Instagram<//>
+              ${formato === "video" ? html`<${Radio} val="youtube" cur=${canal} set=${setCanal}>YouTube<//>` : null}
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-5 flex flex-wrap items-center gap-2">
+          <${Btn} onClick=${gerar} loading=${busy} disabled=${configured === false}>Gerar ideias de conteúdos<//>
+          <span class="text-xs text-muted">Cada geração consome créditos da conta Anthropic.</span>
+        </div>
+
+        ${ideias != null ? html`
+          <div class="mt-5 border-t border-line pt-4">
+            ${ideias
+              ? html`<div class="prose-doc min-w-0 text-sm" dangerouslySetInnerHTML=${{ __html: mdToHtml(ideias) }}></div>`
+              : html`<p class="text-sm text-muted">A IA não retornou ideias. Tente novamente.</p>`}
+          </div>` : null}
+      </div>
+    </div>`;
+}
+
 /* ============================ App externo incorporado ============================ */
 
 // Incorpora um app externo em iframe, ocupando a área toda, com barra de "voltar".
@@ -2560,6 +2712,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "perfil") return html`<${ProfilePage} me=${me} onProfileChanged=${reload} />`;
   if (p0 === "admin" && me.role === "admin") return html`<${AdminPage} me=${me} />`;
   if (p0 === "conteudo" && p1 === "instagram") return html`<${InstagramPage} />`;
+  if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
   if (p0 === "pedagogico" && p1 === "gerador-feedbacks")
     return html`<${EmbedExterno} titulo="Gerador de Feedbacks" icone="🎓" src="https://name-tia-ai-web.onrender.com/dashboard" />`;
