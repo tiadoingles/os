@@ -1713,7 +1713,8 @@ function PedirIA() {
     <div class="max-w-2xl">
       <h1 class="flex items-center gap-2 text-2xl font-semibold text-ink">✨ Pedir a IA</h1>
       <p class="mt-1 text-sm text-muted">
-        Pergunte em linguagem natural. A resposta é montada a partir dos documentos publicados na Base de Conhecimento.
+        Pergunte em linguagem natural: sobre o próprio sistema, sobre o conteúdo da Base de Conhecimento
+        (com as fontes), ou qualquer outra coisa.
       </p>
 
       ${configured === false && html`
