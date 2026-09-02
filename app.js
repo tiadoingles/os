@@ -48,12 +48,12 @@ const ROLE_LABEL = { leitor: "Leitor", editor: "Editor", admin: "Admin" };
 // Cada `item` de grupo abre em #/<grupo>/<slug>; os que ainda não têm tela mostram
 // a página "Módulo em construção" com a descrição e as fontes de dados.
 const NAV = [
-  { id: "bc", nome: "Base de Conhecimento", icone: "📚", path: "/",
+  { id: "bc", nome: "Base de Conhecimento", icone: "📚", path: "/base",
     hint: "Todos os documentos, com tags e organização por seção." },
 
   { id: "agenda", nome: "Agenda", icone: "📅", itens: [
-    { slug: "feriados", nome: "Feriados", desc: "Calendário de feriados nacionais e pontos facultativos." },
-    { slug: "datas-importantes", nome: "Datas importantes", desc: "Lançamentos, prazos, eventos e marcos da empresa." },
+    { slug: "calendario", nome: "Calendário", desc: "Feriados nacionais e eventos da empresa. Clique num dia para adicionar um evento." },
+    { slug: "datas-importantes", nome: "Próximos eventos", desc: "Feriados e eventos das próximas semanas em lista." },
   ]},
 
   { id: "pedagogico", nome: "Pedagógico", icone: "🎓", itens: [
@@ -66,6 +66,8 @@ const NAV = [
   ]},
 
   { id: "cs", nome: "CS / Suporte", icone: "🤝", itens: [
+    { slug: "metricas-atendimento", nome: "Métricas de Atendimento",
+      desc: "Volume de atendimentos, tempo de primeira resposta, tempo de resolução e satisfação do CS. Base de dados a definir." },
     { slug: "pesquisas", nome: "Pesquisas de Alunos",
       desc: "Principais insights e as pesquisas completas.",
       links: [
@@ -573,7 +575,8 @@ const EMBED_ROUTES = new Set(["/pedagogico/gerador-feedbacks"]);
 function Shell({ me, route, children }) {
   const [open, setOpen] = useState(false);
   const p0 = route.parts[0] || "";
-  const bcActive = p0 === "" || p0 === "secao" || p0 === "doc" || p0 === "novo";
+  const bcActive = p0 === "base" || p0 === "secao" || p0 === "doc" || p0 === "novo";
+  const homeActive = p0 === "";
   const fullBleed = EMBED_ROUTES.has(route.path);
   const [openGroups, setOpenGroups] = useState(() => new Set([p0]));
   useEffect(() => { setOpenGroups((s) => new Set([...s, p0])); }, [p0]);
@@ -590,7 +593,7 @@ function Shell({ me, route, children }) {
     </a>`;
 
   const grupo = (g) => {
-    if (g.id === "bc") return linkItem(g.nome, g.icone, "/", bcActive);
+    if (g.id === "bc") return linkItem(g.nome, g.icone, "/base", bcActive);
     const aberto = openGroups.has(g.id);
     const algumAtivo = p0 === g.id;
     return html`
@@ -631,6 +634,7 @@ function Shell({ me, route, children }) {
       </div>
 
       <nav class="flex-1 space-y-0.5 overflow-y-auto px-2 py-3">
+        ${linkItem("Início", "🏠", "/", homeActive)}
         ${linkItem("Pedir a IA", "✨", "/pedir-ia", route.path === "/pedir-ia")}
         <div class="my-1 border-t border-line"></div>
         ${NAV.map(grupo)}
@@ -762,7 +766,7 @@ function SectionPage({ slug, me, sections, onSectionsChanged }) {
 
   useEffect(() => { setDocs(null); load(); }, [load]);
 
-  if (!section) return html`<${Empty} title="Seção não encontrada" icon="❓"><a class="text-brand" href="#/">Voltar ao início</a><//>`;
+  if (!section) return html`<${Empty} title="Seção não encontrada" icon="❓"><a class="text-brand" href="#/base">Voltar à Base de Conhecimento</a><//>`;
 
   const allTags = useMemo(() => {
     const set = new Set();
@@ -783,7 +787,7 @@ function SectionPage({ slug, me, sections, onSectionsChanged }) {
     <div>
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div class="flex items-center gap-2 text-sm text-muted"><a href="#/" class="hover:text-ink/75">Base de Conhecimento</a> / <span>${section.nome}</span></div>
+          <div class="flex items-center gap-2 text-sm text-muted"><a href="#/base" class="hover:text-ink/75">Base de Conhecimento</a> / <span>${section.nome}</span></div>
           <h1 class="mt-1 flex items-center gap-2 text-2xl font-semibold text-ink">${section.icone || "📄"} ${section.nome}</h1>
         </div>
         <div class="flex gap-2">
@@ -990,7 +994,7 @@ function DocDetail({ id, me, sections }) {
 
   useEffect(() => { setDoc(null); setNotFound(false); load(); }, [load]);
 
-  if (notFound) return html`<${Empty} title="Documento não encontrado" icon="🔍"><a class="text-brand" href="#/">Voltar ao início</a><//>`;
+  if (notFound) return html`<${Empty} title="Documento não encontrado" icon="🔍"><a class="text-brand" href="#/base">Voltar à Base de Conhecimento</a><//>`;
   if (!doc) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
 
   const canEdit = me.role !== "leitor";
@@ -1013,7 +1017,7 @@ function DocDetail({ id, me, sections }) {
   return html`
     <div>
       <div class="flex items-center gap-2 text-sm text-muted">
-        <a href="#/" class="hover:text-ink/75">Base de Conhecimento</a> /
+        <a href="#/base" class="hover:text-ink/75">Base de Conhecimento</a> /
         <a href=${"#/secao/" + doc.section.slug} class="hover:text-ink/75">${doc.section.nome}</a>
       </div>
 
@@ -2108,11 +2112,446 @@ function EmbedExterno({ titulo, icone, src }) {
     </div>`;
 }
 
+/* ============================ Início (HOME) + Agenda ============================ */
+
+const DIAS_SEMANA = ["domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"];
+const DIAS_CURTO = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+const MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
+const TIPO_EVENTO = {
+  evento: { label: "Evento", cls: "bg-[#e7eef4] text-[#456179]", dot: "bg-[#6b8aa3]" },
+  marco: { label: "Marco", cls: "bg-brand-light text-brand-dark", dot: "bg-brand" },
+  lembrete: { label: "Lembrete", cls: "bg-[#efe9cf] text-[#7c7440]", dot: "bg-[#bfa94e]" },
+};
+
+function isoDia(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function hojeISO() { return isoDia(new Date()); }
+function somaDias(iso, n) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const x = new Date(y, m - 1, d + n);
+  return isoDia(x);
+}
+function fmtDiaLongo(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  const s = `${DIAS_SEMANA[dt.getDay()]}, ${d} de ${MESES[m - 1]} de ${y}`;
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+function fmtDiaCurto(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return `${String(d).padStart(2, "0")}/${String(m).padStart(2, "0")}`;
+}
+
+// Domingo de Páscoa (algoritmo de Meeus/Butcher) e feriados nacionais do ano.
+function domingoDePascoa(ano) {
+  const a = ano % 19, b = Math.floor(ano / 100), c = ano % 100;
+  const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const mth = Math.floor((a + 11 * h + 22 * l) / 451);
+  const mes = Math.floor((h + l - 7 * mth + 114) / 31);
+  const dia = ((h + l - 7 * mth + 114) % 31) + 1;
+  return new Date(ano, mes - 1, dia);
+}
+function feriadosNacionais(ano) {
+  const p = domingoDePascoa(ano);
+  const rel = (off) => isoDia(new Date(p.getFullYear(), p.getMonth(), p.getDate() + off));
+  return [
+    { data: `${ano}-01-01`, nome: "Confraternização Universal", facultativo: false },
+    { data: rel(-48), nome: "Carnaval", facultativo: true },
+    { data: rel(-47), nome: "Carnaval", facultativo: true },
+    { data: rel(-46), nome: "Quarta-feira de Cinzas", facultativo: true },
+    { data: rel(-2), nome: "Sexta-feira Santa", facultativo: false },
+    { data: `${ano}-04-21`, nome: "Tiradentes", facultativo: false },
+    { data: `${ano}-05-01`, nome: "Dia do Trabalho", facultativo: false },
+    { data: rel(60), nome: "Corpus Christi", facultativo: true },
+    { data: `${ano}-09-07`, nome: "Independência do Brasil", facultativo: false },
+    { data: `${ano}-10-12`, nome: "Nossa Senhora Aparecida", facultativo: false },
+    { data: `${ano}-11-02`, nome: "Finados", facultativo: false },
+    { data: `${ano}-11-15`, nome: "Proclamação da República", facultativo: false },
+    { data: `${ano}-11-20`, nome: "Dia da Consciência Negra", facultativo: false },
+    { data: `${ano}-12-25`, nome: "Natal", facultativo: false },
+  ];
+}
+function feriadosNoIntervalo(deISO, ateISO) {
+  const anos = new Set([Number(deISO.slice(0, 4)), Number(ateISO.slice(0, 4))]);
+  const out = [];
+  for (const ano of anos) for (const f of feriadosNacionais(ano)) {
+    if (f.data >= deISO && f.data <= ateISO) out.push(f);
+  }
+  return out.sort((a, b) => a.data.localeCompare(b.data));
+}
+
+async function fetchEventos(deISO, ateISO) {
+  const { data, error } = await sb
+    .from("agenda_eventos")
+    .select("*")
+    .gte("data", deISO)
+    .lte("data", ateISO)
+    .order("data", { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+function HomePage({ me, sections }) {
+  const [data, setData] = useState(null);
+  const hoje = hojeISO();
+  const fimSemana = somaDias(hoje, 7);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [ev, pesq, ig, docs, ferr] = await Promise.all([
+          fetchEventos(hoje, fimSemana),
+          sb.from("pesquisa_avatar").select("chave,ativo,total_respostas,ultima_resposta_em,janela_dias"),
+          sb.from("ig_perfil").select("atualizado_em,seguidores").eq("id", 1).maybeSingle(),
+          sb.from("kb_documents").select("id", { count: "exact", head: true }),
+          sb.from("os_ferramentas").select("status"),
+        ]);
+        setData({
+          eventos: ev,
+          pesquisas: pesq.data || [],
+          ig: ig.data || null,
+          docCount: docs.count || 0,
+          ferramentas: ferr.data || [],
+        });
+      } catch (e) { notify(errMsg(e), "err"); setData({ eventos: [], pesquisas: [], ig: null, docCount: 0, ferramentas: [] }); }
+    })();
+  }, []);
+
+  const feriados = feriadosNoIntervalo(hoje, fimSemana);
+  const nome1 = (me && (me.nome || "").trim().split(/\s+/)[0]) || "";
+
+  const itensDoDia = (iso) => {
+    const fer = feriados.filter((f) => f.data === iso).map((f) => ({ tipo: "feriado", titulo: f.nome, facultativo: f.facultativo }));
+    const evs = (data ? data.eventos : []).filter((e) => e.data === iso)
+      .map((e) => ({ tipo: "evento", ...e }));
+    return [...fer, ...evs];
+  };
+
+  const semana = [];
+  for (let i = 0; i < 7; i++) {
+    const iso = somaDias(hoje, i);
+    const it = data ? itensDoDia(iso) : [];
+    if (it.length) semana.push({ iso, itens: it });
+  }
+
+  const pAtivas = data ? data.pesquisas.filter((r) => r.total_respostas && (r.ativo || (r.ultima_resposta_em && Date.now() - new Date(r.ultima_resposta_em).getTime() < (r.janela_dias || 30) * 86400000))).length : 0;
+  const ferrErro = data ? data.ferramentas.filter((f) => f.status === "erro").length : 0;
+  const igAtual = data && data.ig && data.ig.atualizado_em ? fmtDate(data.ig.atualizado_em) : "—";
+
+  const Chip = ({ it }) => {
+    if (it.tipo === "feriado") {
+      return html`<span class=${cx("inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium", it.facultativo ? "bg-[#efe9cf] text-[#7c7440]" : "bg-[#f4e0db] text-[#a44b43]")}>
+        <span>${it.facultativo ? "🟡" : "🇧🇷"}</span>${it.titulo}${it.facultativo ? " (facultativo)" : ""}</span>`;
+    }
+    const t = TIPO_EVENTO[it.tipo] || TIPO_EVENTO.evento;
+    return html`<span class=${cx("inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium", t.cls)}>
+      <span class=${cx("h-1.5 w-1.5 rounded-full", t.dot)}></span>${it.hora ? it.hora + " · " : ""}${it.titulo}</span>`;
+  };
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">🏠 Início</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">Boas-vindas ao OS Tia do Inglês${nome1 ? `, ${nome1}` : ""} 👋</h1>
+      <p class="mt-1 text-sm text-muted">${fmtDiaLongo(hoje)}</p>
+
+      ${!data ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
+        <div class="mt-6 grid gap-4 lg:grid-cols-2">
+          <div class="rounded-2xl border border-line bg-card p-5">
+            <div class="text-sm font-semibold uppercase tracking-wider text-muted">Hoje</div>
+            ${(() => {
+              const it = itensDoDia(hoje);
+              return it.length
+                ? html`<div class="mt-3 flex flex-wrap gap-2">${it.map((x) => html`<${Chip} it=${x} />`)}</div>`
+                : html`<p class="mt-3 text-sm text-muted">Nenhum feriado ou evento hoje. Dia livre para focar no que importa. 💪</p>`;
+            })()}
+          </div>
+
+          <div class="rounded-2xl border border-line bg-card p-5">
+            <div class="text-sm font-semibold uppercase tracking-wider text-muted">Próximos 7 dias</div>
+            ${semana.filter((d) => d.iso !== hoje).length
+              ? html`<ul class="mt-3 space-y-2.5">
+                  ${semana.filter((d) => d.iso !== hoje).map((d) => html`
+                    <li class="flex flex-wrap items-start gap-2">
+                      <span class="mt-1 w-12 shrink-0 text-xs font-medium text-muted">${fmtDiaCurto(d.iso)}</span>
+                      <span class="flex flex-wrap gap-2">${d.itens.map((x) => html`<${Chip} it=${x} />`)}</span>
+                    </li>`)}
+                </ul>`
+              : html`<p class="mt-3 text-sm text-muted">Semana sem feriados ou eventos cadastrados.</p>`}
+            <a href="#/agenda/calendario" class="mt-3 inline-block text-xs font-medium text-brand hover:underline">Abrir o calendário →</a>
+          </div>
+        </div>
+
+        <div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <a href="#/base" class="rounded-xl border border-line bg-card p-4 transition hover:border-brand/40">
+            <div class="text-xs uppercase tracking-wide text-muted">Base de Conhecimento</div>
+            <div class="mt-1 text-2xl font-semibold text-ink">${nf(data.docCount)}</div>
+            <div class="text-xs text-muted">documentos</div>
+          </a>
+          <a href="#/cs/pesquisas" class="rounded-xl border border-line bg-card p-4 transition hover:border-brand/40">
+            <div class="text-xs uppercase tracking-wide text-muted">Pesquisas de alunos</div>
+            <div class="mt-1 text-2xl font-semibold text-ink">${pAtivas}/6</div>
+            <div class="text-xs text-muted">ativas</div>
+          </a>
+          <a href="#/conteudo/instagram" class="rounded-xl border border-line bg-card p-4 transition hover:border-brand/40">
+            <div class="text-xs uppercase tracking-wide text-muted">Instagram</div>
+            <div class="mt-1 text-2xl font-semibold text-ink">${data.ig ? nfShort(data.ig.seguidores) : "—"}</div>
+            <div class="text-xs text-muted">seguidores · att. ${igAtual}</div>
+          </a>
+          <a href="#/ferramentas" class="rounded-xl border border-line bg-card p-4 transition hover:border-brand/40">
+            <div class="text-xs uppercase tracking-wide text-muted">Ferramentas</div>
+            <div class=${cx("mt-1 text-2xl font-semibold", ferrErro ? "text-[#a44b43]" : "text-ink")}>${ferrErro ? ferrErro : "OK"}</div>
+            <div class="text-xs text-muted">${ferrErro ? "com erro" : "tudo conectado"}</div>
+          </a>
+        </div>
+
+        <div class="mt-4 flex flex-wrap gap-2">
+          <a href="#/pedir-ia" class="rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink/80 hover:border-brand/40">✨ Pedir a IA</a>
+          <a href="#/base" class="rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink/80 hover:border-brand/40">📚 Base de Conhecimento</a>
+          <a href="#/agenda/calendario" class="rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink/80 hover:border-brand/40">📅 Calendário</a>
+          <a href="#/cs/pesquisas" class="rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink/80 hover:border-brand/40">🤝 Pesquisas de Alunos</a>
+        </div>
+      `}
+    </div>`;
+}
+
+function EventoModal({ dataISO, evento, me, onClose, onSaved }) {
+  const [d, setD] = useState(evento ? evento.data : dataISO);
+  const [titulo, setTitulo] = useState(evento ? evento.titulo : "");
+  const [hora, setHora] = useState(evento ? evento.hora || "" : "");
+  const [tipo, setTipo] = useState(evento ? evento.tipo : "evento");
+  const [descricao, setDescricao] = useState(evento ? evento.descricao || "" : "");
+  const [busy, setBusy] = useState(false);
+
+  async function salvar(e) {
+    e && e.preventDefault();
+    if (!titulo.trim()) { notify("Dê um título ao evento.", "err"); return; }
+    setBusy(true);
+    try {
+      const payload = { data: d, titulo: titulo.trim(), hora: hora.trim() || null, tipo, descricao: descricao.trim() || null };
+      if (evento) {
+        const { error } = await sb.from("agenda_eventos").update(payload).eq("id", evento.id);
+        if (error) throw error;
+        notify("Evento atualizado.", "ok");
+      } else {
+        const { error } = await sb.from("agenda_eventos").insert({ ...payload, criado_por: me ? me.id : null });
+        if (error) throw error;
+        notify("Evento adicionado.", "ok");
+      }
+      onSaved();
+    } catch (e2) { notify(errMsg(e2), "err"); }
+    finally { setBusy(false); }
+  }
+
+  async function excluir() {
+    if (!evento || !confirm("Excluir este evento?")) return;
+    setBusy(true);
+    try {
+      const { error } = await sb.from("agenda_eventos").delete().eq("id", evento.id);
+      if (error) throw error;
+      notify("Evento excluído.", "ok");
+      onSaved();
+    } catch (e2) { notify(errMsg(e2), "err"); }
+    finally { setBusy(false); }
+  }
+
+  return html`
+    <${Modal} title=${evento ? "Editar evento" : "Novo evento"} onClose=${onClose}>
+      <form onSubmit=${salvar} class="space-y-3">
+        <${Field} label="Data" required>
+          <input type="date" class=${inputCls} value=${d} onInput=${(e) => setD(e.target.value)} />
+        <//>
+        <${Field} label="Título" required>
+          <input class=${inputCls} placeholder="Ex.: Reunião de squad" value=${titulo} onInput=${(e) => setTitulo(e.target.value)} autofocus />
+        <//>
+        <div class="grid grid-cols-2 gap-3">
+          <${Field} label="Hora (opcional)">
+            <input type="time" class=${inputCls} value=${hora} onInput=${(e) => setHora(e.target.value)} />
+          <//>
+          <${Field} label="Tipo">
+            <select class=${inputCls} value=${tipo} onChange=${(e) => setTipo(e.target.value)}>
+              <option value="evento">Evento</option>
+              <option value="marco">Marco</option>
+              <option value="lembrete">Lembrete</option>
+            </select>
+          <//>
+        </div>
+        <${Field} label="Descrição (opcional)">
+          <textarea class=${cx(inputCls, "min-h-[70px]")} value=${descricao} onInput=${(e) => setDescricao(e.target.value)}></textarea>
+        <//>
+        <div class="flex items-center justify-between pt-1">
+          ${evento ? html`<button type="button" class="text-sm text-[#a44b43] hover:underline" onClick=${excluir} disabled=${busy}>Excluir</button>` : html`<span></span>`}
+          <div class="flex gap-2">
+            <${Btn} variant="ghost" type="button" onClick=${onClose}>Cancelar<//>
+            <${Btn} type="submit" loading=${busy}>Salvar<//>
+          </div>
+        </div>
+      </form>
+    <//>`;
+}
+
+function AgendaPage({ me, view }) {
+  const now = new Date();
+  const [ym, setYm] = useState({ y: now.getFullYear(), m: now.getMonth() });
+  const [eventos, setEventos] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [modal, setModal] = useState(null); // { dataISO } | { evento }
+  const podeEditar = !me || me.role === "editor" || me.role === "admin";
+
+  const primeiroDoMes = new Date(ym.y, ym.m, 1);
+  const gridInicio = new Date(ym.y, ym.m, 1 - primeiroDoMes.getDay()); // volta ao domingo
+  const dias = [];
+  for (let i = 0; i < 42; i++) dias.push(new Date(gridInicio.getFullYear(), gridInicio.getMonth(), gridInicio.getDate() + i));
+  const deISO = isoDia(dias[0]);
+  const ateISO = isoDia(dias[41]);
+
+  const carregar = useCallback(() => {
+    setLoading(true);
+    fetchEventos(deISO, ateISO)
+      .then(setEventos)
+      .catch((e) => { notify(errMsg(e), "err"); setEventos([]); })
+      .finally(() => setLoading(false));
+  }, [deISO, ateISO]);
+  useEffect(() => { carregar(); }, [carregar]);
+
+  const feriados = feriadosNoIntervalo(deISO, ateISO);
+  const ferPorDia = {};
+  for (const f of feriados) (ferPorDia[f.data] = ferPorDia[f.data] || []).push(f);
+  const evPorDia = {};
+  for (const e of eventos) (evPorDia[e.data] = evPorDia[e.data] || []).push(e);
+
+  const hoje = hojeISO();
+  const mudarMes = (delta) => setYm(({ y, m }) => {
+    const d = new Date(y, m + delta, 1);
+    return { y: d.getFullYear(), m: d.getMonth() };
+  });
+
+  // Lista dos próximos 30 dias (feriados + eventos)
+  const listaDe = hoje, listaAte = somaDias(hoje, 30);
+  const [eventosLista, setEventosLista] = useState([]);
+  useEffect(() => {
+    fetchEventos(listaDe, listaAte).then(setEventosLista).catch(() => setEventosLista([]));
+  }, [modal]); // recarrega ao fechar modal
+  const proximos = [
+    ...feriadosNoIntervalo(listaDe, listaAte).map((f) => ({ data: f.data, kind: "feriado", titulo: f.nome, facultativo: f.facultativo })),
+    ...eventosLista.map((e) => ({ data: e.data, kind: "evento", ...e })),
+  ].sort((a, b) => a.data.localeCompare(b.data) || (a.hora || "").localeCompare(b.hora || ""));
+
+  const listaView = view === "datas-importantes";
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">📅 Agenda</div>
+      <div class="mt-1 flex flex-wrap items-center justify-between gap-3">
+        <h1 class="text-2xl font-semibold text-ink">${listaView ? "Próximos eventos" : "Calendário"}</h1>
+        <div class="flex gap-2 text-sm">
+          <a href="#/agenda/calendario" class=${cx("rounded-lg px-3 py-1.5", !listaView ? "bg-brand-light font-medium text-brand-dark" : "text-ink/60 hover:bg-black/[0.04]")}>Calendário</a>
+          <a href="#/agenda/datas-importantes" class=${cx("rounded-lg px-3 py-1.5", listaView ? "bg-brand-light font-medium text-brand-dark" : "text-ink/60 hover:bg-black/[0.04]")}>Lista</a>
+        </div>
+      </div>
+
+      ${!listaView && html`
+        <div class="mt-4 rounded-2xl border border-line bg-card p-3 sm:p-4">
+          <div class="mb-3 flex items-center justify-between">
+            <div class="flex items-center gap-1">
+              <button class="rounded-md px-2 py-1 text-muted hover:bg-black/[0.05]" onClick=${() => mudarMes(-1)}>‹</button>
+              <div class="w-44 text-center text-sm font-semibold capitalize text-ink">${MESES[ym.m]} ${ym.y}</div>
+              <button class="rounded-md px-2 py-1 text-muted hover:bg-black/[0.05]" onClick=${() => mudarMes(1)}>›</button>
+            </div>
+            <button class="rounded-md border border-line px-2.5 py-1 text-xs text-ink/70 hover:bg-black/[0.04]"
+              onClick=${() => setYm({ y: now.getFullYear(), m: now.getMonth() })}>Hoje</button>
+          </div>
+
+          <div class="grid grid-cols-7 gap-px text-center text-[11px] font-medium uppercase text-muted">
+            ${DIAS_CURTO.map((d) => html`<div class="py-1">${d}</div>`)}
+          </div>
+          <div class="grid grid-cols-7 gap-px overflow-hidden rounded-lg bg-line">
+            ${dias.map((dt) => {
+              const iso = isoDia(dt);
+              const noMes = dt.getMonth() === ym.m;
+              const isHoje = iso === hoje;
+              const fers = ferPorDia[iso] || [];
+              const evs = evPorDia[iso] || [];
+              return html`
+                <div class=${cx("min-h-[92px] bg-white p-1.5 text-left align-top transition", !noMes && "bg-[#faf8f4] text-muted", podeEditar && "cursor-pointer hover:bg-brand-light/40")}
+                  onClick=${podeEditar ? () => setModal({ dataISO: iso }) : null}>
+                  <div class="flex items-center justify-between">
+                    <span class=${cx("inline-grid h-6 w-6 place-items-center rounded-full text-xs", isHoje ? "bg-brand font-semibold text-white" : noMes ? "text-ink/80" : "text-muted")}>${dt.getDate()}</span>
+                  </div>
+                  ${fers.map((f) => html`<div class=${cx("mt-1 truncate rounded px-1 py-0.5 text-[10px] font-medium", f.facultativo ? "bg-[#efe9cf] text-[#7c7440]" : "bg-[#f4e0db] text-[#a44b43]")} title=${f.nome}>${f.nome}</div>`)}
+                  ${evs.map((e) => {
+                    const t = TIPO_EVENTO[e.tipo] || TIPO_EVENTO.evento;
+                    return html`<div class=${cx("mt-1 flex items-center gap-1 truncate rounded px-1 py-0.5 text-[10px] font-medium", t.cls)}
+                      title=${(e.hora ? e.hora + " " : "") + e.titulo}
+                      onClick=${(ev) => { ev.stopPropagation(); setModal({ evento: e }); }}>
+                      <span class=${cx("h-1.5 w-1.5 shrink-0 rounded-full", t.dot)}></span>
+                      <span class="truncate">${e.hora ? e.hora + " " : ""}${e.titulo}</span>
+                    </div>`;
+                  })}
+                </div>`;
+            })}
+          </div>
+
+          <div class="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-muted">
+            <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded bg-[#f4e0db]"></span>Feriado nacional</span>
+            <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded bg-[#efe9cf]"></span>Ponto facultativo</span>
+            <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded-full bg-[#6b8aa3]"></span>Evento</span>
+            <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded-full bg-brand"></span>Marco</span>
+            <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded-full bg-[#bfa94e]"></span>Lembrete</span>
+            ${loading ? html`<span class="spinner"></span>` : null}
+          </div>
+          ${podeEditar ? html`<p class="mt-2 text-[11px] text-muted">Clique num dia para adicionar um evento.</p>` : null}
+        </div>`}
+
+      <div class=${listaView ? "mt-4" : "mt-6"}>
+        ${!listaView ? html`<h2 class="mb-2 text-sm font-semibold uppercase tracking-wider text-muted">Próximos 30 dias</h2>` : null}
+        <div class="overflow-hidden rounded-2xl border border-line bg-card">
+          ${proximos.length === 0
+            ? html`<div class="px-5 py-8 text-center text-sm text-muted">Nenhum feriado ou evento nos próximos 30 dias.</div>`
+            : html`<ul class="divide-y divide-line">
+                ${proximos.map((it) => {
+                  const t = it.kind === "evento" ? (TIPO_EVENTO[it.tipo] || TIPO_EVENTO.evento) : null;
+                  return html`
+                    <li class=${cx("flex items-start gap-3 px-4 py-3", it.kind === "evento" && podeEditar && "cursor-pointer hover:bg-black/[0.02]")}
+                      onClick=${it.kind === "evento" && podeEditar ? () => setModal({ evento: it }) : null}>
+                      <div class="w-14 shrink-0 text-center">
+                        <div class="text-xs font-semibold text-ink">${fmtDiaCurto(it.data)}</div>
+                        <div class="text-[10px] uppercase text-muted">${DIAS_CURTO[new Date(it.data.slice(0,4), Number(it.data.slice(5,7))-1, it.data.slice(8,10)).getDay()]}</div>
+                      </div>
+                      <div class="min-w-0 flex-1">
+                        <div class="text-sm font-medium text-ink">${it.hora ? it.hora + " · " : ""}${it.titulo}</div>
+                        ${it.kind === "feriado"
+                          ? html`<div class="text-xs text-muted">${it.facultativo ? "Ponto facultativo" : "Feriado nacional"}</div>`
+                          : (it.descricao ? html`<div class="truncate text-xs text-muted">${it.descricao}</div>` : null)}
+                      </div>
+                      ${it.kind === "feriado"
+                        ? html`<span class="text-xs">${it.facultativo ? "🟡" : "🇧🇷"}</span>`
+                        : html`<span class=${cx("shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium", t.cls)}>${t.label}</span>`}
+                    </li>`;
+                })}
+              </ul>`}
+        </div>
+        ${listaView && podeEditar ? html`
+          <div class="mt-3">
+            <${Btn} onClick=${() => setModal({ dataISO: hoje })}>+ Novo evento<//>
+          </div>` : null}
+      </div>
+
+      ${modal ? html`<${EventoModal} dataISO=${modal.dataISO} evento=${modal.evento} me=${me}
+        onClose=${() => setModal(null)} onSaved=${() => { setModal(null); carregar(); }} />` : null}
+    </div>`;
+}
+
 /* ============================ Router / App ============================ */
 
 function Router({ route, me, sections, reload }) {
   const [p0, p1] = route.parts;
-  if (!p0) return html`<${Dashboard} me=${me} sections=${sections} />`;
+  if (!p0) return html`<${HomePage} me=${me} sections=${sections} />`;
+  if (p0 === "base") return html`<${Dashboard} me=${me} sections=${sections} />`;
+  if (p0 === "agenda" && (p1 === "calendario" || p1 === "datas-importantes"))
+    return html`<${AgendaPage} me=${me} view=${p1} />`;
   if (p0 === "secao") return html`<${SectionPage} slug=${p1} me=${me} sections=${sections} onSectionsChanged=${reload} />`;
   if (p0 === "doc") return html`<${DocDetail} id=${p1} me=${me} sections=${sections} />`;
   if (p0 === "novo") return html`<${NewDocPage} me=${me} sections=${sections} query=${route.query} />`;
