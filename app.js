@@ -568,10 +568,13 @@ function iniciais(txt) {
   return ((p[0] || "?")[0] + (p[1] ? p[1][0] : "")).toUpperCase();
 }
 
+const EMBED_ROUTES = new Set(["/pedagogico/gerador-feedbacks"]);
+
 function Shell({ me, route, children }) {
   const [open, setOpen] = useState(false);
   const p0 = route.parts[0] || "";
   const bcActive = p0 === "" || p0 === "secao" || p0 === "doc" || p0 === "novo";
+  const fullBleed = EMBED_ROUTES.has(route.path);
   const [openGroups, setOpenGroups] = useState(() => new Set([p0]));
   useEffect(() => { setOpenGroups((s) => new Set([...s, p0])); }, [p0]);
   const toggle = (id) => setOpenGroups((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -663,9 +666,9 @@ function Shell({ me, route, children }) {
         </div>`}
 
       <main class="min-w-0 flex-1">
-        <div class="mx-auto max-w-5xl px-4 py-7 sm:px-6 lg:px-10 lg:py-10">
-          ${children}
-        </div>
+        ${fullBleed
+          ? children
+          : html`<div class="mx-auto max-w-5xl px-4 py-7 sm:px-6 lg:px-10 lg:py-10">${children}</div>`}
       </main>
     </div>`;
 }
@@ -1969,6 +1972,35 @@ function InstagramPage() {
     </div>`;
 }
 
+/* ============================ App externo incorporado ============================ */
+
+// Incorpora um app externo em iframe, ocupando a área toda, com barra de "voltar".
+function EmbedExterno({ titulo, icone, src }) {
+  const [erro, setErro] = useState(false);
+  return html`
+    <div class="flex h-screen flex-col">
+      <div class="flex items-center justify-between gap-3 border-b border-line bg-sidebar px-4 py-2.5">
+        <div class="flex items-center gap-2 text-sm">
+          <a href="#/" class="font-medium text-brand hover:underline">← OS</a>
+          <span class="text-muted">/</span>
+          <span class="font-medium text-ink">${icone} ${titulo}</span>
+        </div>
+        <a href=${src} target="_blank" rel="noopener" class="text-xs text-muted hover:text-ink">abrir em nova aba ↗</a>
+      </div>
+      <div class="relative flex-1">
+        <iframe src=${src} class="absolute inset-0 h-full w-full border-0"
+          allow="clipboard-write; clipboard-read; fullscreen; microphone; camera"
+          onError=${() => setErro(true)}
+          title=${titulo}></iframe>
+        ${erro ? html`
+          <div class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-bg p-6 text-center text-sm text-muted">
+            <div>Não foi possível carregar o app aqui dentro.</div>
+            <${Btn} as="a" href=${src} target="_blank" rel="noopener">Abrir em nova aba ↗<//>
+          </div>` : null}
+      </div>
+    </div>`;
+}
+
 /* ============================ Router / App ============================ */
 
 function Router({ route, me, sections, reload }) {
@@ -1982,6 +2014,8 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "perfil") return html`<${ProfilePage} me=${me} onProfileChanged=${reload} />`;
   if (p0 === "admin" && me.role === "admin") return html`<${AdminPage} me=${me} />`;
   if (p0 === "conteudo" && p1 === "instagram") return html`<${InstagramPage} />`;
+  if (p0 === "pedagogico" && p1 === "gerador-feedbacks")
+    return html`<${EmbedExterno} titulo="Gerador de Feedbacks" icone="🎓" src="https://name-tia-ai-web.onrender.com/dashboard" />`;
   const grupo = NAV.find((g) => g.id === p0 && g.itens);
   const item = grupo && grupo.itens.find((it) => it.slug === p1);
   if (grupo && item) return html`<${ModuloEmConstrucao} grupo=${grupo} item=${item} />`;
