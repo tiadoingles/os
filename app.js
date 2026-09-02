@@ -1843,6 +1843,132 @@ function PedirIA() {
     </div>`;
 }
 
+/* ============================ Conteúdo · Métricas Instagram ============================ */
+
+const nf = (n) => (n == null ? "—" : Number(n).toLocaleString("pt-BR"));
+const nfShort = (n) => {
+  if (n == null) return "—";
+  const a = Math.abs(n);
+  if (a >= 1e6) return (n / 1e6).toFixed(1).replace(".0", "") + "M";
+  if (a >= 1e3) return (n / 1e3).toFixed(1).replace(".0", "") + "k";
+  return String(n);
+};
+
+async function fetchInstagram() {
+  const [p, d, po] = await Promise.all([
+    sb.from("ig_perfil").select("*").eq("id", 1).maybeSingle(),
+    sb.from("ig_dia").select("*").order("data", { ascending: true }),
+    sb.from("ig_post").select("*").order("publicado_em", { ascending: false }).limit(60),
+  ]);
+  return { perfil: p.data, dias: d.data || [], posts: po.data || [] };
+}
+
+function Sparkline({ values, height = 40 }) {
+  if (!values.length) return null;
+  const max = Math.max(...values, 1);
+  const w = 100 / values.length;
+  return html`
+    <svg viewBox=${`0 0 100 ${height}`} preserveAspectRatio="none" class="h-10 w-full">
+      ${values.map((v, i) => {
+        const h = Math.max(1, (v / max) * (height - 2));
+        return html`<rect x=${(i * w).toFixed(2)} y=${(height - h).toFixed(2)} width=${(w * 0.8).toFixed(2)} height=${h.toFixed(2)} rx="0.6" fill="#ea5167" opacity="0.85"></rect>`;
+      })}
+    </svg>`;
+}
+
+function KPI({ label, valor, sub }) {
+  return html`
+    <div class="rounded-xl border border-line bg-card p-4">
+      <div class="text-xs uppercase tracking-wide text-muted">${label}</div>
+      <div class="mt-1 text-2xl font-semibold text-ink">${valor}</div>
+      ${sub ? html`<div class="text-xs text-muted">${sub}</div>` : null}
+    </div>`;
+}
+
+function InstagramPage() {
+  const [data, setData] = useState(null);
+  useEffect(() => { fetchInstagram().then(setData).catch((e) => { notify(errMsg(e), "err"); setData({ perfil: null, dias: [], posts: [] }); }); }, []);
+  if (!data) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
+
+  const { perfil, dias, posts } = data;
+  const jan = dias.slice(-28);
+  const sum = (k) => jan.reduce((a, r) => a + (r[k] || 0), 0);
+  const reachTotal = sum("reach"), viewsTotal = sum("views");
+  const novos = jan.reduce((a, r) => a + (r.novos_seguidores || 0), 0);
+  const interTotal = sum("interacoes");
+  const engRate = reachTotal ? (interTotal / reachTotal) * 100 : 0;
+  const atualizado = perfil && perfil.atualizado_em ? fmtDate(perfil.atualizado_em, true) : "—";
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">✍️ Conteúdo</div>
+      <h1 class="mt-1 flex flex-wrap items-center gap-x-3 text-2xl font-semibold text-ink">
+        Métricas Instagram
+        ${perfil ? html`<a href=${"https://instagram.com/" + perfil.username} target="_blank" rel="noopener" class="text-sm font-normal text-brand hover:underline">@${perfil.username} ↗</a>` : null}
+      </h1>
+      <p class="mt-1 text-xs text-muted">Dados via Windsor.ai · atualizado ${atualizado}</p>
+
+      ${perfil && html`
+        <div class="mt-4 flex flex-wrap gap-6 rounded-xl border border-line bg-card p-4">
+          <div><div class="text-2xl font-semibold text-ink">${nf(perfil.seguidores)}</div><div class="text-xs text-muted">seguidores</div></div>
+          <div><div class="text-2xl font-semibold text-ink">${nf(perfil.publicacoes)}</div><div class="text-xs text-muted">publicações</div></div>
+          <div><div class="text-2xl font-semibold text-ink">${nf(perfil.seguindo)}</div><div class="text-xs text-muted">seguindo</div></div>
+        </div>`}
+
+      <h2 class="mt-8 text-sm font-semibold uppercase tracking-wider text-muted">Últimos 28 dias</h2>
+      <div class="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <${KPI} label="Alcance" valor=${nfShort(reachTotal)} sub=${"~" + nfShort(Math.round(reachTotal / (jan.length || 1))) + "/dia"} />
+        <${KPI} label="Novos seguidores" valor=${nf(novos)} sub=${jan.length ? "em " + jan.length + " dias" : ""} />
+        <${KPI} label="Interações" valor=${nfShort(interTotal)} sub=${"eng. " + engRate.toFixed(1) + "% do alcance"} />
+        <${KPI} label="Views de conteúdo" valor=${nfShort(viewsTotal)} />
+      </div>
+
+      <div class="mt-4 rounded-xl border border-line bg-card p-4">
+        <div class="mb-2 text-xs uppercase tracking-wide text-muted">Alcance por dia</div>
+        <${Sparkline} values=${jan.map((r) => r.reach || 0)} />
+        <div class="mt-1 flex justify-between text-[11px] text-muted">
+          <span>${jan[0] ? fmtDate(jan[0].data) : ""}</span>
+          <span>${jan.length ? fmtDate(jan[jan.length - 1].data) : ""}</span>
+        </div>
+      </div>
+
+      <h2 class="mt-8 text-sm font-semibold uppercase tracking-wider text-muted">Posts recentes (${posts.length})</h2>
+      <div class="mt-3 overflow-x-auto rounded-xl border border-line bg-card">
+        <table class="w-full min-w-[720px] text-left text-sm">
+          <thead class="border-b border-line text-xs uppercase tracking-wide text-muted">
+            <tr>
+              <th class="px-4 py-3 font-medium">Post</th>
+              <th class="px-4 py-3 font-medium">Data</th>
+              <th class="px-4 py-3 font-medium">Alcance</th>
+              <th class="px-4 py-3 font-medium">Interações</th>
+              <th class="px-4 py-3 font-medium">Eng. %</th>
+              <th class="px-4 py-3 font-medium">Views</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-line">
+            ${posts.map((p) => {
+              const er = p.reach ? ((p.engajamento || 0) / p.reach) * 100 : 0;
+              return html`
+                <tr key=${p.media_id}>
+                  <td class="px-4 py-3">
+                    <a href=${p.permalink} target="_blank" rel="noopener" class="font-medium text-ink hover:text-brand">
+                      ${(p.legenda || "(sem legenda)").slice(0, 70)}${(p.legenda || "").length > 70 ? "…" : ""}
+                    </a>
+                    <div class="text-xs text-muted">${p.tipo}</div>
+                  </td>
+                  <td class="px-4 py-3 text-muted">${fmtDate(p.publicado_em)}</td>
+                  <td class="px-4 py-3">${nf(p.reach)}</td>
+                  <td class="px-4 py-3">${nf(p.engajamento)}</td>
+                  <td class=${cx("px-4 py-3", er >= 4 ? "font-medium text-[#5e7a52]" : "text-muted")}>${er.toFixed(1)}%</td>
+                  <td class="px-4 py-3 text-muted">${nf(p.views)}</td>
+                </tr>`;
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
 /* ============================ Router / App ============================ */
 
 function Router({ route, me, sections, reload }) {
@@ -1855,6 +1981,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "pedir-ia") return html`<${PedirIA} />`;
   if (p0 === "perfil") return html`<${ProfilePage} me=${me} onProfileChanged=${reload} />`;
   if (p0 === "admin" && me.role === "admin") return html`<${AdminPage} me=${me} />`;
+  if (p0 === "conteudo" && p1 === "instagram") return html`<${InstagramPage} />`;
   const grupo = NAV.find((g) => g.id === p0 && g.itens);
   const item = grupo && grupo.itens.find((it) => it.slug === p1);
   if (grupo && item) return html`<${ModuloEmConstrucao} grupo=${grupo} item=${item} />`;
