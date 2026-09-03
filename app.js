@@ -57,8 +57,6 @@ const NAV = [
   ]},
 
   { id: "pedagogico", nome: "Pedagógico", icone: "🎓", itens: [
-    { slug: "farol", nome: "Farol do Lucro – Pedagógico",
-      desc: "Principais métricas do Pedagógico: meta × realizado semana a semana, com farol de cor automático." },
     { slug: "materiais", nome: "Materiais (Base/Consulta)",
       desc: "Biblioteca pedagógica para consulta: metodologia, MYPA, roteiros e apostilas do método." },
     { slug: "gerador-materiais", nome: "Gerador de Materiais",
@@ -70,8 +68,6 @@ const NAV = [
   ]},
 
   { id: "cs", nome: "CS / Suporte", icone: "🤝", itens: [
-    { slug: "farol", nome: "Farol do Lucro – CS/Suporte",
-      desc: "Principais métricas do CS/Suporte: meta × realizado semana a semana, com farol de cor automático." },
     { slug: "metricas-atendimento", nome: "Métricas de Atendimento",
       desc: "Volume de atendimentos, tempo de primeira resposta, tempo de resolução e satisfação do CS. Base de dados a definir." },
     { slug: "pesquisas", nome: "Pesquisas de Alunos",
@@ -94,8 +90,6 @@ const NAV = [
   ]},
 
   { id: "comercial", nome: "Comercial", icone: "📈", itens: [
-    { slug: "farol", nome: "Farol do Lucro – Comercial",
-      desc: "Principais métricas do Comercial: meta × realizado semana a semana, com farol de cor automático." },
     { slug: "vendas", nome: "Vendas", desc: "Volume e evolução de vendas." },
     { slug: "faturamento", nome: "Faturamento Bruto", desc: "Faturamento bruto por período." },
     { slug: "cash-collected", nome: "Cash Collected", desc: "Dinheiro efetivamente recebido." },
@@ -105,16 +99,12 @@ const NAV = [
   ]},
 
   { id: "financeiro", nome: "Financeiro", icone: "💰", itens: [
-    { slug: "farol", nome: "Farol do Lucro – Financeiro",
-      desc: "Principais métricas do Financeiro: meta × realizado semana a semana, com farol de cor automático." },
     { slug: "cobrancas", nome: "Cobranças", desc: "Inadimplentes e datas de pagamentos recorrentes." },
     { slug: "fluxo-caixa", nome: "Fluxo de Caixa", desc: "Entradas e saídas ao longo do tempo." },
     { slug: "dre", nome: "DRE", desc: "Demonstração de resultados." },
   ]},
 
   { id: "conteudo", nome: "Conteúdo", icone: "✍️", itens: [
-    { slug: "farol", nome: "Farol do Lucro – Conteúdo",
-      desc: "Principais métricas de Conteúdo: meta × realizado semana a semana, com farol de cor automático." },
     { slug: "instagram", nome: "Métricas Instagram", desc: "Alcance, engajamento e crescimento no Instagram." },
     { slug: "gerador-conteudos", nome: "Gerador de conteúdos",
       desc: "Gera ideias e conteúdos a partir dos insights das pesquisas de alunos." },
@@ -648,6 +638,7 @@ function Shell({ me, route, children }) {
 
       <nav class="flex-1 space-y-0.5 overflow-y-auto px-2 py-3">
         ${linkItem("Início", "🏠", "/", homeActive)}
+        ${linkItem("Farol do Lucro", "🚦", "/farol", p0 === "farol")}
         ${linkItem("Pedir a IA", "✨", "/pedir-ia", route.path === "/pedir-ia")}
         <div class="my-1 border-t border-line"></div>
         ${NAV.map(grupo)}
@@ -2252,7 +2243,6 @@ function GeradorConteudosPage() {
 // Recriação do "Farol do LUCRO" (ref.: craft-sistema-green.lucaspuerto.com.br),
 // um por setor, editável no próprio OS e salvo no Supabase.
 
-const FAROL_SETORES = { pedagogico: "Pedagógico", cs: "CS/Suporte", comercial: "Comercial", financeiro: "Financeiro", conteudo: "Conteúdo" };
 
 const FAROL_BLOCOS = [
   { id: "constantes", nome: "Indicadores Constantes", descricao: "Métricas vitais do negócio, acompanhadas todo mês sem exceção." },
@@ -2403,19 +2393,10 @@ function farolMesLabel(m) {
   return `${nome.charAt(0).toUpperCase()}${nome.slice(1)} ${y}`;
 }
 const FAROL_ROT_CONS = { soma: "soma", media: "média", ultimo: "último" };
-
-// Quais blocos de indicadores aparecem em cada setor.
-const FAROL_SETOR_BLOCOS = {
-  comercial: ["estrategicos", "trafego", "vendas"],
-  cs: ["sucesso"],
-  pedagogico: ["produto"],
-  financeiro: ["constantes", "financeiro"],
-  conteudo: ["marketing"],
-};
-
 const FAROL_ANOS = (() => { const a = new Date().getFullYear(); return [a - 2, a - 1, a, a + 1]; })();
 
-function FarolPage({ setor, me }) {
+function FarolPage({ me }) {
+  const setor = "geral"; // quadro único do OS
   const [loading, setLoading] = useState(true);
   const [mes, setMes] = useState(farolMesAtual());
   const [semanas, setSemanas] = useState(4);
@@ -2430,9 +2411,7 @@ function FarolPage({ setor, me }) {
   // para o flush imediato (mudança de status/julgamento) enxergar o estado novo.
   const commitRows = (next) => { const arr = typeof next === "function" ? next(rowsRef.current) : next; rowsRef.current = arr; setRows(arr); };
   const podeEditar = !me || me.role === "editor" || me.role === "admin";
-  const setorNome = FAROL_SETORES[setor] || setor;
-
-  const blocosVisiveis = FAROL_BLOCOS.filter((b) => (FAROL_SETOR_BLOCOS[setor] || FAROL_BLOCOS.map((x) => x.id)).includes(b.id));
+  const blocosVisiveis = FAROL_BLOCOS;
 
   const carregarMes = useCallback(async (m) => {
     const { data, error } = await sb.from("farol_indicadores").select("*").eq("setor", setor).eq("mes", m).order("ordem", { ascending: true });
@@ -2602,8 +2581,8 @@ function FarolPage({ setor, me }) {
 
   return html`
     <div>
-      <div class="text-sm text-muted">🚦 ${setorNome}</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">Farol do Lucro – ${setorNome}</h1>
+      <div class="text-sm text-muted">🚦 Painel de acompanhamento estratégico</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">Farol do Lucro</h1>
       <p class="mt-1 max-w-3xl text-xs text-muted">
         Você define a meta de cada indicador, preenche o realizado semana a semana e o farol muda de cor sozinho,
         mostrando onde agir antes de o mês fechar. Tudo é salvo automaticamente.
@@ -3511,8 +3490,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "pedir-ia") return html`<${PedirIA} />`;
   if (p0 === "perfil") return html`<${ProfilePage} me=${me} onProfileChanged=${reload} />`;
   if (p0 === "admin" && me.role === "admin") return html`<${AdminPage} me=${me} />`;
-  if (p1 === "farol" && ["pedagogico", "cs", "comercial", "financeiro", "conteudo"].includes(p0))
-    return html`<${FarolPage} setor=${p0} me=${me} />`;
+  if (p0 === "farol") return html`<${FarolPage} me=${me} />`;
   if (p0 === "conteudo" && p1 === "instagram") return html`<${InstagramPage} />`;
   if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
