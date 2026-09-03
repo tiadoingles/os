@@ -63,6 +63,8 @@ const NAV = [
       desc: "Biblioteca pedagógica para consulta: metodologia, MYPA, roteiros e apostilas do método." },
     { slug: "gerador-materiais", nome: "Gerador de Materiais",
       desc: "Cria roteiros de aula e materiais didáticos seguindo o método (skills tia-do-ingles-materials / fluxo-semanal-mentoria)." },
+    { slug: "gerador-slides", nome: "Gerador de Slides",
+      desc: "Briefing da aula → deck de slides no Canva (skills metodologia, avatar, marca, MYPA, slides) e, no fluxo semanal, os demais entregáveis." },
     { slug: "gerador-feedbacks", nome: "Gerador de Feedbacks",
       desc: "Corrige e gera feedback da produção das alunas como a Tia faria (skill tia-feedback-engine) — a incorporar no sistema." },
   ]},
@@ -98,6 +100,7 @@ const NAV = [
     { slug: "faturamento", nome: "Faturamento Bruto", desc: "Faturamento bruto por período." },
     { slug: "cash-collected", nome: "Cash Collected", desc: "Dinheiro efetivamente recebido." },
     { slug: "conversao-closer", nome: "Taxa de Conversão Closer", desc: "Conversão por closer e por período." },
+    { slug: "dash-fad", nome: "Dash FAD", desc: "Dashboard da Agência FAD, incorporado no OS." },
     { slug: "ferramentas", nome: "Ferramentas", desc: "Análise de Calls e Apresentação do Closer." },
   ]},
 
@@ -580,7 +583,7 @@ function iniciais(txt) {
   return ((p[0] || "?")[0] + (p[1] ? p[1][0] : "")).toUpperCase();
 }
 
-const EMBED_ROUTES = new Set(["/pedagogico/gerador-feedbacks"]);
+const EMBED_ROUTES = new Set(["/pedagogico/gerador-feedbacks", "/comercial/dash-fad"]);
 
 function Shell({ me, route, children }) {
   const [open, setOpen] = useState(false);
@@ -2820,6 +2823,218 @@ function FarolPage({ setor, me }) {
     </div>`;
 }
 
+/* ============================ Pedagógico · Gerador de Slides ============================ */
+
+const SLIDES_STATUS = {
+  pendente: { label: "Na fila", cls: PILL_WARN },
+  processando: { label: "Gerando…", cls: PILL_NEUTRAL },
+  pronto: { label: "Pronto", cls: PILL_OK },
+  erro: { label: "Erro", cls: PILL_ERR },
+};
+
+async function fetchSlidesPedidos() {
+  const { data, error } = await sb.from("slides_pedidos").select("*").order("created_at", { ascending: false }).limit(40);
+  if (error) throw error;
+  return data || [];
+}
+
+function GeradorSlidesPage({ me }) {
+  const [pedidos, setPedidos] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const podeEditar = !me || me.role === "editor" || me.role === "admin";
+
+  const [f, setF] = useState({
+    tema: "", duracao: "60 min", duracaoOutro: "", nivel: "", nivelOutro: "",
+    qtdExercicios: "5", qtdOutro: "", habilidades: [], habilidadeOutra: "",
+    objetivo: "", objetivoTexto: "", pontoEspecifico: "",
+    contexto: "Sem preferência", contextoOutro: "",
+    material: "Não tenho material de referência", materialTexto: "",
+    deckRef: 'Usar o modelo padrão ("Modais")', deckRefTexto: "",
+    comparacao: "Sim, se fizer sentido", comparacaoTexto: "",
+    trocaPeca: "Sim, se fizer sentido", trocaPecaTexto: "",
+    quiz: "Sim, 3 perguntas", quizNum: "",
+    desafio: "Sim", desafioTexto: "",
+    nomeAula: "", fluxo: "",
+  });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const toggleArr = (k, v) => setF((s) => ({ ...s, [k]: s[k].includes(v) ? s[k].filter((x) => x !== v) : [...s[k], v] }));
+
+  useEffect(() => {
+    fetchSlidesPedidos().then(setPedidos).catch((e) => { notify(errMsg(e), "err"); setPedidos([]); });
+    const t = setInterval(() => fetchSlidesPedidos().then(setPedidos).catch(() => {}), 20000);
+    return () => clearInterval(t);
+  }, []);
+
+  async function enviar(e) {
+    e.preventDefault();
+    if (!f.tema.trim()) return notify("Preencha o tema da aula.", "err");
+    if (!(f.nivel || f.nivelOutro.trim())) return notify("Escolha o nível dos alunos.", "err");
+    if (!f.objetivoTexto.trim()) return notify("Descreva o objetivo com suas palavras — é o campo mais importante.", "err");
+    if (!f.pontoEspecifico.trim()) return notify("Preencha o ponto específico a destacar.", "err");
+    if (!f.fluxo) return notify("Diga se a aula é avulsa ou parte do fluxo semanal.", "err");
+    if (f.deckRef.startsWith("Escolher") && !f.deckRefTexto.trim()) return notify("Cole a URL ou o ID do deck de referência do Canva.", "err");
+    setBusy(true);
+    try {
+      const { error } = await sb.from("slides_pedidos").insert({
+        criado_por: me ? me.id : null,
+        tema: f.tema.trim(),
+        nivel: f.nivelOutro.trim() || f.nivel,
+        duracao: f.duracaoOutro.trim() ? f.duracaoOutro.trim() + " min" : f.duracao,
+        fluxo: f.fluxo,
+        briefing: f,
+      });
+      if (error) throw error;
+      notify("Pedido enviado. A geração entra na fila e aparece aqui quando ficar pronta.", "ok");
+      setF((s) => ({ ...s, tema: "", objetivoTexto: "", pontoEspecifico: "", nomeAula: "", comparacaoTexto: "", trocaPecaTexto: "", desafioTexto: "", materialTexto: "" }));
+      fetchSlidesPedidos().then(setPedidos).catch(() => {});
+    } catch (e2) { notify(errMsg(e2), "err"); }
+    finally { setBusy(false); }
+  }
+
+  const Opc = ({ on, click, children }) => html`
+    <button type="button" onClick=${click}
+      class=${cx("mb-1.5 mr-1.5 rounded-lg border px-3 py-1.5 text-sm transition",
+        on ? "border-brand bg-brand-light font-medium text-brand-dark" : "border-line text-ink/70 hover:bg-black/[0.04]")}>${children}</button>`;
+  const G = ({ label, obrig, hint, children }) => html`
+    <div class="border-t border-line pt-4">
+      <div class="text-sm font-medium text-ink">${label}${obrig ? html`<span class="text-brand"> *</span>` : null}</div>
+      ${hint ? html`<div class="mt-0.5 text-xs text-muted">${hint}</div>` : null}
+      <div class="mt-2">${children}</div>
+    </div>`;
+  const outroInput = (k, ph, num) => html`<input class=${cx(inputCls, "mt-1 max-w-xs")} type=${num ? "text" : "text"} inputmode=${num ? "numeric" : "text"}
+    placeholder=${ph} value=${f[k]} onInput=${(e) => set(k, e.target.value)} />`;
+
+  return html`
+    <div class="max-w-3xl">
+      <div class="text-sm text-muted">🎓 Pedagógico</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">Gerador de Slides</h1>
+      <p class="mt-1 text-sm text-muted">
+        Preencha o briefing da aula. Ao enviar, a geração do deck de slides no Canva entra na fila —
+        seguindo as skills do Método (metodologia, avatar, marca, MYPA e <i>slides</i>). Se for parte do
+        fluxo semanal, também são gerados resumo, quiz de 18, tarefa em vídeo e perguntas do Lab.
+      </p>
+
+      ${!podeEditar ? null : html`
+      <form onSubmit=${enviar} class="mt-5 rounded-2xl border border-line bg-card p-5">
+        <div>
+          <div class="text-sm font-medium text-ink">1. Tema da aula<span class="text-brand"> *</span></div>
+          <input class=${cx(inputCls, "mt-2")} placeholder='Ex.: "Present Perfect", "Phrasal Verbs de viagem"'
+            value=${f.tema} onInput=${(e) => set("tema", e.target.value)} />
+        </div>
+
+        <${G} label="2. Duração da aula" obrig=${true}>
+          ${["30 min", "45 min", "60 min", "90 min"].map((o) => html`<${Opc} on=${f.duracao === o && !f.duracaoOutro} click=${() => setF((s) => ({ ...s, duracao: o, duracaoOutro: "" }))}>${o}<//>`)}
+          ${outroInput("duracaoOutro", "Outro (minutos)", true)}
+        <//>
+
+        <${G} label="3. Nível dos alunos" obrig=${true}>
+          ${["Básico", "Intermediário", "Avançado", "Todos os níveis (turma mista)"].map((o) => html`<${Opc} on=${f.nivel === o && !f.nivelOutro} click=${() => setF((s) => ({ ...s, nivel: o, nivelOutro: "" }))}>${o}<//>`)}
+          ${outroInput("nivelOutro", 'Outro (ex.: "A2/B1 específico")')}
+        <//>
+
+        <${G} label="4. Quantidade de exercícios" obrig=${true}>
+          ${["3", "5", "8", "10"].map((o) => html`<${Opc} on=${f.qtdExercicios === o && !f.qtdOutro} click=${() => setF((s) => ({ ...s, qtdExercicios: o, qtdOutro: "" }))}>${o}<//>`)}
+          ${outroInput("qtdOutro", "Outro (número)", true)}
+        <//>
+
+        <${G} label="5. Habilidades a trabalhar" obrig=${true} hint="Seleção múltipla permitida">
+          ${["Listening", "Speaking", "Pronúncia", "Vocabulário", "Reading", "Todas"].map((o) => html`<${Opc} on=${f.habilidades.includes(o)} click=${() => toggleArr("habilidades", o)}>${o}<//>`)}
+          ${outroInput("habilidadeOutra", "Outra habilidade (ex.: Writing)")}
+        <//>
+
+        <${G} label="6. Objetivo principal da aula" obrig=${true} hint="Marque um botão E descreva com suas palavras — a descrição é o que mais pesa na qualidade final.">
+          ${["Aprender uma estrutura gramatical nova", "Ampliar vocabulário para um contexto específico", "Corrigir um erro comum dos alunos", "Praticar conversação/fluência"].map((o) => html`<${Opc} on=${f.objetivo === o} click=${() => set("objetivo", o)}>${o}<//>`)}
+          <textarea class=${cx(inputCls, "mt-2 min-h-[80px]")} placeholder="Descreva o objetivo com suas palavras (obrigatório)"
+            value=${f.objetivoTexto} onInput=${(e) => set("objetivoTexto", e.target.value)}></textarea>
+        <//>
+
+        <${G} label="7. Ponto específico a destacar" obrig=${true} hint='Ex.: "diferença entre passado simples e present perfect", "erro comum de trocar make por do".'>
+          <textarea class=${cx(inputCls, "min-h-[64px]")} value=${f.pontoEspecifico} onInput=${(e) => set("pontoEspecifico", e.target.value)}></textarea>
+        <//>
+
+        <${G} label="8. Contexto de vida real prioritário" hint="Nunca religião, política ou temas polêmicos.">
+          ${["Viagem", "Trabalho", "Família", "Autoconhecimento", "Humor", "Atualidades", "Sem preferência"].map((o) => html`<${Opc} on=${f.contexto === o && !f.contextoOutro} click=${() => setF((s) => ({ ...s, contexto: o, contextoOutro: "" }))}>${o}<//>`)}
+          ${outroInput("contextoOutro", "Outro contexto")}
+        <//>
+
+        <${G} label="9. Material de referência">
+          ${["Não tenho material de referência", "Tenho vídeo/áudio/transcrição para basear a aula"].map((o) => html`<${Opc} on=${f.material === o} click=${() => set("material", o)}>${o}<//>`)}
+          ${f.material.startsWith("Tenho") ? html`<textarea class=${cx(inputCls, "mt-1 min-h-[64px]")} placeholder="Cole o link ou o conteúdo/descrição do material" value=${f.materialTexto} onInput=${(e) => set("materialTexto", e.target.value)}></textarea>` : null}
+        <//>
+
+        <${G} label="10. Deck de referência do Canva a clonar">
+          ${['Usar o modelo padrão ("Modais")', "Escolher outro deck de referência"].map((o) => html`<${Opc} on=${f.deckRef === o} click=${() => set("deckRef", o)}>${o}<//>`)}
+          ${f.deckRef.startsWith("Escolher") ? html`<input class=${cx(inputCls, "mt-1")} placeholder="URL ou ID do design no Canva (obrigatório)" value=${f.deckRefTexto} onInput=${(e) => set("deckRefTexto", e.target.value)} />` : null}
+        <//>
+
+        <${G} label='11. Incluir página de comparação ("X vs. Y")?'>
+          ${["Sim, se fizer sentido", "Não incluir"].map((o) => html`<${Opc} on=${f.comparacao === o} click=${() => set("comparacao", o)}>${o}<//>`)}
+          <input class=${cx(inputCls, "mt-1 max-w-md")} placeholder='Qual contraste? (ex.: "Regulares vs. Irregulares")' value=${f.comparacaoTexto} onInput=${(e) => set("comparacaoTexto", e.target.value)} />
+        <//>
+
+        <${G} label='12. Incluir exercício "Troque a Peça" (LEGO Approach)?'>
+          ${["Sim, se fizer sentido", "Não incluir"].map((o) => html`<${Opc} on=${f.trocaPeca === o} click=${() => set("trocaPeca", o)}>${o}<//>`)}
+          <input class=${cx(inputCls, "mt-1 max-w-md")} placeholder="Sugestão de frase-base (opcional)" value=${f.trocaPecaTexto} onInput=${(e) => set("trocaPecaTexto", e.target.value)} />
+        <//>
+
+        <${G} label="13. Incluir quiz final?">
+          ${["Sim, 3 perguntas", "Sim, com outro número de perguntas", "Não incluir"].map((o) => html`<${Opc} on=${f.quiz === o} click=${() => set("quiz", o)}>${o}<//>`)}
+          ${f.quiz.startsWith("Sim, com outro") ? outroInput("quizNum", "Quantas perguntas?", true) : null}
+        <//>
+
+        <${G} label="14. Incluir slide de desafio/CTA final?">
+          ${["Sim", "Não"].map((o) => html`<${Opc} on=${f.desafio === o} click=${() => set("desafio", o)}>${o}<//>`)}
+          <input class=${cx(inputCls, "mt-1")} placeholder='Texto do desafio (ex.: "poste nos comentários e marque @tiadoingles")' value=${f.desafioTexto} onInput=${(e) => set("desafioTexto", e.target.value)} />
+        <//>
+
+        <${G} label="15. Nome/número da aula" hint="Rodapé dos slides e nome do arquivo. Em branco = gerado do tema.">
+          <input class=${cx(inputCls, "max-w-md")} placeholder='Ex.: "Aula 12 — Present Perfect"' value=${f.nomeAula} onInput=${(e) => set("nomeAula", e.target.value)} />
+        <//>
+
+        <${G} label="16. Aula avulsa ou parte do fluxo semanal?" obrig=${true}>
+          ${[["avulsa", "Aula avulsa (só os slides)"], ["semanal", "Parte do fluxo semanal (slides + resumo + quiz de 18 + tarefa em vídeo + perguntas do Lab)"]].map(([v, l]) => html`<${Opc} on=${f.fluxo === v} click=${() => set("fluxo", v)}>${l}<//>`)}
+        <//>
+
+        <div class="mt-5 flex items-center gap-3">
+          <${Btn} type="submit" loading=${busy}>Enviar para geração<//>
+          <span class="text-xs text-muted">Sem emojis, sem diminutivos, tom adulto e acolhedor — regras de marca aplicadas sempre.</span>
+        </div>
+      </form>`}
+
+      <h2 class="mt-9 text-sm font-semibold uppercase tracking-wider text-muted">Pedidos</h2>
+      ${pedidos === null
+        ? html`<div class="mt-3 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
+        : pedidos.length === 0
+          ? html`<${Empty} icon="🖼️" title="Nenhum pedido ainda" />`
+          : html`<div class="mt-3 space-y-2">
+              ${pedidos.map((p) => {
+                const st = SLIDES_STATUS[p.status] || SLIDES_STATUS.pendente;
+                return html`
+                  <div class="rounded-xl border border-line bg-card p-4">
+                    <div class="flex flex-wrap items-start justify-between gap-2">
+                      <div class="min-w-0">
+                        <div class="font-medium text-ink">${p.tema}</div>
+                        <div class="text-xs text-muted">${[p.nivel, p.duracao, p.fluxo === "semanal" ? "fluxo semanal" : "avulsa"].filter(Boolean).join(" · ")} · ${fmtDate(p.created_at, true)}</div>
+                      </div>
+                      <span class=${cx("shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold", st.cls)}>${st.label}</span>
+                    </div>
+                    ${p.status === "pronto" ? html`
+                      <div class="mt-2 flex flex-wrap gap-3 text-sm">
+                        ${p.canva_edit_url ? html`<a href=${p.canva_edit_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Abrir no Canva ↗</a>` : null}
+                        ${p.pptx_url ? html`<a href=${p.pptx_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Baixar PPTX ↗</a>` : null}
+                        ${(p.entregaveis || []).map((d) => html`<a href=${d.url} target="_blank" rel="noopener" class="text-brand hover:underline">${d.nome} ↗</a>`)}
+                      </div>` : null}
+                    ${p.log ? html`<div class="mt-2 whitespace-pre-wrap text-xs text-muted">${p.log}</div>` : null}
+                  </div>`;
+              })}
+            </div>`}
+      <p class="mt-4 text-xs text-muted">
+        A geração roda pela tarefa agendada do Claude <code class="rounded bg-black/[0.05] px-1">gerar-slides-os</code>
+        (verifica a fila de hora em hora; clique em “Run now” em Scheduled para gerar na hora).
+      </p>
+    </div>`;
+}
+
 /* ============================ App externo incorporado ============================ */
 
 // Incorpora um app externo em iframe, ocupando a área toda, com barra de "voltar".
@@ -3301,8 +3516,11 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "conteudo" && p1 === "instagram") return html`<${InstagramPage} />`;
   if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
+  if (p0 === "pedagogico" && p1 === "gerador-slides") return html`<${GeradorSlidesPage} me=${me} />`;
   if (p0 === "pedagogico" && p1 === "gerador-feedbacks")
     return html`<${EmbedExterno} titulo="Gerador de Feedbacks" icone="🎓" src="https://name-tia-ai-web.onrender.com/dashboard" />`;
+  if (p0 === "comercial" && p1 === "dash-fad")
+    return html`<${EmbedExterno} titulo="Dash FAD" icone="📈" src="https://appdash.agenciafad.com.br/dashboard" />`;
   const grupo = NAV.find((g) => g.id === p0 && g.itens);
   const item = grupo && grupo.itens.find((it) => it.slug === p1);
   if (grupo && item) return html`<${ModuloEmConstrucao} grupo=${grupo} item=${item} />`;
