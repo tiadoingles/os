@@ -57,6 +57,8 @@ const NAV = [
   ]},
 
   { id: "pedagogico", nome: "Pedagógico", icone: "🎓", itens: [
+    { slug: "farol", nome: "Farol do Lucro – Pedagógico",
+      desc: "Principais métricas do Pedagógico: meta × realizado semana a semana, com farol de cor automático." },
     { slug: "materiais", nome: "Materiais (Base/Consulta)",
       desc: "Biblioteca pedagógica para consulta: metodologia, MYPA, roteiros e apostilas do método." },
     { slug: "gerador-materiais", nome: "Gerador de Materiais",
@@ -66,6 +68,8 @@ const NAV = [
   ]},
 
   { id: "cs", nome: "CS / Suporte", icone: "🤝", itens: [
+    { slug: "farol", nome: "Farol do Lucro – CS/Suporte",
+      desc: "Principais métricas do CS/Suporte: meta × realizado semana a semana, com farol de cor automático." },
     { slug: "metricas-atendimento", nome: "Métricas de Atendimento",
       desc: "Volume de atendimentos, tempo de primeira resposta, tempo de resolução e satisfação do CS. Base de dados a definir." },
     { slug: "pesquisas", nome: "Pesquisas de Alunos",
@@ -88,6 +92,8 @@ const NAV = [
   ]},
 
   { id: "comercial", nome: "Comercial", icone: "📈", itens: [
+    { slug: "farol", nome: "Farol do Lucro – Comercial",
+      desc: "Principais métricas do Comercial: meta × realizado semana a semana, com farol de cor automático." },
     { slug: "vendas", nome: "Vendas", desc: "Volume e evolução de vendas." },
     { slug: "faturamento", nome: "Faturamento Bruto", desc: "Faturamento bruto por período." },
     { slug: "cash-collected", nome: "Cash Collected", desc: "Dinheiro efetivamente recebido." },
@@ -96,12 +102,16 @@ const NAV = [
   ]},
 
   { id: "financeiro", nome: "Financeiro", icone: "💰", itens: [
+    { slug: "farol", nome: "Farol do Lucro – Financeiro",
+      desc: "Principais métricas do Financeiro: meta × realizado semana a semana, com farol de cor automático." },
     { slug: "cobrancas", nome: "Cobranças", desc: "Inadimplentes e datas de pagamentos recorrentes." },
     { slug: "fluxo-caixa", nome: "Fluxo de Caixa", desc: "Entradas e saídas ao longo do tempo." },
     { slug: "dre", nome: "DRE", desc: "Demonstração de resultados." },
   ]},
 
   { id: "conteudo", nome: "Conteúdo", icone: "✍️", itens: [
+    { slug: "farol", nome: "Farol do Lucro – Conteúdo",
+      desc: "Principais métricas de Conteúdo: meta × realizado semana a semana, com farol de cor automático." },
     { slug: "instagram", nome: "Métricas Instagram", desc: "Alcance, engajamento e crescimento no Instagram." },
     { slug: "gerador-conteudos", nome: "Gerador de conteúdos",
       desc: "Gera ideias e conteúdos a partir dos insights das pesquisas de alunos." },
@@ -2235,6 +2245,464 @@ function GeradorConteudosPage() {
     </div>`;
 }
 
+/* ============================ Farol do Lucro ============================ */
+// Recriação do "Farol do LUCRO" (ref.: craft-sistema-green.lucaspuerto.com.br),
+// um por setor, editável no próprio OS e salvo no Supabase.
+
+const FAROL_SETORES = { pedagogico: "Pedagógico", cs: "CS/Suporte", comercial: "Comercial", financeiro: "Financeiro", conteudo: "Conteúdo" };
+
+const FAROL_BLOCOS = [
+  { id: "constantes", nome: "Indicadores Constantes", descricao: "Métricas vitais do negócio, acompanhadas todo mês sem exceção." },
+  { id: "estrategicos", nome: "Indicadores Estratégicos de Sucesso", descricao: "As North Star do período: o que define se o planejado geral deu certo." },
+  { id: "marketing", nome: "Marketing e Conteúdo", descricao: "" },
+  { id: "trafego", nome: "Tráfego Pago", descricao: "" },
+  { id: "vendas", nome: "Vendas", descricao: "" },
+  { id: "produto", nome: "Produto e Programas", descricao: "" },
+  { id: "tecnologia", nome: "Tecnologia e Desenvolvimento", descricao: "" },
+  { id: "sucesso", nome: "Sucesso do Cliente e Suporte", descricao: "" },
+  { id: "operacoes", nome: "Operações e Eventos", descricao: "" },
+  { id: "financeiro", nome: "Financeiro", descricao: "" },
+];
+
+const FAROL_STATUS = {
+  "verde-escuro": { nome: "Superou a meta", cor: "#4CAF6E" },
+  "verde-claro": { nome: "Dentro da meta", cor: "#B9D9C6" },
+  amarelo: { nome: "Abaixo, com plano", cor: "#EEB44E" },
+  vermelho: { nome: "Abaixo, sem saída", cor: "#F2CDD1" },
+  "vermelho-escuro": { nome: "Catástrofe", cor: "#E83B2B" },
+  "sem-dado": { nome: "Sem dado", cor: "#D8DEE4" },
+};
+const FAROL_TOL = 0.05;
+
+const FAROL_INDICADORES = [
+  ["Receita Bruta", "constantes", "saida", "maior", "soma", "R$"],
+  ["Caixa Recebido", "constantes", "saida", "maior", "soma", "R$"],
+  ["Taxa de Renovação de Alunos/Mentorados", "constantes", "saida", "maior", "media", "%"],
+  ["Margem de Lucro", "constantes", "saida", "maior", "media", "%"],
+  ["Número de Vendas", "estrategicos", "saida", "maior", "soma", "un"],
+  ["Número de Renovações", "estrategicos", "saida", "maior", "soma", "un"],
+  ["Número de Upgrades", "estrategicos", "saida", "maior", "soma", "un"],
+  ["CAC (Custo de Aquisição de Cliente)", "estrategicos", "saida", "menor", "media", "R$"],
+  ["LTV (Valor do Cliente no Tempo)", "estrategicos", "saida", "maior", "media", "R$"],
+  ["Crescimento de Audiência", "marketing", "saida", "maior", "soma", "un"],
+  ["Volume de Postagens no Orgânico", "marketing", "entrada", "maior", "soma", "un"],
+  ["Volume de Criativos Produzidos", "marketing", "entrada", "maior", "soma", "un"],
+  ["Crescimento de Engajamento e Alcance", "marketing", "saida", "maior", "media", "%"],
+  ["Taxa de 1º Acerto da Área de Conteúdos", "marketing", "saida", "maior", "media", "%"],
+  ["Leads Captados", "trafego", "saida", "maior", "soma", "un"],
+  ["CPL (Custo por Lead)", "trafego", "saida", "menor", "media", "R$"],
+  ["% de Leads Qualificados", "trafego", "saida", "maior", "media", "%"],
+  ["Número de Campanhas Criadas", "trafego", "entrada", "maior", "soma", "un"],
+  ["ROAS", "trafego", "saida", "maior", "media", "x"],
+  ["Verba Investida", "trafego", "entrada", "maior", "soma", "R$"],
+  ["Número de Agendamentos", "vendas", "saida", "maior", "soma", "un"],
+  ["Número de Calls Realizadas", "vendas", "saida", "maior", "soma", "un"],
+  ["Taxa de Conversão", "vendas", "saida", "maior", "media", "%"],
+  ["Ticket Médio", "vendas", "saida", "maior", "media", "R$"],
+  ["Propostas Enviadas", "vendas", "entrada", "maior", "soma", "un"],
+  ["Taxa de Comparecimento (no-show)", "vendas", "saida", "maior", "media", "%"],
+  ["Módulos e Aulas Entregues no Prazo", "produto", "saida", "maior", "media", "%"],
+  ["Taxa de Conclusão do Curso", "produto", "saida", "maior", "media", "%"],
+  ["Engajamento na Área de Membros", "produto", "saida", "maior", "media", "%"],
+  ["Número de Erros em Páginas/Funil", "tecnologia", "saida", "menor", "soma", "un"],
+  ["Pontuação das Páginas (PageSpeed)", "tecnologia", "saida", "maior", "ultimo", "pts"],
+  ["Taxa de 1º Acerto no Prazo", "tecnologia", "saida", "maior", "media", "%"],
+  ["Páginas Testadas", "tecnologia", "entrada", "maior", "soma", "un"],
+  ["NPS (Net Promoter Score)", "sucesso", "saida", "maior", "media", "pts"],
+  ["Número de Contatos por Mês", "sucesso", "entrada", "maior", "media", "un"],
+  ["Taxa de Reembolso", "sucesso", "saida", "menor", "media", "%"],
+  ["Tempo de Resposta e Resolução", "sucesso", "saida", "menor", "media", "h"],
+  ["Taxa de Renovação e Upgrade", "sucesso", "saida", "maior", "media", "%"],
+  ["PDAs Entregues no Prazo", "sucesso", "saida", "maior", "media", "%"],
+  ["Taxa de Entrega no Prazo", "operacoes", "saida", "maior", "media", "%"],
+  ["Tarefas Fora do Escopo", "operacoes", "saida", "menor", "soma", "un"],
+  ["Taxa de Erros de Operação", "operacoes", "saida", "menor", "media", "%"],
+  ["Custo Operacional por Evento", "operacoes", "saida", "menor", "media", "R$"],
+  ["Intercorrências na Agenda", "operacoes", "saida", "menor", "soma", "un"],
+  ["Reuniões Realizadas", "operacoes", "entrada", "maior", "soma", "un"],
+  ["% de Inadimplência", "financeiro", "saida", "menor", "media", "%"],
+  ["Gastos do Mês (Realizado)", "financeiro", "entrada", "menor", "soma", "R$"],
+  ["Variação do Orçamento (Orçado × Realizado)", "financeiro", "saida", "menor", "media", "%"],
+  ["% do Orçamento Utilizado", "financeiro", "saida", "menor", "ultimo", "%"],
+].map(([nome, bloco, tipo, direcao, consolidacao, unidade]) => ({ nome, bloco, tipo, direcao, consolidacao, unidade }));
+
+const farolModelo = (nome) => FAROL_INDICADORES.find((i) => i.nome.toLowerCase() === String(nome || "").trim().toLowerCase());
+
+function farolPreenchidos(ind) { return (ind.valores || []).filter((v) => v !== null && v !== undefined && v !== ""); }
+function farolConsolidar(ind) {
+  const vals = farolPreenchidos(ind).map(Number).filter((n) => !Number.isNaN(n));
+  if (!vals.length) return null;
+  if (ind.consolidacao === "soma") return vals.reduce((a, b) => a + b, 0);
+  if (ind.consolidacao === "media") return vals.reduce((a, b) => a + b, 0) / vals.length;
+  return vals[vals.length - 1];
+}
+function farolMetaPeriodo(ind, totalSemanas) {
+  const meta = Number(ind.meta);
+  if (!meta) return null;
+  if (ind.consolidacao !== "soma") return meta;
+  const feitas = farolPreenchidos(ind).length;
+  if (!feitas || feitas >= totalSemanas) return meta;
+  return meta * (feitas / totalSemanas);
+}
+function farolAtingimento(ind, totalSemanas) {
+  const atual = farolConsolidar(ind);
+  const meta = farolMetaPeriodo(ind, totalSemanas);
+  if (atual === null || !meta) return null;
+  if (ind.direcao === "menor") return atual === 0 ? 2 : meta / atual;
+  return atual / meta;
+}
+function farolStatus(ind, totalSemanas) {
+  const a = farolAtingimento(ind, totalSemanas);
+  if (a === null) return "sem-dado";
+  if (a >= 1 + FAROL_TOL) return "verde-escuro";
+  if (a >= 1 - FAROL_TOL) return "verde-claro";
+  return ind.julgamento || "abaixo-indefinido";
+}
+function farolTextoSobre(hex) {
+  const canal = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const luz = (h) => {
+    const [r, g, b] = [1, 3, 5].map((i) => canal(parseInt(h.slice(i, i + 2), 16) / 255));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const razao = (a, b) => { const [x, y] = [luz(a), luz(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+  return razao("#1c2128", hex) >= razao("#ffffff", hex) ? "#1c2128" : "#ffffff";
+}
+function farolFmt(valor, unidade) {
+  if (valor === null || valor === undefined || valor === "") return "";
+  const n = Number(valor);
+  if (Number.isNaN(n)) return "";
+  const casas = Math.abs(n) >= 100 || Number.isInteger(n) ? 0 : 1;
+  const num = n.toLocaleString("pt-BR", { minimumFractionDigits: casas, maximumFractionDigits: casas });
+  if (unidade === "R$") return "R$ " + num;
+  if (unidade === "%") return num + "%";
+  if (unidade === "x") return num + "x";
+  if (unidade === "un") return num;
+  return num + " " + unidade;
+}
+function farolLerNum(texto) {
+  if (texto === null || texto === undefined) return null;
+  let limpo = String(texto).replace(/[^\d.,\-]/g, "");
+  if (limpo.includes(",")) limpo = limpo.replace(/\./g, "").replace(",", ".");
+  else { const p = limpo.split("."); limpo = (p.length === 2 && p[1].length !== 3) ? `${p[0]}.${p[1]}` : p.join(""); }
+  if (limpo === "" || limpo === "-") return null;
+  const n = Number(limpo);
+  return Number.isNaN(n) ? null : n;
+}
+const farolMesAtual = () => new Date().toISOString().slice(0, 7);
+function farolMesAntes(m) {
+  const [y, mm] = m.split("-").map(Number);
+  const d = new Date(y, mm - 2, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+function farolMesLabel(m) {
+  const [y, mm] = m.split("-").map(Number);
+  const nome = MESES[mm - 1] || m;
+  return `${nome.charAt(0).toUpperCase()}${nome.slice(1)} ${y}`;
+}
+const FAROL_ROT_CONS = { soma: "soma", media: "média", ultimo: "último" };
+
+function FarolPage({ setor, me }) {
+  const [loading, setLoading] = useState(true);
+  const [mes, setMes] = useState(farolMesAtual());
+  const [semanas, setSemanas] = useState(4);
+  const [rows, setRows] = useState([]);
+  const [livre, setLivre] = useState(null); // bloco em modo "criar próprio"
+  const rowsRef = useRef(rows);
+  const timers = useRef({});
+  // rowsRef é a fonte síncrona da verdade: efeitos do Preact rodam tarde demais
+  // para o flush imediato (mudança de status/julgamento) enxergar o estado novo.
+  const commitRows = (next) => { const arr = typeof next === "function" ? next(rowsRef.current) : next; rowsRef.current = arr; setRows(arr); };
+  const podeEditar = !me || me.role === "editor" || me.role === "admin";
+  const setorNome = FAROL_SETORES[setor] || setor;
+
+  const carregarMes = useCallback(async (m) => {
+    const { data, error } = await sb.from("farol_indicadores").select("*").eq("setor", setor).eq("mes", m).order("ordem", { ascending: true });
+    if (error) notify(errMsg(error), "err");
+    rowsRef.current = data || [];
+    setRows(data || []);
+  }, [setor]);
+
+  useEffect(() => {
+    let vivo = true;
+    (async () => {
+      setLoading(true);
+      let cfg = null;
+      const r = await sb.from("farol_config").select("*").eq("setor", setor).maybeSingle();
+      cfg = r.data;
+      if (!cfg && podeEditar) {
+        const ins = await sb.from("farol_config").insert({ setor, mes: farolMesAtual(), semanas: 4 }).select().single();
+        cfg = ins.data;
+      }
+      if (!vivo) return;
+      const m = (cfg && cfg.mes) || farolMesAtual();
+      setMes(m);
+      setSemanas((cfg && cfg.semanas) || 4);
+      await carregarMes(m);
+      if (vivo) setLoading(false);
+    })();
+    return () => { vivo = false; };
+  }, [setor]);
+
+  function patchRow(id, patch, imediato) {
+    let merged = null;
+    commitRows((rs) => rs.map((r) => {
+      if (r.id !== id) return r;
+      merged = { ...r, ...(typeof patch === "function" ? patch(r) : patch) };
+      return merged;
+    }));
+    if (!merged) return;
+    clearTimeout(timers.current[id]);
+    const flush = async () => {
+      const { error } = await sb.from("farol_indicadores").update({
+        nome: merged.nome, tipo: merged.tipo, direcao: merged.direcao, consolidacao: merged.consolidacao, unidade: merged.unidade,
+        meta: merged.meta, responsavel: merged.responsavel, fonte: merged.fonte, obs: merged.obs, julgamento: merged.julgamento, valores: merged.valores,
+      }).eq("id", id);
+      if (error) notify(errMsg(error), "err");
+    };
+    if (imediato) flush(); else timers.current[id] = setTimeout(flush, 700);
+  }
+
+  async function mudarMes(m) {
+    setMes(m); setLoading(true);
+    if (podeEditar) await sb.from("farol_config").update({ mes: m, atualizado_em: new Date().toISOString() }).eq("setor", setor);
+    await carregarMes(m); setLoading(false);
+  }
+  async function mudarSemanas(n) {
+    setSemanas(n);
+    if (podeEditar) await sb.from("farol_config").update({ semanas: n, atualizado_em: new Date().toISOString() }).eq("setor", setor);
+    const novas = rowsRef.current.map((r) => ({ ...r, valores: Array.from({ length: n }, (_, i) => (r.valores && r.valores[i] != null ? r.valores[i] : null)) }));
+    commitRows(novas);
+    for (const r of novas) sb.from("farol_indicadores").update({ valores: r.valores }).eq("id", r.id);
+  }
+
+  async function addInd(bloco, nome) {
+    const m = farolModelo(nome);
+    const doBloco = rows.filter((r) => r.bloco === bloco);
+    const ordem = (doBloco.length ? Math.max(...doBloco.map((r) => r.ordem || 0)) : 0) + 1;
+    const novo = {
+      setor, mes, bloco,
+      nome: m ? m.nome : nome, tipo: m ? m.tipo : "saida", direcao: m ? m.direcao : "maior",
+      consolidacao: m ? m.consolidacao : "soma", unidade: m ? m.unidade : "un",
+      meta: null, responsavel: "", fonte: "", obs: "", julgamento: null,
+      valores: Array(semanas).fill(null), ordem,
+    };
+    const { data, error } = await sb.from("farol_indicadores").insert(novo).select().single();
+    if (error) { notify(errMsg(error), "err"); return; }
+    commitRows((rs) => [...rs, data]);
+    setLivre(null);
+  }
+  async function delInd(id) {
+    if (!confirm("Remover este indicador do farol?")) return;
+    const { error } = await sb.from("farol_indicadores").delete().eq("id", id);
+    if (error) { notify(errMsg(error), "err"); return; }
+    commitRows((rs) => rs.filter((r) => r.id !== id));
+  }
+  async function duplicarAnterior() {
+    const prev = farolMesAntes(mes);
+    const { data } = await sb.from("farol_indicadores").select("*").eq("setor", setor).eq("mes", prev).order("ordem");
+    if (!data || !data.length) { notify(`${farolMesLabel(prev)} não tem indicadores para copiar.`, "err"); return; }
+    const novos = data.map((r) => ({
+      setor, mes, bloco: r.bloco, nome: r.nome, tipo: r.tipo, direcao: r.direcao, consolidacao: r.consolidacao,
+      unidade: r.unidade, meta: r.meta, responsavel: r.responsavel, fonte: r.fonte,
+      obs: "", julgamento: null, valores: Array(semanas).fill(null), ordem: r.ordem,
+    }));
+    const { data: ins, error } = await sb.from("farol_indicadores").insert(novos).select();
+    if (error) { notify(errMsg(error), "err"); return; }
+    commitRows((rs) => [...rs, ...ins]);
+    notify(`${ins.length} indicadores copiados de ${farolMesLabel(prev)}.`, "ok");
+  }
+
+  if (loading) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
+
+  const totalCols = semanas + 8;
+  const numInput = "w-full rounded-md border border-line bg-white px-2 py-1 text-right text-sm tabular-nums focus:border-brand focus:outline-none";
+  const txtInput = "w-full rounded-md border border-line bg-white px-2 py-1 text-sm focus:border-brand focus:outline-none";
+  const miniSel = "rounded border border-line bg-white px-1 py-0.5 text-[11px] text-muted focus:border-brand focus:outline-none";
+
+  // alertas
+  const alertas = [];
+  if (rows.length) {
+    if (!rows.some((r) => r.tipo === "entrada")) alertas.push("Só há métricas de saída. Acrescente ao menos uma de entrada (algo que o time controla: posts publicados, propostas enviadas, calls agendadas) — resultado sempre chega tarde.");
+    const semMeta = rows.filter((r) => !r.meta);
+    if (semMeta.length) alertas.push(`${semMeta.length} indicador(es) sem meta — sem meta o farol não calcula status.`);
+    const semDono = rows.filter((r) => !(r.responsavel || "").trim());
+    if (semDono.length) alertas.push(`${semDono.length} indicador(es) sem responsável.`);
+    const planoFalta = rows.filter((r) => farolStatus(r, semanas) === "amarelo" && !(r.obs || "").trim());
+    if (planoFalta.length) alertas.push(`${planoFalta.length} indicador(es) marcados como "tenho plano" mas sem o plano escrito nas observações.`);
+    if (rows.length > 10) alertas.push(`${rows.length} indicadores. O ideal é até 10 por mês — acima disso o painel deixa de ser lido em 5 minutos.`);
+  }
+
+  const statusChip = (r) => {
+    const st = farolStatus(r, semanas);
+    if (st === "abaixo-indefinido") {
+      return html`<select class=${miniSel} disabled=${!podeEditar}
+        onChange=${(e) => e.target.value && patchRow(r.id, { julgamento: e.target.value }, true)}>
+        <option value="">Você tem plano?</option>
+        <option value="amarelo">Sim, tenho um plano</option>
+        <option value="vermelho">Não sei o que fazer</option>
+        <option value="vermelho-escuro">É catástrofe</option>
+      </select>`;
+    }
+    const s = FAROL_STATUS[st];
+    const rever = ["amarelo", "vermelho", "vermelho-escuro"].includes(st) && podeEditar;
+    return html`<span
+      class="inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold"
+      style=${`background:${s.cor};color:${farolTextoSobre(s.cor)};${rever ? "cursor:pointer" : ""}`}
+      title=${rever ? "Clique para rever esta classificação" : s.nome}
+      onClick=${rever ? () => patchRow(r.id, { julgamento: null }, true) : null}>${s.nome}</span>`;
+  };
+
+  const rotuloAndamento = (r) => {
+    const base = FAROL_ROT_CONS[r.consolidacao];
+    const feitas = farolPreenchidos(r).length;
+    if (r.consolidacao !== "soma" || !feitas || feitas >= semanas) return base;
+    return `${base} · ${feitas} de ${semanas} sem`;
+  };
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">🚦 ${setorNome}</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">Farol do Lucro – ${setorNome}</h1>
+      <p class="mt-1 max-w-3xl text-xs text-muted">
+        Você define a meta de cada indicador, preenche o realizado semana a semana e o farol muda de cor sozinho,
+        mostrando onde agir antes de o mês fechar. Tudo é salvo automaticamente.
+      </p>
+
+      <div class="mt-4 flex flex-wrap items-end gap-4 rounded-xl border border-line bg-card p-4">
+        <label class="text-sm">
+          <span class="mb-1 block text-xs font-medium uppercase tracking-wide text-muted">Mês de referência</span>
+          <input type="month" class=${txtInput} value=${mes} disabled=${!podeEditar}
+            onChange=${(e) => e.target.value && mudarMes(e.target.value)} />
+        </label>
+        <label class="text-sm">
+          <span class="mb-1 block text-xs font-medium uppercase tracking-wide text-muted">Semanas no mês</span>
+          <select class=${txtInput} value=${String(semanas)} disabled=${!podeEditar}
+            onChange=${(e) => mudarSemanas(Number(e.target.value))}>
+            <option value="4">4 semanas</option>
+            <option value="5">5 semanas</option>
+          </select>
+        </label>
+        ${podeEditar && !rows.length ? html`
+          <${Btn} variant="ghost" onClick=${duplicarAnterior}>Copiar indicadores de ${farolMesLabel(farolMesAntes(mes))}<//>` : null}
+      </div>
+
+      ${alertas.length ? html`
+        <div class="mt-3 space-y-1.5">
+          ${alertas.map((a) => html`<div class="rounded-lg border border-[#efe9cf] bg-[#faf6e8] px-3 py-2 text-xs text-[#7c7440]">⚠ ${a}</div>`)}
+        </div>` : null}
+
+      <div class="mt-4 overflow-x-auto rounded-xl border border-line bg-card">
+        <table class="w-full min-w-[900px] border-collapse text-left text-sm">
+          <thead class="border-b border-line text-[11px] uppercase tracking-wide text-muted">
+            <tr>
+              <th class="px-3 py-2 font-medium">Indicador</th>
+              ${Array.from({ length: semanas }, (_, i) => html`<th class="px-2 py-2 text-right font-medium">Sem ${i + 1}</th>`)}
+              <th class="px-2 py-2 text-right font-medium">Mensal</th>
+              <th class="px-2 py-2 text-right font-medium">Meta</th>
+              <th class="px-2 py-2 font-medium">Status</th>
+              <th class="px-2 py-2 font-medium">Responsável</th>
+              <th class="px-2 py-2 font-medium">Fonte</th>
+              <th class="px-2 py-2 font-medium">Observações / plano</th>
+              <th class="px-1 py-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${FAROL_BLOCOS.map((bloco) => {
+              const doBloco = rows.filter((r) => r.bloco === bloco.id).sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
+              const cont = {};
+              for (const r of doBloco) { const s = farolStatus(r, semanas); cont[s] = (cont[s] || 0) + 1; }
+              const usados = new Set(doBloco.map((r) => r.nome.toLowerCase()));
+              const opcoes = FAROL_INDICADORES.filter((i) => i.bloco === bloco.id && !usados.has(i.nome.toLowerCase()));
+              return [
+                html`
+                  <tr class="bg-[#f6f3ee]">
+                    <td colspan=${totalCols} class="px-3 py-2">
+                      <span class="text-xs font-semibold uppercase tracking-wide text-ink">${bloco.nome}</span>
+                      ${bloco.descricao ? html`<span class="ml-2 text-[11px] text-muted">${bloco.descricao}</span>` : null}
+                      ${doBloco.length ? html`<span class="ml-2 text-[11px]">${Object.entries(cont).map(([k, n]) => html`<span style=${`color:${k === "abaixo-indefinido" ? "#EEB44E" : FAROL_STATUS[k].cor}`}>● </span>${n} `)}</span>` : null}
+                    </td>
+                  </tr>`,
+                ...doBloco.map((r) => html`
+                    <tr key=${r.id} class="border-b border-line/70 align-top">
+                      <td class="px-3 py-2">
+                        <input class=${cx(txtInput, "font-medium")} value=${r.nome} disabled=${!podeEditar}
+                          onInput=${(e) => patchRow(r.id, { nome: e.target.value })}
+                          onChange=${(e) => { const m = farolModelo(e.target.value); if (m) patchRow(r.id, { nome: m.nome, tipo: m.tipo, direcao: m.direcao, consolidacao: m.consolidacao, unidade: m.unidade }, true); }} />
+                        <div class="mt-1 flex flex-wrap gap-1">
+                          <select class=${miniSel} value=${r.tipo} disabled=${!podeEditar} onChange=${(e) => patchRow(r.id, { tipo: e.target.value }, true)}>
+                            <option value="entrada">entrada</option><option value="saida">saída</option>
+                          </select>
+                          <select class=${miniSel} value=${r.direcao} disabled=${!podeEditar} onChange=${(e) => patchRow(r.id, { direcao: e.target.value }, true)}>
+                            <option value="maior">↑ maior melhor</option><option value="menor">↓ menor melhor</option>
+                          </select>
+                          <select class=${miniSel} value=${r.consolidacao} disabled=${!podeEditar} onChange=${(e) => patchRow(r.id, { consolidacao: e.target.value }, true)}>
+                            <option value="soma">soma</option><option value="media">média</option><option value="ultimo">último</option>
+                          </select>
+                          <select class=${miniSel} value=${r.unidade} disabled=${!podeEditar} onChange=${(e) => patchRow(r.id, { unidade: e.target.value }, true)}>
+                            ${["un", "R$", "%", "x", "pts", "h"].map((u) => html`<option value=${u}>${u}</option>`)}
+                          </select>
+                        </div>
+                      </td>
+                      ${Array.from({ length: semanas }, (_, i) => html`
+                        <td class="px-1 py-2">
+                          <input class=${numInput} inputmode="decimal" disabled=${!podeEditar}
+                            value=${r.valores && r.valores[i] != null ? String(r.valores[i]).replace(".", ",") : ""}
+                            onInput=${(e) => { const nv = farolLerNum(e.target.value); patchRow(r.id, (row) => { const v = Array.from({ length: semanas }, (_, k) => (row.valores ? row.valores[k] ?? null : null)); v[i] = nv; return { valores: v }; }); }} />
+                        </td>`)}
+                      <td class="whitespace-nowrap px-2 py-2 text-right">
+                        <div class="font-semibold text-ink">${farolFmt(farolConsolidar(r), r.unidade) || "—"}</div>
+                        <div class="text-[10px] text-muted">${rotuloAndamento(r)}</div>
+                      </td>
+                      <td class="px-1 py-2">
+                        <input class=${numInput} inputmode="decimal" placeholder="meta" disabled=${!podeEditar}
+                          value=${r.meta != null ? String(r.meta).replace(".", ",") : ""}
+                          onInput=${(e) => patchRow(r.id, { meta: farolLerNum(e.target.value) })} />
+                      </td>
+                      <td class="px-2 py-2">${statusChip(r)}</td>
+                      <td class="px-2 py-2"><input class=${txtInput} placeholder="quem responde" disabled=${!podeEditar} value=${r.responsavel || ""} onInput=${(e) => patchRow(r.id, { responsavel: e.target.value })} /></td>
+                      <td class="px-2 py-2"><input class=${txtInput} placeholder="onde olhar" disabled=${!podeEditar} value=${r.fonte || ""} onInput=${(e) => patchRow(r.id, { fonte: e.target.value })} /></td>
+                      <td class="px-2 py-2">
+                        <input class=${cx(txtInput, farolStatus(r, semanas) === "amarelo" && !(r.obs || "").trim() && "border-[#EEB44E]")}
+                          placeholder=${farolStatus(r, semanas) === "amarelo" ? "escreva o plano de ação" : "observações"}
+                          disabled=${!podeEditar} value=${r.obs || ""} onInput=${(e) => patchRow(r.id, { obs: e.target.value })} />
+                      </td>
+                      <td class="px-1 py-2 text-center">
+                        ${podeEditar ? html`<button class="rounded p-1 text-muted hover:bg-black/[0.06] hover:text-[#a44b43]" title="Remover" onClick=${() => delInd(r.id)}>✕</button>` : null}
+                      </td>
+                    </tr>`),
+                podeEditar ? html`
+                    <tr key=${"add-" + bloco.id} class="border-b border-line/70">
+                      <td colspan=${totalCols} class="px-3 py-2">
+                        ${livre === bloco.id ? html`
+                          <input class=${cx(txtInput, "max-w-xs")} autofocus placeholder="Nome do indicador e Enter" maxlength="70"
+                            onKeyDown=${(e) => { if (e.key === "Enter" && e.target.value.trim()) addInd(bloco.id, e.target.value.trim()); if (e.key === "Escape") setLivre(null); }}
+                            onBlur=${(e) => { if (e.target.value.trim()) addInd(bloco.id, e.target.value.trim()); else setLivre(null); }} />`
+                        : html`
+                          <select class=${cx(miniSel, "max-w-xs text-sm text-ink")}
+                            onChange=${(e) => { const v = e.target.value; e.target.value = ""; if (v === "__livre") setLivre(bloco.id); else if (v) addInd(bloco.id, v); }}>
+                            <option value="">${doBloco.length ? "+ acrescentar indicador…" : "+ escolher indicador…"}</option>
+                            ${opcoes.map((i) => html`<option value=${i.nome}>${i.nome}</option>`)}
+                            <option value="__livre">✎ criar indicador próprio…</option>
+                          </select>`}
+                      </td>
+                    </tr>` : null,
+              ];
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted">
+        ${["verde-escuro", "verde-claro", "amarelo", "vermelho", "vermelho-escuro", "sem-dado"].map((k) => html`
+          <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded" style=${`background:${FAROL_STATUS[k].cor}`}></span>${FAROL_STATUS[k].nome}</span>`)}
+      </div>
+      <p class="mt-2 text-[11px] text-muted">
+        “Abaixo, com plano” exige o plano escrito na coluna Observações. Indicador de <b>soma</b> tem a meta proporcional às semanas já lançadas
+        (na semana 1 de 4, a régua é ¼ da meta), então o começo do mês não fica vermelho sem motivo.
+      </p>
+    </div>`;
+}
+
 /* ============================ App externo incorporado ============================ */
 
 // Incorpora um app externo em iframe, ocupando a área toda, com barra de "voltar".
@@ -2711,6 +3179,8 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "pedir-ia") return html`<${PedirIA} />`;
   if (p0 === "perfil") return html`<${ProfilePage} me=${me} onProfileChanged=${reload} />`;
   if (p0 === "admin" && me.role === "admin") return html`<${AdminPage} me=${me} />`;
+  if (p1 === "farol" && ["pedagogico", "cs", "comercial", "financeiro", "conteudo"].includes(p0))
+    return html`<${FarolPage} setor=${p0} me=${me} />`;
   if (p0 === "conteudo" && p1 === "instagram") return html`<${InstagramPage} />`;
   if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
