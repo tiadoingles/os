@@ -2811,6 +2811,64 @@ const FILA_STATUS = {
   erro: { label: "Erro", cls: PILL_ERR },
 };
 
+function fmtMin(ms) {
+  const m = Math.max(0, Math.round(ms / 60000));
+  if (m < 1) return "menos de 1 min";
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  return `${h}h${String(m % 60).padStart(2, "0")}`;
+}
+
+// Lista de pedidos das ferramentas de fila (Slides / Materiais). Fica no TOPO da página.
+function FilaPedidos({ pedidos, podeEditar, tabela, tarefa, estimativa, linhaSecundaria, linksPronto, onMudou }) {
+  async function gerarAgora(id) {
+    try {
+      const { error } = await sb.from(tabela).update({ prioridade: true }).eq("id", id);
+      if (error) throw error;
+      notify("Geração priorizada. Roda na próxima verificação — ou use “Run now” na tarefa " + tarefa + " para agora mesmo.", "ok");
+      onMudou && onMudou();
+    } catch (e) { notify(errMsg(e), "err"); }
+  }
+  return html`
+    <div>
+      <div class="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-muted">Pedidos</h2>
+        <span class="text-[11px] text-muted">Tempo estimado: ${estimativa}</span>
+      </div>
+      ${pedidos === null
+        ? html`<div class="mt-3 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
+        : pedidos.length === 0
+          ? html`<div class="mt-3 rounded-xl border border-dashed border-line bg-card/70 px-4 py-6 text-center text-sm text-muted">Nenhum pedido ainda.</div>`
+          : html`<div class="mt-3 space-y-2">
+              ${pedidos.map((p) => {
+                const st = FILA_STATUS[p.status] || FILA_STATUS.pendente;
+                const desde = p.status === "processando" && p.updated_at ? Date.now() - new Date(p.updated_at).getTime() : null;
+                return html`
+                  <div class="rounded-xl border border-line bg-card p-4">
+                    <div class="flex flex-wrap items-start justify-between gap-2">
+                      <div class="min-w-0">
+                        <div class="font-medium text-ink">${p.tema}</div>
+                        <div class="text-xs text-muted">${linhaSecundaria(p)} · ${fmtDate(p.created_at, true)}</div>
+                      </div>
+                      <div class="flex shrink-0 items-center gap-2">
+                        ${st.label ? html`<span class=${cx("rounded-full px-2.5 py-1 text-[11px] font-semibold", st.cls)}>${st.label}${p.prioridade && p.status === "pendente" ? " · prioridade" : ""}</span>` : null}
+                        ${podeEditar && p.status === "pendente" && !p.prioridade
+                          ? html`<${Btn} class="!px-2.5 !py-1 !text-xs" onClick=${() => gerarAgora(p.id)}>Gerar agora<//>` : null}
+                      </div>
+                    </div>
+                    ${desde != null ? html`<div class="mt-1 text-[11px] text-muted">gerando há ${fmtMin(desde)}</div>` : null}
+                    ${p.status === "pronto" ? html`<div class="mt-2 flex flex-wrap gap-3 text-sm">${linksPronto(p)}</div>` : null}
+                    ${p.log ? html`<div class="mt-2 whitespace-pre-wrap text-xs text-muted">${p.log}</div>` : null}
+                  </div>`;
+              })}
+            </div>`}
+      <p class="mt-3 text-xs text-muted">
+        A geração roda pela tarefa agendada do Claude <code class="rounded bg-black/[0.05] px-1">${tarefa}</code>
+        (verifica a fila a cada 10 min; “Gerar agora” prioriza, e “Run now” em Scheduled roda na hora).
+      </p>
+    </div>`;
+}
+
 const ARENA_CATEGORIAS = ["Saúde & Bem-estar", "Família & Relacionamentos", "Vida & Carreira", "Viagens & Cultura", "Cotidiano"];
 const ARENA_TEMAS = {
   "Saúde & Bem-estar": ["Healthy Habits", "Sleep Routines", "Stress and Relaxation", "Nutrition and Food Choices", "Body and Self-Care", "Mindfulness and Meditation", "Fitness After 40"],
@@ -2881,8 +2939,19 @@ function GeradorMateriaisPage({ me }) {
         Seguem as skills do Método (metodologia, tia-do-ingles-materials, avatar, marca e MYPA).
       </p>
 
+      <div class="mt-5">
+        <${FilaPedidos} pedidos=${pedidos} podeEditar=${podeEditar} tabela="materiais_pedidos" tarefa="gerar-materiais-os"
+          estimativa="cerca de 10 a 20 min por pedido (os dois PDFs juntos)"
+          onMudou=${() => fetchMateriaisPedidos().then(setPedidos).catch(() => {})}
+          linhaSecundaria=${(p) => [p.categoria].filter(Boolean).join(" · ")}
+          linksPronto=${(p) => html`
+            ${p.pdf_recem_url ? html`<a href=${p.pdf_recem_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Recém Chegados (PDF) ↗</a>` : null}
+            ${p.pdf_bia_url ? html`<a href=${p.pdf_bia_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Básico / Interm. / Avançado (PDF) ↗</a>` : null}
+            ${(p.entregaveis || []).map((d) => html`<a href=${d.url} target="_blank" rel="noopener" class="text-brand hover:underline">${d.nome} ↗</a>`)}`} />
+      </div>
+
       ${!podeEditar ? null : html`
-      <form onSubmit=${enviar} class="mt-5 rounded-2xl border border-line bg-card p-5">
+      <form onSubmit=${enviar} class="mt-6 rounded-2xl border border-line bg-card p-5">
         <div>
           <div class="text-sm font-medium text-ink">1. Tema da semana <span class="font-normal text-muted">(opcional)</span></div>
           <div class="mt-0.5 text-xs text-muted">Se já sabe o tema, escreva aqui — o resto do formulário é ignorado. Ex.: “Dream Vacations”, “Morning Routines”.</div>
@@ -2918,49 +2987,10 @@ function GeradorMateriaisPage({ me }) {
           <span class="text-xs text-muted">Zero emojis, tom adulto e acolhedor — regras de marca aplicadas sempre.</span>
         </div>
       </form>`}
-
-      <h2 class="mt-9 text-sm font-semibold uppercase tracking-wider text-muted">Pedidos</h2>
-      ${pedidos === null
-        ? html`<div class="mt-3 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
-        : pedidos.length === 0
-          ? html`<${Empty} icon="📄" title="Nenhum pedido ainda" />`
-          : html`<div class="mt-3 space-y-2">
-              ${pedidos.map((p) => {
-                const st = FILA_STATUS[p.status] || FILA_STATUS.pendente;
-                return html`
-                  <div class="rounded-xl border border-line bg-card p-4">
-                    <div class="flex flex-wrap items-start justify-between gap-2">
-                      <div class="min-w-0">
-                        <div class="font-medium text-ink">${p.tema}</div>
-                        <div class="text-xs text-muted">${[p.categoria].filter(Boolean).join(" · ")} · ${fmtDate(p.created_at, true)}</div>
-                      </div>
-                      <span class=${cx("shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold", st.cls)}>${st.label}</span>
-                    </div>
-                    ${p.status === "pronto" ? html`
-                      <div class="mt-2 flex flex-wrap gap-3 text-sm">
-                        ${p.pdf_recem_url ? html`<a href=${p.pdf_recem_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Recém Chegados (PDF) ↗</a>` : null}
-                        ${p.pdf_bia_url ? html`<a href=${p.pdf_bia_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Básico / Interm. / Avançado (PDF) ↗</a>` : null}
-                        ${(p.entregaveis || []).map((d) => html`<a href=${d.url} target="_blank" rel="noopener" class="text-brand hover:underline">${d.nome} ↗</a>`)}
-                      </div>` : null}
-                    ${p.log ? html`<div class="mt-2 whitespace-pre-wrap text-xs text-muted">${p.log}</div>` : null}
-                  </div>`;
-              })}
-            </div>`}
-      <p class="mt-4 text-xs text-muted">
-        A geração roda pela tarefa agendada do Claude <code class="rounded bg-black/[0.05] px-1">gerar-materiais-os</code>
-        (verifica a fila de hora em hora; “Run now” em Scheduled gera na hora).
-      </p>
     </div>`;
 }
 
 /* ============================ Pedagógico · Gerador de Slides ============================ */
-
-const SLIDES_STATUS = {
-  pendente: { label: "Na fila", cls: PILL_WARN },
-  processando: { label: "Gerando…", cls: PILL_NEUTRAL },
-  pronto: { label: "Pronto", cls: PILL_OK },
-  erro: { label: "Erro", cls: PILL_ERR },
-};
 
 async function fetchSlidesPedidos() {
   const { data, error } = await sb.from("slides_pedidos").select("*").order("created_at", { ascending: false }).limit(40);
@@ -3052,8 +3082,19 @@ function GeradorSlidesPage({ me }) {
         fluxo semanal, também são gerados resumo, quiz de 18, tarefa em vídeo e perguntas do Lab.
       </p>
 
+      <div class="mt-5">
+        <${FilaPedidos} pedidos=${pedidos} podeEditar=${podeEditar} tabela="slides_pedidos" tarefa="gerar-slides-os"
+          estimativa="cerca de 10 min (aula avulsa) a 20 min (fluxo semanal)"
+          onMudou=${() => fetchSlidesPedidos().then(setPedidos).catch(() => {})}
+          linhaSecundaria=${(p) => [p.nivel, p.duracao, p.fluxo === "semanal" ? "fluxo semanal" : "avulsa"].filter(Boolean).join(" · ")}
+          linksPronto=${(p) => html`
+            ${p.canva_edit_url ? html`<a href=${p.canva_edit_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Abrir no Canva ↗</a>` : null}
+            ${p.pptx_url ? html`<a href=${p.pptx_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Baixar PPTX ↗</a>` : null}
+            ${(p.entregaveis || []).map((d) => html`<a href=${d.url} target="_blank" rel="noopener" class="text-brand hover:underline">${d.nome} ↗</a>`)}`} />
+      </div>
+
       ${!podeEditar ? null : html`
-      <form onSubmit=${enviar} class="mt-5 rounded-2xl border border-line bg-card p-5">
+      <form onSubmit=${enviar} class="mt-6 rounded-2xl border border-line bg-card p-5">
         <div>
           <div class="text-sm font-medium text-ink">1. Tema da aula<span class="text-brand"> *</span></div>
           <input class=${cx(inputCls, "mt-2")} placeholder='Ex.: "Present Perfect", "Phrasal Verbs de viagem"'
@@ -3138,38 +3179,6 @@ function GeradorSlidesPage({ me }) {
           <span class="text-xs text-muted">Sem emojis, sem diminutivos, tom adulto e acolhedor — regras de marca aplicadas sempre.</span>
         </div>
       </form>`}
-
-      <h2 class="mt-9 text-sm font-semibold uppercase tracking-wider text-muted">Pedidos</h2>
-      ${pedidos === null
-        ? html`<div class="mt-3 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
-        : pedidos.length === 0
-          ? html`<${Empty} icon="🖼️" title="Nenhum pedido ainda" />`
-          : html`<div class="mt-3 space-y-2">
-              ${pedidos.map((p) => {
-                const st = SLIDES_STATUS[p.status] || SLIDES_STATUS.pendente;
-                return html`
-                  <div class="rounded-xl border border-line bg-card p-4">
-                    <div class="flex flex-wrap items-start justify-between gap-2">
-                      <div class="min-w-0">
-                        <div class="font-medium text-ink">${p.tema}</div>
-                        <div class="text-xs text-muted">${[p.nivel, p.duracao, p.fluxo === "semanal" ? "fluxo semanal" : "avulsa"].filter(Boolean).join(" · ")} · ${fmtDate(p.created_at, true)}</div>
-                      </div>
-                      <span class=${cx("shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold", st.cls)}>${st.label}</span>
-                    </div>
-                    ${p.status === "pronto" ? html`
-                      <div class="mt-2 flex flex-wrap gap-3 text-sm">
-                        ${p.canva_edit_url ? html`<a href=${p.canva_edit_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Abrir no Canva ↗</a>` : null}
-                        ${p.pptx_url ? html`<a href=${p.pptx_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Baixar PPTX ↗</a>` : null}
-                        ${(p.entregaveis || []).map((d) => html`<a href=${d.url} target="_blank" rel="noopener" class="text-brand hover:underline">${d.nome} ↗</a>`)}
-                      </div>` : null}
-                    ${p.log ? html`<div class="mt-2 whitespace-pre-wrap text-xs text-muted">${p.log}</div>` : null}
-                  </div>`;
-              })}
-            </div>`}
-      <p class="mt-4 text-xs text-muted">
-        A geração roda pela tarefa agendada do Claude <code class="rounded bg-black/[0.05] px-1">gerar-slides-os</code>
-        (verifica a fila de hora em hora; clique em “Run now” em Scheduled para gerar na hora).
-      </p>
     </div>`;
 }
 
