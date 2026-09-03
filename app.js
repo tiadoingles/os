@@ -2401,12 +2401,26 @@ function farolMesLabel(m) {
 }
 const FAROL_ROT_CONS = { soma: "soma", media: "média", ultimo: "último" };
 
+// Quais blocos de indicadores aparecem em cada setor.
+const FAROL_SETOR_BLOCOS = {
+  comercial: ["estrategicos", "trafego", "vendas"],
+  cs: ["sucesso"],
+  pedagogico: ["produto"],
+  financeiro: ["constantes", "financeiro"],
+  conteudo: ["marketing"],
+};
+
+const FAROL_ANOS = (() => { const a = new Date().getFullYear(); return [a - 2, a - 1, a, a + 1]; })();
+
 function FarolPage({ setor, me }) {
   const [loading, setLoading] = useState(true);
   const [mes, setMes] = useState(farolMesAtual());
   const [semanas, setSemanas] = useState(4);
   const [rows, setRows] = useState([]);
   const [livre, setLivre] = useState(null); // bloco em modo "criar próprio"
+  const [mesesDisp, setMesesDisp] = useState([]); // meses que já têm dados neste setor
+  const [comparar, setComparar] = useState([]);   // meses selecionados p/ comparativo
+  const [linhasComp, setLinhasComp] = useState(null); // dados do comparativo
   const rowsRef = useRef(rows);
   const timers = useRef({});
   // rowsRef é a fonte síncrona da verdade: efeitos do Preact rodam tarde demais
@@ -2415,11 +2429,18 @@ function FarolPage({ setor, me }) {
   const podeEditar = !me || me.role === "editor" || me.role === "admin";
   const setorNome = FAROL_SETORES[setor] || setor;
 
+  const blocosVisiveis = FAROL_BLOCOS.filter((b) => (FAROL_SETOR_BLOCOS[setor] || FAROL_BLOCOS.map((x) => x.id)).includes(b.id));
+
   const carregarMes = useCallback(async (m) => {
     const { data, error } = await sb.from("farol_indicadores").select("*").eq("setor", setor).eq("mes", m).order("ordem", { ascending: true });
     if (error) notify(errMsg(error), "err");
     rowsRef.current = data || [];
     setRows(data || []);
+  }, [setor]);
+
+  const carregarMeses = useCallback(async () => {
+    const { data } = await sb.from("farol_indicadores").select("mes").eq("setor", setor);
+    setMesesDisp([...new Set((data || []).map((r) => r.mes))].sort());
   }, [setor]);
 
   useEffect(() => {
@@ -2437,11 +2458,24 @@ function FarolPage({ setor, me }) {
       const m = (cfg && cfg.mes) || farolMesAtual();
       setMes(m);
       setSemanas((cfg && cfg.semanas) || 4);
-      await carregarMes(m);
+      setComparar([]); setLinhasComp(null);
+      await Promise.all([carregarMes(m), carregarMeses()]);
       if (vivo) setLoading(false);
     })();
     return () => { vivo = false; };
   }, [setor]);
+
+  // Carrega os dados do comparativo quando 2+ meses estão selecionados.
+  useEffect(() => {
+    if (comparar.length < 2) { setLinhasComp(null); return; }
+    let vivo = true;
+    (async () => {
+      const { data } = await sb.from("farol_indicadores").select("*").eq("setor", setor).in("mes", comparar);
+      if (!vivo) return;
+      setLinhasComp(data || []);
+    })();
+    return () => { vivo = false; };
+  }, [comparar.join(","), setor]);
 
   function patchRow(id, patch, imediato) {
     let merged = null;
@@ -2490,6 +2524,7 @@ function FarolPage({ setor, me }) {
     if (error) { notify(errMsg(error), "err"); return; }
     commitRows((rs) => [...rs, data]);
     setLivre(null);
+    carregarMeses();
   }
   async function delInd(id) {
     if (!confirm("Remover este indicador do farol?")) return;
@@ -2509,8 +2544,11 @@ function FarolPage({ setor, me }) {
     const { data: ins, error } = await sb.from("farol_indicadores").insert(novos).select();
     if (error) { notify(errMsg(error), "err"); return; }
     commitRows((rs) => [...rs, ...ins]);
+    carregarMeses();
     notify(`${ins.length} indicadores copiados de ${farolMesLabel(prev)}.`, "ok");
   }
+
+  const toggleComparar = (m) => setComparar((c) => (c.includes(m) ? c.filter((x) => x !== m) : [...c, m].sort()));
 
   if (loading) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
 
@@ -2568,23 +2606,101 @@ function FarolPage({ setor, me }) {
         mostrando onde agir antes de o mês fechar. Tudo é salvo automaticamente.
       </p>
 
-      <div class="mt-4 flex flex-wrap items-end gap-4 rounded-xl border border-line bg-card p-4">
-        <label class="text-sm">
-          <span class="mb-1 block text-xs font-medium uppercase tracking-wide text-muted">Mês de referência</span>
-          <input type="month" class=${txtInput} value=${mes} disabled=${!podeEditar}
-            onChange=${(e) => e.target.value && mudarMes(e.target.value)} />
-        </label>
-        <label class="text-sm">
-          <span class="mb-1 block text-xs font-medium uppercase tracking-wide text-muted">Semanas no mês</span>
-          <select class=${txtInput} value=${String(semanas)} disabled=${!podeEditar}
-            onChange=${(e) => mudarSemanas(Number(e.target.value))}>
-            <option value="4">4 semanas</option>
-            <option value="5">5 semanas</option>
-          </select>
-        </label>
-        ${podeEditar && !rows.length ? html`
-          <${Btn} variant="ghost" onClick=${duplicarAnterior}>Copiar indicadores de ${farolMesLabel(farolMesAntes(mes))}<//>` : null}
-      </div>
+      ${(() => {
+        const opcoesMes = [...new Set([...(mesesDisp || []), mes])].sort();
+        const modoComp = comparar.length >= 2;
+        return html`
+          <div class="mt-4 rounded-xl border border-line bg-card p-4">
+            <div class="text-xs font-medium uppercase tracking-wide text-muted">Comparar meses</div>
+            <div class="mt-2 flex flex-wrap items-center gap-1.5">
+              ${opcoesMes.map((m) => html`
+                <button type="button" onClick=${() => toggleComparar(m)}
+                  class=${cx("rounded-full border px-2.5 py-1 text-xs transition",
+                    comparar.includes(m) ? "border-brand bg-brand-light font-medium text-brand-dark" : "border-line text-ink/60 hover:bg-black/[0.04]")}>
+                  ${farolMesLabel(m)}${m === mes ? " ·" : ""}
+                </button>`)}
+              ${comparar.length ? html`<button type="button" class="ml-1 text-xs text-muted hover:text-ink" onClick=${() => setComparar([])}>limpar</button>` : null}
+            </div>
+            <p class="mt-1.5 text-[11px] text-muted">
+              ${modoComp ? `Comparando ${comparar.length} meses (somente leitura).` : "Selecione 2 ou mais meses para ver o comparativo lado a lado. O ponto (·) marca o mês em edição."}
+            </p>
+          </div>
+
+          <div class=${cx("mt-3 flex flex-wrap items-end gap-4 rounded-xl border border-line bg-card p-4", modoComp && "opacity-60")}>
+            <label class="text-sm">
+              <span class="mb-1 block text-xs font-medium uppercase tracking-wide text-muted">Mês em edição</span>
+              <div class="flex gap-2">
+                <select class=${txtInput} value=${mes.slice(5, 7)} disabled=${!podeEditar || modoComp}
+                  onChange=${(e) => mudarMes(mes.slice(0, 4) + "-" + e.target.value)}>
+                  ${MESES.map((nm, i) => html`<option value=${String(i + 1).padStart(2, "0")}>${nm.charAt(0).toUpperCase() + nm.slice(1)}</option>`)}
+                </select>
+                <select class=${txtInput} value=${mes.slice(0, 4)} disabled=${!podeEditar || modoComp}
+                  onChange=${(e) => mudarMes(e.target.value + "-" + mes.slice(5, 7))}>
+                  ${FAROL_ANOS.map((a) => html`<option value=${String(a)}>${a}</option>`)}
+                </select>
+              </div>
+            </label>
+            <label class="text-sm">
+              <span class="mb-1 block text-xs font-medium uppercase tracking-wide text-muted">Semanas no mês</span>
+              <select class=${txtInput} value=${String(semanas)} disabled=${!podeEditar || modoComp}
+                onChange=${(e) => mudarSemanas(Number(e.target.value))}>
+                <option value="4">4 semanas</option>
+                <option value="5">5 semanas</option>
+              </select>
+            </label>
+            ${podeEditar && !modoComp && !rows.length ? html`
+              <${Btn} variant="ghost" onClick=${duplicarAnterior}>Copiar indicadores de ${farolMesLabel(farolMesAntes(mes))}<//>` : null}
+          </div>`;
+      })()}
+
+      ${comparar.length >= 2 ? html`
+        <div class="mt-4 overflow-x-auto rounded-xl border border-line bg-card">
+          ${linhasComp === null ? html`<div class="p-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando comparativo…</div>` : html`
+          <table class="w-full min-w-[640px] border-collapse text-left text-sm">
+            <thead class="border-b border-line text-[11px] uppercase tracking-wide text-muted">
+              <tr>
+                <th class="px-3 py-2 font-medium">Indicador</th>
+                ${[...comparar].sort().map((m) => html`<th class="px-3 py-2 text-right font-medium">${farolMesLabel(m)}</th>`)}
+              </tr>
+            </thead>
+            <tbody>
+              ${blocosVisiveis.map((bloco) => {
+                const linhasB = (linhasComp || []).filter((r) => r.bloco === bloco.id);
+                const nomes = [...new Set(linhasB.map((r) => r.nome))];
+                if (!nomes.length) return null;
+                const mesesC = [...comparar].sort();
+                return [
+                  html`<tr class="bg-[#f6f3ee]"><td colspan=${mesesC.length + 1} class="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-ink">${bloco.nome}</td></tr>`,
+                  ...nomes.map((nome) => {
+                    const byMes = {}; for (const r of linhasB.filter((x) => x.nome === nome)) byMes[r.mes] = r;
+                    return html`
+                      <tr class="border-b border-line/70">
+                        <td class="px-3 py-2 font-medium text-ink">${nome}</td>
+                        ${mesesC.map((m) => {
+                          const r = byMes[m];
+                          if (!r) return html`<td class="px-3 py-2 text-right text-muted">—</td>`;
+                          const ts = (r.valores || []).length || 4;
+                          const st = farolStatus(r, ts);
+                          const val = farolFmt(farolConsolidar(r), r.unidade) || "—";
+                          const cor = st === "abaixo-indefinido" ? "#f0d9a8" : (FAROL_STATUS[st] && FAROL_STATUS[st].cor);
+                          const pinta = cor && st !== "sem-dado";
+                          return html`<td class="px-3 py-2 text-right tabular-nums" style=${pinta ? `background:${cor};color:${farolTextoSobre(cor)}` : ""}>
+                            ${val}${r.meta != null ? html`<span class="ml-1 text-[10px] opacity-70">/ ${farolFmt(r.meta, r.unidade)}</span>` : null}
+                          </td>`;
+                        })}
+                      </tr>`;
+                  }),
+                ];
+              })}
+            </tbody>
+          </table>`}
+        </div>
+        <div class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted">
+          ${["verde-escuro", "verde-claro", "amarelo", "vermelho", "vermelho-escuro"].map((k) => html`
+            <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded" style=${`background:${FAROL_STATUS[k].cor}`}></span>${FAROL_STATUS[k].nome}</span>`)}
+          <span>Cada célula: realizado do mês / meta.</span>
+        </div>
+      ` : html`
 
       ${alertas.length ? html`
         <div class="mt-3 space-y-1.5">
@@ -2607,7 +2723,7 @@ function FarolPage({ setor, me }) {
             </tr>
           </thead>
           <tbody>
-            ${FAROL_BLOCOS.map((bloco) => {
+            ${blocosVisiveis.map((bloco) => {
               const doBloco = rows.filter((r) => r.bloco === bloco.id).sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
               const cont = {};
               for (const r of doBloco) { const s = farolStatus(r, semanas); cont[s] = (cont[s] || 0) + 1; }
@@ -2700,6 +2816,7 @@ function FarolPage({ setor, me }) {
         “Abaixo, com plano” exige o plano escrito na coluna Observações. Indicador de <b>soma</b> tem a meta proporcional às semanas já lançadas
         (na semana 1 de 4, a régua é ¼ da meta), então o começo do mês não fica vermelho sem motivo.
       </p>
+      `}
     </div>`;
 }
 
