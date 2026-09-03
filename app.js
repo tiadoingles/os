@@ -60,7 +60,7 @@ const NAV = [
     { slug: "materiais", nome: "Materiais (Base/Consulta)",
       desc: "Biblioteca pedagógica para consulta: metodologia, MYPA, roteiros e apostilas do método." },
     { slug: "gerador-materiais", nome: "Gerador de Materiais",
-      desc: "Cria roteiros de aula e materiais didáticos seguindo o método (skills tia-do-ingles-materials / fluxo-semanal-mentoria)." },
+      desc: "Materiais das Arenas de Conversação: gera os dois PDFs (Recém Chegados + Básico/Interm./Avançado) a partir do tema da semana." },
     { slug: "gerador-slides", nome: "Gerador de Slides",
       desc: "Briefing da aula → deck de slides no Canva (skills metodologia, avatar, marca, MYPA, slides) e, no fluxo semanal, os demais entregáveis." },
     { slug: "gerador-feedbacks", nome: "Gerador de Feedbacks",
@@ -2802,6 +2802,157 @@ function FarolPage({ me }) {
     </div>`;
 }
 
+/* ============================ Pedagógico · Gerador de Materiais (Arenas) ============================ */
+
+const FILA_STATUS = {
+  pendente: { label: "Na fila", cls: PILL_WARN },
+  processando: { label: "Gerando…", cls: PILL_NEUTRAL },
+  pronto: { label: "Pronto", cls: PILL_OK },
+  erro: { label: "Erro", cls: PILL_ERR },
+};
+
+const ARENA_CATEGORIAS = ["Saúde & Bem-estar", "Família & Relacionamentos", "Vida & Carreira", "Viagens & Cultura", "Cotidiano"];
+const ARENA_TEMAS = {
+  "Saúde & Bem-estar": ["Healthy Habits", "Sleep Routines", "Stress and Relaxation", "Nutrition and Food Choices", "Body and Self-Care", "Mindfulness and Meditation", "Fitness After 40"],
+  "Família & Relacionamentos": ["Family Traditions", "Childhood Memories", "Reconnecting with Friends", "Friendships Over the Years", "Raising Children", "Love and Partnership"],
+  "Vida & Carreira": ["Changes in Life After 40", "Career and Work-Life Balance", "New Beginnings", "Hobbies and Passions", "Dreams and Goals", "Financial Independence"],
+  "Viagens & Cultura": ["Dream Vacations", "Places I Want to Visit", "Brazilian Traditions", "Exploring Other Cultures", "Travel Tips for Women", "Food Around the World"],
+  "Cotidiano": ["A Typical Day", "Cooking and Recipes", "Shopping Habits", "Weekend Plans", "Morning Routines", "Technology in Daily Life"],
+};
+
+async function fetchMateriaisPedidos() {
+  const { data, error } = await sb.from("materiais_pedidos").select("*").order("created_at", { ascending: false }).limit(40);
+  if (error) throw error;
+  return data || [];
+}
+
+function GeradorMateriaisPage({ me }) {
+  const [pedidos, setPedidos] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [tema, setTema] = useState("");
+  const [categoria, setCategoria] = useState("Sem preferência");
+  const [outraCategoria, setOutraCategoria] = useState("");
+  const [sugestoes, setSugestoes] = useState(null);
+  const podeEditar = !me || me.role === "editor" || me.role === "admin";
+
+  useEffect(() => {
+    fetchMateriaisPedidos().then(setPedidos).catch((e) => { notify(errMsg(e), "err"); setPedidos([]); });
+    const t = setInterval(() => fetchMateriaisPedidos().then(setPedidos).catch(() => {}), 20000);
+    return () => clearInterval(t);
+  }, []);
+
+  const usados = new Set((pedidos || []).map((p) => (p.tema || "").trim().toLowerCase()));
+
+  function sugerirTemas() {
+    const cats = categoria === "Sem preferência" || outraCategoria.trim() ? ARENA_CATEGORIAS : [categoria];
+    const pool = cats.flatMap((c) => ARENA_TEMAS[c] || []).filter((t) => !usados.has(t.toLowerCase()));
+    const base = pool.length >= 3 ? pool : cats.flatMap((c) => ARENA_TEMAS[c] || []);
+    const shuffled = [...base].sort(() => Math.random() - 0.5);
+    setSugestoes(shuffled.slice(0, 3));
+  }
+
+  async function enviar(e) {
+    e && e.preventDefault();
+    const temaFinal = tema.trim();
+    if (!temaFinal) return notify("Escolha ou digite o tema da semana (use “Sugerir 3 temas” se estiver em dúvida).", "err");
+    setBusy(true);
+    try {
+      const { error } = await sb.from("materiais_pedidos").insert({
+        criado_por: me ? me.id : null,
+        tema: temaFinal,
+        categoria: outraCategoria.trim() || categoria,
+        briefing: { tema: temaFinal, categoria: outraCategoria.trim() || categoria, temaLivre: !!tema.trim() },
+      });
+      if (error) throw error;
+      notify("Pedido enviado. Os dois PDFs da Arena entram na fila.", "ok");
+      setTema(""); setSugestoes(null);
+      fetchMateriaisPedidos().then(setPedidos).catch(() => {});
+    } catch (e2) { notify(errMsg(e2), "err"); }
+    finally { setBusy(false); }
+  }
+
+  return html`
+    <div class="max-w-2xl">
+      <div class="text-sm text-muted">🎓 Pedagógico</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">Gerador de Materiais</h1>
+      <p class="mt-1 text-sm text-muted">
+        Materiais das <b>Arenas de Conversação</b>. Cada pedido gera <b>os dois PDFs</b> na mesma semana, mesmo tema:
+        <b>Recém Chegados</b> (4 páginas, com Reading Practice) e <b>Básico / Intermediário / Avançado</b> (3 páginas).
+        Seguem as skills do Método (metodologia, tia-do-ingles-materials, avatar, marca e MYPA).
+      </p>
+
+      ${!podeEditar ? null : html`
+      <form onSubmit=${enviar} class="mt-5 rounded-2xl border border-line bg-card p-5">
+        <div>
+          <div class="text-sm font-medium text-ink">1. Tema da semana <span class="font-normal text-muted">(opcional)</span></div>
+          <div class="mt-0.5 text-xs text-muted">Se já sabe o tema, escreva aqui — o resto do formulário é ignorado. Ex.: “Dream Vacations”, “Morning Routines”.</div>
+          <input class=${cx(inputCls, "mt-2")} placeholder="Tema da semana" value=${tema} onInput=${(e) => setTema(e.target.value)} />
+        </div>
+
+        <div class=${cx("mt-4 border-t border-line pt-4", tema.trim() && "opacity-50")}>
+          <div class="text-sm font-medium text-ink">2. Categoria preferida</div>
+          <div class="mt-0.5 text-xs text-muted">Só é usada se o tema acima ficar em branco.</div>
+          <div class="mt-2">
+            ${[...ARENA_CATEGORIAS, "Sem preferência (deixar o sistema escolher)"].map((c) => {
+              const val = c.startsWith("Sem preferência") ? "Sem preferência" : c;
+              return html`<${SlidesOpc} on=${categoria === val && !outraCategoria.trim()} click=${() => { setCategoria(val); setOutraCategoria(""); setSugestoes(null); }}>${c}<//>`;
+            })}
+          </div>
+          <input class=${cx(inputCls, "mt-1 max-w-xs")} placeholder="Outra categoria" value=${outraCategoria}
+            onInput=${(e) => { setOutraCategoria(e.target.value); setSugestoes(null); }} />
+
+          <div class="mt-3">
+            <${Btn} variant="ghost" type="button" onClick=${sugerirTemas} disabled=${!!tema.trim()}>Sugerir 3 temas<//>
+          </div>
+          ${sugestoes ? html`
+            <div class="mt-2 flex flex-wrap gap-2">
+              ${sugestoes.map((s) => html`
+                <button type="button" onClick=${() => setTema(s)}
+                  class="rounded-lg border border-brand/50 bg-brand-light px-3 py-1.5 text-sm font-medium text-brand-dark hover:bg-brand-light/70">${s}</button>`)}
+            </div>
+            <div class="mt-1 text-[11px] text-muted">Clique num tema para usá-lo, ou gere outras 3 opções.</div>` : null}
+        </div>
+
+        <div class="mt-5 flex items-center gap-3">
+          <${Btn} type="submit" loading=${busy}>${tema.trim() ? `Gerar materiais — “${tema.trim()}”` : "Gerar materiais"}<//>
+          <span class="text-xs text-muted">Zero emojis, tom adulto e acolhedor — regras de marca aplicadas sempre.</span>
+        </div>
+      </form>`}
+
+      <h2 class="mt-9 text-sm font-semibold uppercase tracking-wider text-muted">Pedidos</h2>
+      ${pedidos === null
+        ? html`<div class="mt-3 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
+        : pedidos.length === 0
+          ? html`<${Empty} icon="📄" title="Nenhum pedido ainda" />`
+          : html`<div class="mt-3 space-y-2">
+              ${pedidos.map((p) => {
+                const st = FILA_STATUS[p.status] || FILA_STATUS.pendente;
+                return html`
+                  <div class="rounded-xl border border-line bg-card p-4">
+                    <div class="flex flex-wrap items-start justify-between gap-2">
+                      <div class="min-w-0">
+                        <div class="font-medium text-ink">${p.tema}</div>
+                        <div class="text-xs text-muted">${[p.categoria].filter(Boolean).join(" · ")} · ${fmtDate(p.created_at, true)}</div>
+                      </div>
+                      <span class=${cx("shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold", st.cls)}>${st.label}</span>
+                    </div>
+                    ${p.status === "pronto" ? html`
+                      <div class="mt-2 flex flex-wrap gap-3 text-sm">
+                        ${p.pdf_recem_url ? html`<a href=${p.pdf_recem_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Recém Chegados (PDF) ↗</a>` : null}
+                        ${p.pdf_bia_url ? html`<a href=${p.pdf_bia_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Básico / Interm. / Avançado (PDF) ↗</a>` : null}
+                        ${(p.entregaveis || []).map((d) => html`<a href=${d.url} target="_blank" rel="noopener" class="text-brand hover:underline">${d.nome} ↗</a>`)}
+                      </div>` : null}
+                    ${p.log ? html`<div class="mt-2 whitespace-pre-wrap text-xs text-muted">${p.log}</div>` : null}
+                  </div>`;
+              })}
+            </div>`}
+      <p class="mt-4 text-xs text-muted">
+        A geração roda pela tarefa agendada do Claude <code class="rounded bg-black/[0.05] px-1">gerar-materiais-os</code>
+        (verifica a fila de hora em hora; “Run now” em Scheduled gera na hora).
+      </p>
+    </div>`;
+}
+
 /* ============================ Pedagógico · Gerador de Slides ============================ */
 
 const SLIDES_STATUS = {
@@ -3502,6 +3653,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "conteudo" && p1 === "instagram") return html`<${InstagramPage} />`;
   if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
+  if (p0 === "pedagogico" && p1 === "gerador-materiais") return html`<${GeradorMateriaisPage} me=${me} />`;
   if (p0 === "pedagogico" && p1 === "gerador-slides") return html`<${GeradorSlidesPage} me=${me} />`;
   if (p0 === "pedagogico" && p1 === "gerador-feedbacks")
     return html`<${EmbedExterno} titulo="Gerador de Feedbacks" icone="🎓" src="https://name-tia-ai-web.onrender.com/dashboard" />`;
