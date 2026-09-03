@@ -2817,6 +2817,24 @@ async function fetchSlidesPedidos() {
   return data || [];
 }
 
+// Definidos fora do componente: se ficassem dentro de GeradorSlidesPage, cada
+// render criaria uma função nova → o Preact remontaria a árvore e o campo
+// perderia o foco a cada tecla.
+function SlidesOpc({ on, click, children }) {
+  return html`
+    <button type="button" onClick=${click}
+      class=${cx("mb-1.5 mr-1.5 rounded-lg border px-3 py-1.5 text-sm transition",
+        on ? "border-brand bg-brand-light font-medium text-brand-dark" : "border-line text-ink/70 hover:bg-black/[0.04]")}>${children}</button>`;
+}
+function SlidesGrupo({ label, obrig, hint, children }) {
+  return html`
+    <div class="border-t border-line pt-4">
+      <div class="text-sm font-medium text-ink">${label}${obrig ? html`<span class="text-brand"> *</span>` : null}</div>
+      ${hint ? html`<div class="mt-0.5 text-xs text-muted">${hint}</div>` : null}
+      <div class="mt-2">${children}</div>
+    </div>`;
+}
+
 function GeradorSlidesPage({ me }) {
   const [pedidos, setPedidos] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -2870,17 +2888,7 @@ function GeradorSlidesPage({ me }) {
     finally { setBusy(false); }
   }
 
-  const Opc = ({ on, click, children }) => html`
-    <button type="button" onClick=${click}
-      class=${cx("mb-1.5 mr-1.5 rounded-lg border px-3 py-1.5 text-sm transition",
-        on ? "border-brand bg-brand-light font-medium text-brand-dark" : "border-line text-ink/70 hover:bg-black/[0.04]")}>${children}</button>`;
-  const G = ({ label, obrig, hint, children }) => html`
-    <div class="border-t border-line pt-4">
-      <div class="text-sm font-medium text-ink">${label}${obrig ? html`<span class="text-brand"> *</span>` : null}</div>
-      ${hint ? html`<div class="mt-0.5 text-xs text-muted">${hint}</div>` : null}
-      <div class="mt-2">${children}</div>
-    </div>`;
-  const outroInput = (k, ph, num) => html`<input class=${cx(inputCls, "mt-1 max-w-xs")} type=${num ? "text" : "text"} inputmode=${num ? "numeric" : "text"}
+  const outroInput = (k, ph, num) => html`<input class=${cx(inputCls, "mt-1 max-w-xs")} inputmode=${num ? "numeric" : "text"}
     placeholder=${ph} value=${f[k]} onInput=${(e) => set(k, e.target.value)} />`;
 
   return html`
@@ -2901,77 +2909,77 @@ function GeradorSlidesPage({ me }) {
             value=${f.tema} onInput=${(e) => set("tema", e.target.value)} />
         </div>
 
-        <${G} label="2. Duração da aula" obrig=${true}>
-          ${["30 min", "45 min", "60 min", "90 min"].map((o) => html`<${Opc} on=${f.duracao === o && !f.duracaoOutro} click=${() => setF((s) => ({ ...s, duracao: o, duracaoOutro: "" }))}>${o}<//>`)}
+        <${SlidesGrupo} label="2. Duração da aula" obrig=${true}>
+          ${["30 min", "45 min", "60 min", "90 min"].map((o) => html`<${SlidesOpc} on=${f.duracao === o && !f.duracaoOutro} click=${() => setF((s) => ({ ...s, duracao: o, duracaoOutro: "" }))}>${o}<//>`)}
           ${outroInput("duracaoOutro", "Outro (minutos)", true)}
         <//>
 
-        <${G} label="3. Nível dos alunos" obrig=${true}>
-          ${["Básico", "Intermediário", "Avançado", "Todos os níveis (turma mista)"].map((o) => html`<${Opc} on=${f.nivel === o && !f.nivelOutro} click=${() => setF((s) => ({ ...s, nivel: o, nivelOutro: "" }))}>${o}<//>`)}
+        <${SlidesGrupo} label="3. Nível dos alunos" obrig=${true}>
+          ${["Básico", "Intermediário", "Avançado", "Todos os níveis (turma mista)"].map((o) => html`<${SlidesOpc} on=${f.nivel === o && !f.nivelOutro} click=${() => setF((s) => ({ ...s, nivel: o, nivelOutro: "" }))}>${o}<//>`)}
           ${outroInput("nivelOutro", 'Outro (ex.: "A2/B1 específico")')}
         <//>
 
-        <${G} label="4. Quantidade de exercícios" obrig=${true}>
-          ${["3", "5", "8", "10"].map((o) => html`<${Opc} on=${f.qtdExercicios === o && !f.qtdOutro} click=${() => setF((s) => ({ ...s, qtdExercicios: o, qtdOutro: "" }))}>${o}<//>`)}
+        <${SlidesGrupo} label="4. Quantidade de exercícios" obrig=${true}>
+          ${["3", "5", "8", "10"].map((o) => html`<${SlidesOpc} on=${f.qtdExercicios === o && !f.qtdOutro} click=${() => setF((s) => ({ ...s, qtdExercicios: o, qtdOutro: "" }))}>${o}<//>`)}
           ${outroInput("qtdOutro", "Outro (número)", true)}
         <//>
 
-        <${G} label="5. Habilidades a trabalhar" obrig=${true} hint="Seleção múltipla permitida">
-          ${["Listening", "Speaking", "Pronúncia", "Vocabulário", "Reading", "Todas"].map((o) => html`<${Opc} on=${f.habilidades.includes(o)} click=${() => toggleArr("habilidades", o)}>${o}<//>`)}
+        <${SlidesGrupo} label="5. Habilidades a trabalhar" obrig=${true} hint="Seleção múltipla permitida">
+          ${["Listening", "Speaking", "Pronúncia", "Vocabulário", "Reading", "Todas"].map((o) => html`<${SlidesOpc} on=${f.habilidades.includes(o)} click=${() => toggleArr("habilidades", o)}>${o}<//>`)}
           ${outroInput("habilidadeOutra", "Outra habilidade (ex.: Writing)")}
         <//>
 
-        <${G} label="6. Objetivo principal da aula" obrig=${true} hint="Marque um botão E descreva com suas palavras — a descrição é o que mais pesa na qualidade final.">
-          ${["Aprender uma estrutura gramatical nova", "Ampliar vocabulário para um contexto específico", "Corrigir um erro comum dos alunos", "Praticar conversação/fluência"].map((o) => html`<${Opc} on=${f.objetivo === o} click=${() => set("objetivo", o)}>${o}<//>`)}
+        <${SlidesGrupo} label="6. Objetivo principal da aula" obrig=${true} hint="Marque um botão E descreva com suas palavras — a descrição é o que mais pesa na qualidade final.">
+          ${["Aprender uma estrutura gramatical nova", "Ampliar vocabulário para um contexto específico", "Corrigir um erro comum dos alunos", "Praticar conversação/fluência"].map((o) => html`<${SlidesOpc} on=${f.objetivo === o} click=${() => set("objetivo", o)}>${o}<//>`)}
           <textarea class=${cx(inputCls, "mt-2 min-h-[80px]")} placeholder="Descreva o objetivo com suas palavras (obrigatório)"
             value=${f.objetivoTexto} onInput=${(e) => set("objetivoTexto", e.target.value)}></textarea>
         <//>
 
-        <${G} label="7. Ponto específico a destacar" obrig=${true} hint='Ex.: "diferença entre passado simples e present perfect", "erro comum de trocar make por do".'>
+        <${SlidesGrupo} label="7. Ponto específico a destacar" obrig=${true} hint='Ex.: "diferença entre passado simples e present perfect", "erro comum de trocar make por do".'>
           <textarea class=${cx(inputCls, "min-h-[64px]")} value=${f.pontoEspecifico} onInput=${(e) => set("pontoEspecifico", e.target.value)}></textarea>
         <//>
 
-        <${G} label="8. Contexto de vida real prioritário" hint="Nunca religião, política ou temas polêmicos.">
-          ${["Viagem", "Trabalho", "Família", "Autoconhecimento", "Humor", "Atualidades", "Sem preferência"].map((o) => html`<${Opc} on=${f.contexto === o && !f.contextoOutro} click=${() => setF((s) => ({ ...s, contexto: o, contextoOutro: "" }))}>${o}<//>`)}
+        <${SlidesGrupo} label="8. Contexto de vida real prioritário" hint="Nunca religião, política ou temas polêmicos.">
+          ${["Viagem", "Trabalho", "Família", "Autoconhecimento", "Humor", "Atualidades", "Sem preferência"].map((o) => html`<${SlidesOpc} on=${f.contexto === o && !f.contextoOutro} click=${() => setF((s) => ({ ...s, contexto: o, contextoOutro: "" }))}>${o}<//>`)}
           ${outroInput("contextoOutro", "Outro contexto")}
         <//>
 
-        <${G} label="9. Material de referência">
-          ${["Não tenho material de referência", "Tenho vídeo/áudio/transcrição para basear a aula"].map((o) => html`<${Opc} on=${f.material === o} click=${() => set("material", o)}>${o}<//>`)}
+        <${SlidesGrupo} label="9. Material de referência">
+          ${["Não tenho material de referência", "Tenho vídeo/áudio/transcrição para basear a aula"].map((o) => html`<${SlidesOpc} on=${f.material === o} click=${() => set("material", o)}>${o}<//>`)}
           ${f.material.startsWith("Tenho") ? html`<textarea class=${cx(inputCls, "mt-1 min-h-[64px]")} placeholder="Cole o link ou o conteúdo/descrição do material" value=${f.materialTexto} onInput=${(e) => set("materialTexto", e.target.value)}></textarea>` : null}
         <//>
 
-        <${G} label="10. Deck de referência do Canva a clonar">
-          ${['Usar o modelo padrão ("Modais")', "Escolher outro deck de referência"].map((o) => html`<${Opc} on=${f.deckRef === o} click=${() => set("deckRef", o)}>${o}<//>`)}
+        <${SlidesGrupo} label="10. Deck de referência do Canva a clonar">
+          ${['Usar o modelo padrão ("Modais")', "Escolher outro deck de referência"].map((o) => html`<${SlidesOpc} on=${f.deckRef === o} click=${() => set("deckRef", o)}>${o}<//>`)}
           ${f.deckRef.startsWith("Escolher") ? html`<input class=${cx(inputCls, "mt-1")} placeholder="URL ou ID do design no Canva (obrigatório)" value=${f.deckRefTexto} onInput=${(e) => set("deckRefTexto", e.target.value)} />` : null}
         <//>
 
-        <${G} label='11. Incluir página de comparação ("X vs. Y")?'>
-          ${["Sim, se fizer sentido", "Não incluir"].map((o) => html`<${Opc} on=${f.comparacao === o} click=${() => set("comparacao", o)}>${o}<//>`)}
+        <${SlidesGrupo} label='11. Incluir página de comparação ("X vs. Y")?'>
+          ${["Sim, se fizer sentido", "Não incluir"].map((o) => html`<${SlidesOpc} on=${f.comparacao === o} click=${() => set("comparacao", o)}>${o}<//>`)}
           <input class=${cx(inputCls, "mt-1 max-w-md")} placeholder='Qual contraste? (ex.: "Regulares vs. Irregulares")' value=${f.comparacaoTexto} onInput=${(e) => set("comparacaoTexto", e.target.value)} />
         <//>
 
-        <${G} label='12. Incluir exercício "Troque a Peça" (LEGO Approach)?'>
-          ${["Sim, se fizer sentido", "Não incluir"].map((o) => html`<${Opc} on=${f.trocaPeca === o} click=${() => set("trocaPeca", o)}>${o}<//>`)}
+        <${SlidesGrupo} label='12. Incluir exercício "Troque a Peça" (LEGO Approach)?'>
+          ${["Sim, se fizer sentido", "Não incluir"].map((o) => html`<${SlidesOpc} on=${f.trocaPeca === o} click=${() => set("trocaPeca", o)}>${o}<//>`)}
           <input class=${cx(inputCls, "mt-1 max-w-md")} placeholder="Sugestão de frase-base (opcional)" value=${f.trocaPecaTexto} onInput=${(e) => set("trocaPecaTexto", e.target.value)} />
         <//>
 
-        <${G} label="13. Incluir quiz final?">
-          ${["Sim, 3 perguntas", "Sim, com outro número de perguntas", "Não incluir"].map((o) => html`<${Opc} on=${f.quiz === o} click=${() => set("quiz", o)}>${o}<//>`)}
+        <${SlidesGrupo} label="13. Incluir quiz final?">
+          ${["Sim, 3 perguntas", "Sim, com outro número de perguntas", "Não incluir"].map((o) => html`<${SlidesOpc} on=${f.quiz === o} click=${() => set("quiz", o)}>${o}<//>`)}
           ${f.quiz.startsWith("Sim, com outro") ? outroInput("quizNum", "Quantas perguntas?", true) : null}
         <//>
 
-        <${G} label="14. Incluir slide de desafio/CTA final?">
-          ${["Sim", "Não"].map((o) => html`<${Opc} on=${f.desafio === o} click=${() => set("desafio", o)}>${o}<//>`)}
+        <${SlidesGrupo} label="14. Incluir slide de desafio/CTA final?">
+          ${["Sim", "Não"].map((o) => html`<${SlidesOpc} on=${f.desafio === o} click=${() => set("desafio", o)}>${o}<//>`)}
           <input class=${cx(inputCls, "mt-1")} placeholder='Texto do desafio (ex.: "poste nos comentários e marque @tiadoingles")' value=${f.desafioTexto} onInput=${(e) => set("desafioTexto", e.target.value)} />
         <//>
 
-        <${G} label="15. Nome/número da aula" hint="Rodapé dos slides e nome do arquivo. Em branco = gerado do tema.">
+        <${SlidesGrupo} label="15. Nome/número da aula" hint="Rodapé dos slides e nome do arquivo. Em branco = gerado do tema.">
           <input class=${cx(inputCls, "max-w-md")} placeholder='Ex.: "Aula 12 — Present Perfect"' value=${f.nomeAula} onInput=${(e) => set("nomeAula", e.target.value)} />
         <//>
 
-        <${G} label="16. Aula avulsa ou parte do fluxo semanal?" obrig=${true}>
-          ${[["avulsa", "Aula avulsa (só os slides)"], ["semanal", "Parte do fluxo semanal (slides + resumo + quiz de 18 + tarefa em vídeo + perguntas do Lab)"]].map(([v, l]) => html`<${Opc} on=${f.fluxo === v} click=${() => set("fluxo", v)}>${l}<//>`)}
+        <${SlidesGrupo} label="16. Aula avulsa ou parte do fluxo semanal?" obrig=${true}>
+          ${[["avulsa", "Aula avulsa (só os slides)"], ["semanal", "Parte do fluxo semanal (slides + resumo + quiz de 18 + tarefa em vídeo + perguntas do Lab)"]].map(([v, l]) => html`<${SlidesOpc} on=${f.fluxo === v} click=${() => set("fluxo", v)}>${l}<//>`)}
         <//>
 
         <div class="mt-5 flex items-center gap-3">
