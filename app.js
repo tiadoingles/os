@@ -2884,6 +2884,11 @@ async function fetchMateriaisPedidos() {
   return data || [];
 }
 
+const ARENA_NIVEIS = [
+  ["Recém Chegados", "Recém Chegados"],
+  ["BIA", "BIA (Básico, Intermediários e Avançados)"],
+];
+
 function GeradorMateriaisPage({ me }) {
   const [pedidos, setPedidos] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -2891,7 +2896,11 @@ function GeradorMateriaisPage({ me }) {
   const [categoria, setCategoria] = useState("Sem preferência");
   const [outraCategoria, setOutraCategoria] = useState("");
   const [sugestoes, setSugestoes] = useState(null);
+  const [niveis, setNiveis] = useState(new Set(["Recém Chegados", "BIA"]));
+  const [outroNivel, setOutroNivel] = useState("");
+  const [quantidade, setQuantidade] = useState(1);
   const podeEditar = !me || me.role === "editor" || me.role === "admin";
+  const toggleNivel = (n) => setNiveis((s) => { const x = new Set(s); x.has(n) ? x.delete(n) : x.add(n); return x; });
 
   useEffect(() => {
     fetchMateriaisPedidos().then(setPedidos).catch((e) => { notify(errMsg(e), "err"); setPedidos([]); });
@@ -2909,20 +2918,32 @@ function GeradorMateriaisPage({ me }) {
     setSugestoes(shuffled.slice(0, 3));
   }
 
+  function niveisFinal() {
+    const out = [...niveis];
+    if (outroNivel.trim()) out.push("Outro: " + outroNivel.trim());
+    return out;
+  }
+
   async function enviar(e) {
     e && e.preventDefault();
     const temaFinal = tema.trim();
     if (!temaFinal) return notify("Escolha ou digite o tema da semana (use “Sugerir 3 temas” se estiver em dúvida).", "err");
+    const nvs = niveisFinal();
+    if (!nvs.length) return notify("Escolha ao menos um nível de Arena.", "err");
     setBusy(true);
     try {
+      const catFinal = outraCategoria.trim() || categoria;
       const { error } = await sb.from("materiais_pedidos").insert({
         criado_por: me ? me.id : null,
         tema: temaFinal,
-        categoria: outraCategoria.trim() || categoria,
-        briefing: { tema: temaFinal, categoria: outraCategoria.trim() || categoria, temaLivre: !!tema.trim() },
+        categoria: catFinal,
+        niveis: nvs,
+        quantidade,
+        briefing: { tema: temaFinal, categoria: catFinal, temaLivre: !!tema.trim(), niveis: nvs, quantidade },
       });
       if (error) throw error;
-      notify("Pedido enviado. Os dois PDFs da Arena entram na fila.", "ok");
+      const total = nvs.length * quantidade;
+      notify(`Pedido enviado. ${total} material(is) na fila (${quantidade} por nível × ${nvs.length}).`, "ok");
       setTema(""); setSugestoes(null);
       fetchMateriaisPedidos().then(setPedidos).catch(() => {});
     } catch (e2) { notify(errMsg(e2), "err"); }
@@ -2934,20 +2955,21 @@ function GeradorMateriaisPage({ me }) {
       <div class="text-sm text-muted">🎓 Pedagógico</div>
       <h1 class="mt-1 text-2xl font-semibold text-ink">Gerador de Materiais</h1>
       <p class="mt-1 text-sm text-muted">
-        Materiais das <b>Arenas de Conversação</b>. Cada pedido gera <b>os dois PDFs</b> na mesma semana, mesmo tema:
-        <b>Recém Chegados</b> (4 páginas, com Reading Practice) e <b>Básico / Intermediário / Avançado</b> (3 páginas).
-        Seguem as skills do Método (metodologia, tia-do-ingles-materials, avatar, marca e MYPA).
+        Materiais das <b>Arenas de Conversação</b>, no mesmo tema da semana. Você escolhe os níveis
+        (<b>Recém Chegados</b> — 4 páginas com Reading Practice; <b>BIA</b> — 3 páginas) e quantos materiais
+        por nível. Seguem as skills do Método (metodologia, tia-do-ingles-materials, avatar, marca e MYPA).
       </p>
 
       <div class="mt-5">
         <${FilaPedidos} pedidos=${pedidos} podeEditar=${podeEditar} tabela="materiais_pedidos" tarefa="gerar-materiais-os"
-          estimativa="cerca de 10 a 20 min por pedido (os dois PDFs juntos)"
+          estimativa="cerca de 10 min por material gerado"
           onMudou=${() => fetchMateriaisPedidos().then(setPedidos).catch(() => {})}
-          linhaSecundaria=${(p) => [p.categoria].filter(Boolean).join(" · ")}
+          linhaSecundaria=${(p) => [(p.niveis || []).join(" + "), (p.quantidade ? p.quantidade + "x por nível" : null), p.categoria].filter(Boolean).join(" · ")}
           linksPronto=${(p) => html`
-            ${p.pdf_recem_url ? html`<a href=${p.pdf_recem_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Recém Chegados (PDF) ↗</a>` : null}
-            ${p.pdf_bia_url ? html`<a href=${p.pdf_bia_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Básico / Interm. / Avançado (PDF) ↗</a>` : null}
-            ${(p.entregaveis || []).map((d) => html`<a href=${d.url} target="_blank" rel="noopener" class="text-brand hover:underline">${d.nome} ↗</a>`)}`} />
+            ${p.zip_url ? html`<${Btn} as="a" href=${p.zip_url} download class="!px-3 !py-1.5 !text-xs">Fazer download dos materiais<//>` : null}
+            ${(p.entregaveis || []).map((d) => html`<a href=${d.url} target="_blank" rel="noopener" class="text-brand hover:underline">${d.nome} ↗</a>`)}
+            ${!p.zip_url && p.pdf_recem_url ? html`<a href=${p.pdf_recem_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Recém Chegados (PDF) ↗</a>` : null}
+            ${!p.zip_url && p.pdf_bia_url ? html`<a href=${p.pdf_bia_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">BIA (PDF) ↗</a>` : null}`} />
       </div>
 
       ${!podeEditar ? null : html`
@@ -2980,6 +3002,30 @@ function GeradorMateriaisPage({ me }) {
                   class="rounded-lg border border-brand/50 bg-brand-light px-3 py-1.5 text-sm font-medium text-brand-dark hover:bg-brand-light/70">${s}</button>`)}
             </div>
             <div class="mt-1 text-[11px] text-muted">Clique num tema para usá-lo, ou gere outras 3 opções.</div>` : null}
+        </div>
+
+        <div class="mt-4 border-t border-line pt-4">
+          <div class="text-sm font-medium text-ink">3. Nível das Arenas de Conversação <span class="text-brand">*</span></div>
+          <div class="mt-0.5 text-xs text-muted">Pode marcar mais de um.</div>
+          <div class="mt-2">
+            ${ARENA_NIVEIS.map(([v, l]) => html`<${SlidesOpc} on=${niveis.has(v)} click=${() => toggleNivel(v)}>${l}<//>`)}
+            <${SlidesOpc} on=${outroNivel !== ""} click=${() => setOutroNivel(outroNivel !== "" ? "" : " ")}>Outro<//>
+          </div>
+          <input class=${cx(inputCls, "mt-1 max-w-sm")} placeholder="Outro nível — descreva (ex.: “A2/B1 específico”)"
+            value=${outroNivel} onInput=${(e) => setOutroNivel(e.target.value)} />
+        </div>
+
+        <div class="mt-4 border-t border-line pt-4">
+          <div class="text-sm font-medium text-ink">4. Quantidade de Materiais <span class="text-brand">*</span></div>
+          <div class="mt-0.5 text-xs text-muted">
+            Nº de materiais <b>por nível</b>. Ex.: 2 com “Recém Chegados” e “BIA” marcados = 4 materiais no total.
+          </div>
+          <div class="mt-2 flex flex-wrap gap-1.5">
+            ${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => html`<${SlidesOpc} on=${quantidade === n} click=${() => setQuantidade(n)}>${n}<//>`)}
+          </div>
+          <div class="mt-1.5 text-[11px] text-muted">
+            Total agora: <b>${(niveisFinal().length || 0) * quantidade}</b> material(is) — ${quantidade}× por nível, ${niveisFinal().length || 0} nível(is).
+          </div>
         </div>
 
         <div class="mt-5 flex items-center gap-3">
