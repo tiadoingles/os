@@ -53,7 +53,17 @@
     return html;
   }
 
+  // Widget inteiro vive dentro de uma Shadow DOM: isola o CSS nos dois sentidos,
+  // para nao vazar (nem sofrer vazamento de) estilos globais da pagina host
+  // (ex.: uma classe generica como ".loading" definida pelo CSS da Cademi).
+  var host = document.createElement("div");
+  host.id = "tia-chat-host";
+  document.body.appendChild(host);
+  var root = host.attachShadow ? host.attachShadow({ mode: "open" }) : host;
+
   var css =
+    ":host{all:initial}" +
+    "*{box-sizing:border-box}" +
     "#tia-chat-bubble{position:fixed;bottom:20px;right:20px;width:60px;height:60px;border-radius:50%;" +
     "background:" + BRAND + ";box-shadow:0 4px 16px rgba(0,0,0,.2);border:none;cursor:pointer;z-index:999998;" +
     "display:flex;align-items:center;justify-content:center;transition:transform .15s ease}" +
@@ -73,11 +83,10 @@
     ".tia-msg p{margin:0 0 6px}" +
     ".tia-msg p:last-child{margin-bottom:0}" +
     ".tia-msg ul{margin:4px 0;padding-left:18px}" +
-    ".tia-msg.bot{align-self:flex-start;background:#fff;color:#2b2b2b;border-bottom-left-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.08)}" +
-    ".tia-msg.user{align-self:flex-end;background:" + BRAND + ";color:#fff;border-bottom-right-radius:4px}" +
-    ".tia-msg.error{align-self:flex-start;background:#fdeceb;color:#9c2b23;border-bottom-left-radius:4px}" +
-    ".tia-msg.loading{align-self:flex-start;background:#fff;color:#9a9a9a;font-style:italic}" +
-    ".tia-msg .fontes{margin-top:6px;font-size:11px;color:#8a8a8a}" +
+    ".tia-msg-bot{align-self:flex-start;background:#fff;color:#2b2b2b;border-bottom-left-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.08)}" +
+    ".tia-msg-user{align-self:flex-end;background:" + BRAND + ";color:#fff;border-bottom-right-radius:4px}" +
+    ".tia-msg-error{align-self:flex-start;background:#fdeceb;color:#9c2b23;border-bottom-left-radius:4px}" +
+    ".tia-msg-loading{align-self:flex-start;background:#fff;color:#9a9a9a;font-style:italic}" +
     "#tia-chat-inputrow{display:flex;gap:8px;padding:10px;border-top:1px solid #eee;background:#fff}" +
     "#tia-chat-input{flex:1;border:1px solid #ddd;border-radius:20px;padding:9px 14px;font-size:13.5px;outline:none;resize:none;max-height:80px;font-family:inherit}" +
     "#tia-chat-input:focus{border-color:" + BRAND + "}" +
@@ -88,7 +97,7 @@
 
   var style = document.createElement("style");
   style.textContent = css;
-  document.head.appendChild(style);
+  root.appendChild(style);
 
   var bubble = document.createElement("button");
   bubble.id = "tia-chat-bubble";
@@ -114,24 +123,18 @@
     "</button>" +
     "</div>";
 
-  document.body.appendChild(bubble);
-  document.body.appendChild(panel);
+  root.appendChild(bubble);
+  root.appendChild(panel);
 
   var messagesEl = panel.querySelector("#tia-chat-messages");
   var inputEl = panel.querySelector("#tia-chat-input");
   var sendBtn = panel.querySelector("#tia-chat-send");
   var closeBtn = panel.querySelector("#tia-chat-close");
 
-  function addMessage(kind, html, fontes) {
+  function addMessage(kind, html) {
     var div = document.createElement("div");
-    div.className = "tia-msg " + kind;
+    div.className = "tia-msg tia-msg-" + kind;
     div.innerHTML = html;
-    if (fontes && fontes.length) {
-      var f = document.createElement("div");
-      f.className = "fontes";
-      f.textContent = "Fonte: " + fontes.map(function (x) { return x.titulo; }).join(", ");
-      div.appendChild(f);
-    }
     messagesEl.appendChild(div);
     messagesEl.scrollTop = messagesEl.scrollHeight;
     return div;
@@ -199,7 +202,7 @@
           addMessage("error", "<p>" + escapeHtml(res.data.error || "Não consegui responder agora. Tente de novo em instantes.") + "</p>");
           return;
         }
-        addMessage("bot", formatResposta(res.data.resposta || ""), res.data.fontes);
+        addMessage("bot", formatResposta(res.data.resposta || ""));
       })
       .catch(function () {
         loading.remove();
