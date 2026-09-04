@@ -9,7 +9,7 @@
   var ENDPOINT = SUPABASE_URL + "/functions/v1/public-chat";
   var BRAND = "#ea5167";
   var GREETING =
-    "Oi! Eu sou o Tira Dúvidas de Conteúdo do Método Tia do Inglês 💕 Pode me perguntar sobre gramática, vocabulário, pronúncia ou qualquer ponto do conteúdo das aulas. Se puder, me conta também o módulo, a aula ou a apostila (Volume 1, 2 ou 3) — assim eu te ajudo melhor!";
+    "Oi, eu sou o TIRA DÚVIDAS sobre CONTEÚDOS da Tia do Inglês!\nMe conta, qual a sua dúvida sobre conteúdo?";
 
   function sessionId() {
     try {
@@ -144,7 +144,7 @@
   function openPanel() {
     panel.classList.add("open");
     if (!greeted) {
-      addMessage("bot", "<p>" + escapeHtml(GREETING) + "</p>");
+      addMessage("bot", "<p>" + escapeHtml(GREETING).replace(/\n/g, "<br>") + "</p>");
       greeted = true;
     }
     inputEl.focus();
