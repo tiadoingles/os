@@ -3074,12 +3074,13 @@ function fmtMin(ms) {
 }
 
 // Lista de pedidos das ferramentas de fila (Slides / Materiais). Fica no TOPO da página.
-function FilaPedidos({ pedidos, podeEditar, tabela, tarefa, estimativa, linhaSecundaria, linksPronto, onMudou }) {
+function FilaPedidos({ pedidos, podeEditar, tabela, tarefa, estimativa, minutosEstimados, linhaSecundaria, linksPronto, onMudou }) {
+  const minEst = (p) => (minutosEstimados ? minutosEstimados(p) : 10);
   async function gerarAgora(id) {
     try {
       const { error } = await sb.from(tabela).update({ prioridade: true }).eq("id", id);
       if (error) throw error;
-      notify("Geração priorizada. Roda na próxima verificação — ou use “Run now” na tarefa " + tarefa + " para agora mesmo.", "ok");
+      notify("Gerando agora — entra na próxima checagem da fila (a cada 10 min, ou na hora com \"Run now\" em Scheduled).", "ok");
       onMudou && onMudou();
     } catch (e) { notify(errMsg(e), "err"); }
   }
@@ -3096,7 +3097,8 @@ function FilaPedidos({ pedidos, podeEditar, tabela, tarefa, estimativa, linhaSec
           : html`<div class="mt-3 space-y-2">
               ${pedidos.map((p) => {
                 const st = FILA_STATUS[p.status] || FILA_STATUS.pendente;
-                const desde = p.status === "processando" && p.updated_at ? Date.now() - new Date(p.updated_at).getTime() : null;
+                const desdeMs = p.status === "processando" && p.updated_at ? Date.now() - new Date(p.updated_at).getTime() : null;
+                const restanteMin = desdeMs != null ? Math.max(1, minEst(p) - Math.round(desdeMs / 60000)) : null;
                 return html`
                   <div class="rounded-xl border border-line bg-card p-4">
                     <div class="flex flex-wrap items-start justify-between gap-2">
@@ -3105,13 +3107,14 @@ function FilaPedidos({ pedidos, podeEditar, tabela, tarefa, estimativa, linhaSec
                         <div class="text-xs text-muted">${linhaSecundaria(p)} · ${fmtDate(p.created_at, true)}</div>
                       </div>
                       <div class="flex shrink-0 items-center gap-2">
-                        ${st.label ? html`<span class=${cx("rounded-full px-2.5 py-1 text-[11px] font-semibold", st.cls)}>${st.label}${p.prioridade && p.status === "pendente" ? " · prioridade" : ""}</span>` : null}
+                        ${st.label ? html`<span class=${cx("rounded-full px-2.5 py-1 text-[11px] font-semibold", st.cls)}>${st.label}</span>` : null}
                         ${podeEditar && p.status === "pendente" && !p.prioridade
-                          ? html`<${Btn} class="!px-2.5 !py-1 !text-xs" onClick=${() => gerarAgora(p.id)}>Gerar agora<//>` : null}
+                          ? html`<${Btn} class="!px-2.5 !py-1 !text-xs" onClick=${() => gerarAgora(p.id)}>▶ Gerar agora<//>` : null}
                       </div>
                     </div>
-                    ${desde != null ? html`<div class="mt-1 text-[11px] text-muted">gerando há ${fmtMin(desde)}</div>` : null}
-                    ${p.status === "pronto" ? html`<div class="mt-2 flex flex-wrap gap-3 text-sm">${linksPronto(p)}</div>` : null}
+                    ${p.status === "pendente" && p.prioridade ? html`<div class="mt-1 text-[11px] text-muted">Gerando em breve — previsão: pronto em até ${minEst(p)} min.</div>` : null}
+                    ${desdeMs != null ? html`<div class="mt-1 text-[11px] text-muted">gerando há ${fmtMin(desdeMs)} · previsão: mais ~${restanteMin} min</div>` : null}
+                    ${p.status === "pronto" ? html`<div class="mt-2 flex flex-wrap gap-2">${linksPronto(p)}</div>` : null}
                     ${p.log ? html`<div class="mt-2 whitespace-pre-wrap text-xs text-muted">${p.log}</div>` : null}
                   </div>`;
               })}
@@ -3216,14 +3219,15 @@ function GeradorMateriaisPage({ me }) {
 
       <div class="mt-5">
         <${FilaPedidos} pedidos=${pedidos} podeEditar=${podeEditar} tabela="materiais_pedidos" tarefa="gerar-materiais-os"
-          estimativa="cerca de 10 min por material gerado"
+          estimativa="cerca de 5-10 min por material gerado"
+          minutosEstimados=${(p) => Math.max(10, (((p.niveis || []).length) * (p.quantidade || 1)) * 5)}
           onMudou=${() => fetchMateriaisPedidos().then(setPedidos).catch(() => {})}
           linhaSecundaria=${(p) => [(p.niveis || []).join(" + "), (p.quantidade ? p.quantidade + "x por nível" : null), p.categoria].filter(Boolean).join(" · ")}
           linksPronto=${(p) => html`
-            ${p.zip_url ? html`<${Btn} as="a" href=${p.zip_url} download class="!px-3 !py-1.5 !text-xs">Fazer download dos materiais<//>` : null}
-            ${(p.entregaveis || []).map((d) => html`<a href=${d.url} target="_blank" rel="noopener" class="text-brand hover:underline">${d.nome} ↗</a>`)}
-            ${!p.zip_url && p.pdf_recem_url ? html`<a href=${p.pdf_recem_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Recém Chegados (PDF) ↗</a>` : null}
-            ${!p.zip_url && p.pdf_bia_url ? html`<a href=${p.pdf_bia_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">BIA (PDF) ↗</a>` : null}`} />
+            ${p.zip_url ? html`<${Btn} as="a" href=${p.zip_url} download class="!px-3 !py-1.5 !text-xs">⬇ Fazer download<//>` : null}
+            ${(p.entregaveis || []).map((d) => html`<${Btn} as="a" variant="ghost" href=${d.url} target="_blank" rel="noopener" class="!px-3 !py-1.5 !text-xs">${d.nome} ↗<//>`)}
+            ${!p.zip_url && p.pdf_recem_url ? html`<${Btn} as="a" variant="ghost" href=${p.pdf_recem_url} target="_blank" rel="noopener" class="!px-3 !py-1.5 !text-xs">Recém Chegados (PDF) ↗<//>` : null}
+            ${!p.zip_url && p.pdf_bia_url ? html`<${Btn} as="a" variant="ghost" href=${p.pdf_bia_url} target="_blank" rel="noopener" class="!px-3 !py-1.5 !text-xs">BIA (PDF) ↗<//>` : null}`} />
       </div>
 
       ${!podeEditar ? null : html`
@@ -3345,20 +3349,14 @@ function GeradorSlidesPage({ me }) {
 
   async function enviar(e) {
     e.preventDefault();
-    if (!f.tema.trim()) return notify("Preencha o tema da aula.", "err");
-    if (!(f.nivel || f.nivelOutro.trim())) return notify("Escolha o nível dos alunos.", "err");
-    if (!f.objetivoTexto.trim()) return notify("Descreva o objetivo com suas palavras — é o campo mais importante.", "err");
-    if (!f.pontoEspecifico.trim()) return notify("Preencha o ponto específico a destacar.", "err");
-    if (!f.fluxo) return notify("Diga se a aula é avulsa ou parte do fluxo semanal.", "err");
-    if (f.deckRef.startsWith("Escolher") && !f.deckRefTexto.trim()) return notify("Cole a URL ou o ID do deck de referência do Canva.", "err");
     setBusy(true);
     try {
       const { error } = await sb.from("slides_pedidos").insert({
         criado_por: me ? me.id : null,
-        tema: f.tema.trim(),
-        nivel: f.nivelOutro.trim() || f.nivel,
-        duracao: f.duracaoOutro.trim() ? f.duracaoOutro.trim() + " min" : f.duracao,
-        fluxo: f.fluxo,
+        tema: f.tema.trim() || "A definir pela IA a partir do briefing",
+        nivel: f.nivelOutro.trim() || f.nivel || null,
+        duracao: f.duracaoOutro.trim() ? f.duracaoOutro.trim() + " min" : (f.duracao || null),
+        fluxo: f.fluxo || null,
         briefing: f,
       });
       if (error) throw error;
@@ -3385,49 +3383,50 @@ function GeradorSlidesPage({ me }) {
       <div class="mt-5">
         <${FilaPedidos} pedidos=${pedidos} podeEditar=${podeEditar} tabela="slides_pedidos" tarefa="gerar-slides-os"
           estimativa="cerca de 10 min (aula avulsa) a 20 min (fluxo semanal)"
+          minutosEstimados=${(p) => (p.fluxo === "semanal" ? 20 : 10)}
           onMudou=${() => fetchSlidesPedidos().then(setPedidos).catch(() => {})}
           linhaSecundaria=${(p) => [p.nivel, p.duracao, p.fluxo === "semanal" ? "fluxo semanal" : "avulsa"].filter(Boolean).join(" · ")}
           linksPronto=${(p) => html`
-            ${p.canva_edit_url ? html`<a href=${p.canva_edit_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Abrir no Canva ↗</a>` : null}
-            ${p.pptx_url ? html`<a href=${p.pptx_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">Baixar PPTX ↗</a>` : null}
-            ${(p.entregaveis || []).map((d) => html`<a href=${d.url} target="_blank" rel="noopener" class="text-brand hover:underline">${d.nome} ↗</a>`)}`} />
+            ${p.pptx_url ? html`<${Btn} as="a" href=${p.pptx_url} download class="!px-3 !py-1.5 !text-xs">⬇ Fazer download<//>` : null}
+            ${p.canva_edit_url ? html`<${Btn} as="a" variant="ghost" href=${p.canva_edit_url} target="_blank" rel="noopener" class="!px-3 !py-1.5 !text-xs">Abrir no Canva ↗<//>` : null}
+            ${(p.entregaveis || []).map((d) => html`<${Btn} as="a" variant="ghost" href=${d.url} target="_blank" rel="noopener" class="!px-3 !py-1.5 !text-xs">${d.nome} ↗<//>`)}`} />
       </div>
 
       ${!podeEditar ? null : html`
       <form onSubmit=${enviar} class="mt-6 rounded-2xl border border-line bg-card p-5">
         <div>
-          <div class="text-sm font-medium text-ink">1. Tema da aula<span class="text-brand"> *</span></div>
+          <div class="text-sm font-medium text-ink">1. Tema da aula</div>
           <input class=${cx(inputCls, "mt-2")} placeholder='Ex.: "Present Perfect", "Phrasal Verbs de viagem"'
             value=${f.tema} onInput=${(e) => set("tema", e.target.value)} />
         </div>
 
-        <${SlidesGrupo} label="2. Duração da aula" obrig=${true}>
+        <${SlidesGrupo} label="2. Duração da aula">
           ${["30 min", "45 min", "60 min", "90 min"].map((o) => html`<${SlidesOpc} on=${f.duracao === o && !f.duracaoOutro} click=${() => setF((s) => ({ ...s, duracao: o, duracaoOutro: "" }))}>${o}<//>`)}
           ${outroInput("duracaoOutro", "Outro (minutos)", true)}
         <//>
 
-        <${SlidesGrupo} label="3. Nível dos alunos" obrig=${true}>
+        <${SlidesGrupo} label="3. Nível dos alunos">
           ${["Básico", "Intermediário", "Avançado", "Todos os níveis (turma mista)"].map((o) => html`<${SlidesOpc} on=${f.nivel === o && !f.nivelOutro} click=${() => setF((s) => ({ ...s, nivel: o, nivelOutro: "" }))}>${o}<//>`)}
           ${outroInput("nivelOutro", 'Outro (ex.: "A2/B1 específico")')}
         <//>
 
-        <${SlidesGrupo} label="4. Quantidade de exercícios" obrig=${true}>
+        <${SlidesGrupo} label="4. Quantidade de exercícios">
           ${["3", "5", "8", "10"].map((o) => html`<${SlidesOpc} on=${f.qtdExercicios === o && !f.qtdOutro} click=${() => setF((s) => ({ ...s, qtdExercicios: o, qtdOutro: "" }))}>${o}<//>`)}
           ${outroInput("qtdOutro", "Outro (número)", true)}
         <//>
 
-        <${SlidesGrupo} label="5. Habilidades a trabalhar" obrig=${true} hint="Seleção múltipla permitida">
+        <${SlidesGrupo} label="5. Habilidades a trabalhar" hint="Seleção múltipla permitida">
           ${["Listening", "Speaking", "Pronúncia", "Vocabulário", "Reading", "Todas"].map((o) => html`<${SlidesOpc} on=${f.habilidades.includes(o)} click=${() => toggleArr("habilidades", o)}>${o}<//>`)}
           ${outroInput("habilidadeOutra", "Outra habilidade (ex.: Writing)")}
         <//>
 
-        <${SlidesGrupo} label="6. Objetivo principal da aula" obrig=${true} hint="Marque um botão E descreva com suas palavras — a descrição é o que mais pesa na qualidade final.">
+        <${SlidesGrupo} label="6. Objetivo principal da aula" hint="Marque um botão E descreva com suas palavras — a descrição é o que mais pesa na qualidade final.">
           ${["Aprender uma estrutura gramatical nova", "Ampliar vocabulário para um contexto específico", "Corrigir um erro comum dos alunos", "Praticar conversação/fluência"].map((o) => html`<${SlidesOpc} on=${f.objetivo === o} click=${() => set("objetivo", o)}>${o}<//>`)}
-          <textarea class=${cx(inputCls, "mt-2 min-h-[80px]")} placeholder="Descreva o objetivo com suas palavras (obrigatório)"
+          <textarea class=${cx(inputCls, "mt-2 min-h-[80px]")} placeholder="Descreva o objetivo com suas palavras (opcional, mas ajuda bastante)"
             value=${f.objetivoTexto} onInput=${(e) => set("objetivoTexto", e.target.value)}></textarea>
         <//>
 
-        <${SlidesGrupo} label="7. Ponto específico a destacar" obrig=${true} hint='Ex.: "diferença entre passado simples e present perfect", "erro comum de trocar make por do".'>
+        <${SlidesGrupo} label="7. Ponto específico a destacar" hint='Ex.: "diferença entre passado simples e present perfect", "erro comum de trocar make por do".'>
           <textarea class=${cx(inputCls, "min-h-[64px]")} value=${f.pontoEspecifico} onInput=${(e) => set("pontoEspecifico", e.target.value)}></textarea>
         <//>
 
@@ -3443,7 +3442,7 @@ function GeradorSlidesPage({ me }) {
 
         <${SlidesGrupo} label="10. Deck de referência do Canva a clonar">
           ${['Usar o modelo padrão ("Modais")', "Escolher outro deck de referência"].map((o) => html`<${SlidesOpc} on=${f.deckRef === o} click=${() => set("deckRef", o)}>${o}<//>`)}
-          ${f.deckRef.startsWith("Escolher") ? html`<input class=${cx(inputCls, "mt-1")} placeholder="URL ou ID do design no Canva (obrigatório)" value=${f.deckRefTexto} onInput=${(e) => set("deckRefTexto", e.target.value)} />` : null}
+          ${f.deckRef.startsWith("Escolher") ? html`<input class=${cx(inputCls, "mt-1")} placeholder="URL ou ID do design no Canva (se deixar em branco, usamos o modelo padrão)" value=${f.deckRefTexto} onInput=${(e) => set("deckRefTexto", e.target.value)} />` : null}
         <//>
 
         <${SlidesGrupo} label='11. Incluir página de comparação ("X vs. Y")?'>
@@ -3470,7 +3469,7 @@ function GeradorSlidesPage({ me }) {
           <input class=${cx(inputCls, "max-w-md")} placeholder='Ex.: "Aula 12 — Present Perfect"' value=${f.nomeAula} onInput=${(e) => set("nomeAula", e.target.value)} />
         <//>
 
-        <${SlidesGrupo} label="16. Aula avulsa ou parte do fluxo semanal?" obrig=${true}>
+        <${SlidesGrupo} label="16. Aula avulsa ou parte do fluxo semanal?">
           ${[["avulsa", "Aula avulsa (só os slides)"], ["semanal", "Parte do fluxo semanal (slides + resumo + quiz de 18 + tarefa em vídeo + perguntas do Lab)"]].map(([v, l]) => html`<${SlidesOpc} on=${f.fluxo === v} click=${() => set("fluxo", v)}>${l}<//>`)}
         <//>
 
