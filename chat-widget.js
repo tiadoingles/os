@@ -9,7 +9,7 @@
   var ENDPOINT = SUPABASE_URL + "/functions/v1/public-chat";
   var BRAND = "#ea5167";
   var GREETING =
-    "Oi! Eu sou a assistente de dúvidas do Método Tia do Inglês 💕 Pode perguntar sobre o conteúdo das aulas, pronúncia, gramática ou qualquer ponto da metodologia que ficou confuso.";
+    "Oi! Eu sou o Tira Dúvidas de Conteúdo do Método Tia do Inglês 💕 Pode me perguntar sobre gramática, vocabulário, pronúncia ou qualquer ponto do conteúdo das aulas. Se puder, me conta também o módulo, a aula ou a apostila (Volume 1, 2 ou 3) — assim eu te ajudo melhor!";
 
   function sessionId() {
     try {
@@ -102,7 +102,7 @@
   panel.id = "tia-chat-panel";
   panel.innerHTML =
     '<div id="tia-chat-header">' +
-    '<div><div class="title">Tia do Inglês</div><div class="subtitle">Tire suas dúvidas sobre o método</div></div>' +
+    '<div><div class="title">Tira Dúvidas de Conteúdo</div><div class="subtitle">Método Tia do Inglês</div></div>' +
     '<button id="tia-chat-close" aria-label="Fechar">×</button>' +
     "</div>" +
     '<div id="tia-chat-messages"></div>' +
