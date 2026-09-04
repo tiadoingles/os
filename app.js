@@ -105,7 +105,8 @@ const NAV = [
   ]},
 
   { id: "conteudo", nome: "Conteúdo", icone: "✍️", itens: [
-    { slug: "instagram", nome: "Métricas Instagram", desc: "Alcance, engajamento e crescimento no Instagram." },
+    { slug: "metricas", nome: "Métricas",
+      desc: "Dashboard do calendário de conteúdo: produção, desempenho orgânico e posts por objetivo." },
     { slug: "gerador-conteudos", nome: "Gerador de conteúdos",
       desc: "Gera ideias e conteúdos a partir dos insights das pesquisas de alunos." },
   ]},
@@ -1980,6 +1981,259 @@ function InstagramPage() {
     </div>`;
 }
 
+/* ============================ Conteúdo · Métricas (Calendário) ============================ */
+
+const CONTEUDO_SHEET_URL = "https://docs.google.com/spreadsheets/d/16jiwjBf8m2wm06oPBigjkNxLZCv37tImGhpbWMl-uAU/edit";
+const SCORE_ORDEM = { EXCELENTE: 4, "ÓTIMO": 3, BOM: 2, RUIM: 1 };
+
+async function fetchConteudoMetricas() {
+  const [cal, res] = await Promise.all([
+    sb.from("conteudo_calendario").select("*").order("data_programada", { ascending: true }),
+    sb.from("conteudo_objetivo_resumo").select("*").order("ordem", { ascending: true }),
+  ]);
+  if (cal.error) throw cal.error;
+  return { linhas: cal.data || [], resumo: res.data || [] };
+}
+
+function BarRow({ label, valor, max, sufixo, cor }) {
+  const pct = max > 0 ? Math.min(100, (Number(valor) / max) * 100) : 0;
+  return html`
+    <div class="flex items-center gap-2 text-sm">
+      <div class="w-36 shrink-0 truncate text-ink/80" title=${label}>${label}</div>
+      <div class="relative h-3.5 flex-1 overflow-hidden rounded bg-black/[0.05]">
+        <div class="absolute inset-y-0 left-0 rounded" style=${`width:${pct.toFixed(1)}%;background:${cor || "#ea5167"}`}></div>
+      </div>
+      <div class="w-16 shrink-0 text-right tabular-nums text-muted">${nf(valor)}${sufixo || ""}</div>
+    </div>`;
+}
+
+function DistBloco({ titulo, contagem }) {
+  const itens = Object.entries(contagem).filter(([k, n]) => n > 0 && k !== "—" && k !== "NA").sort((a, b) => b[1] - a[1]);
+  const max = itens.length ? itens[0][1] : 1;
+  return html`
+    <div class="rounded-xl border border-line bg-card p-4">
+      <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">${titulo}</div>
+      ${itens.length ? html`<div class="space-y-1.5">${itens.map(([k, n]) => html`<${BarRow} label=${k} valor=${n} max=${max} />`)}</div>`
+        : html`<div class="text-sm text-muted">Sem dados no período.</div>`}
+    </div>`;
+}
+
+function semanaSeg(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+}
+
+function ConteudoMetricasPage() {
+  const [data, setData] = useState(null);
+  const [janela, setJanela] = useState("tudo"); // 4 | 8 | 12 | tudo (semanas)
+  const [tipo, setTipo] = useState("todos");
+  const [funil, setFunil] = useState("todos");
+  const [soComDados, setSoComDados] = useState(true);
+
+  useEffect(() => {
+    fetchConteudoMetricas().then(setData).catch((e) => { notify(errMsg(e), "err"); setData({ linhas: [], resumo: [] }); });
+  }, []);
+
+  const filtradas = useMemo(() => {
+    if (!data) return [];
+    let ls = data.linhas.slice();
+    if (janela !== "tudo") {
+      const lim = new Date();
+      lim.setDate(lim.getDate() - Number(janela) * 7);
+      const limIso = lim.toISOString().slice(0, 10);
+      ls = ls.filter((r) => r.data_programada && r.data_programada >= limIso);
+    }
+    if (tipo !== "todos") ls = ls.filter((r) => (r.tipo || "") === tipo);
+    if (funil !== "todos") ls = ls.filter((r) => (r.funil || "") === funil);
+    if (soComDados) ls = ls.filter((r) => r.views_7d != null);
+    return ls;
+  }, [data, janela, tipo, funil, soComDados]);
+
+  if (!data) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
+
+  const { linhas, resumo } = data;
+  const atualizado = linhas.length ? fmtDate(linhas.map((r) => r.atualizado_em).filter(Boolean).sort().pop(), true) : "—";
+  const tiposDisp = [...new Set(linhas.map((r) => r.tipo).filter(Boolean))];
+  const funisDisp = [...new Set(linhas.map((r) => r.funil).filter(Boolean))];
+
+  const comDados = filtradas.filter((r) => r.views_7d != null);
+  const soma = (k) => comDados.reduce((a, r) => a + (Number(r[k]) || 0), 0);
+  const mediaDe = (arr, k) => { const v = arr.map((r) => r[k]).filter((x) => x != null).map(Number); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0; };
+  const viewsTot = soma("views_7d");
+  const engMedio = mediaDe(comDados, "engajamento_real") * 100;
+  const scored = filtradas.filter((r) => r.score);
+  const bons = scored.filter((r) => r.score === "ÓTIMO" || r.score === "EXCELENTE").length;
+
+  const contagem = (k, mapfn) => filtradas.reduce((acc, r) => { const v = mapfn ? mapfn(r) : (r[k] || "—"); if (v) acc[v] = (acc[v] || 0) + 1; return acc; }, {});
+  const distTipo = contagem("tipo");
+  const distFunil = contagem("funil");
+  const distObjetivo = contagem("objetivo");
+  const distFase = contagem("fase_marketing");
+  const distScore = contagem("score");
+  const distIcp = { "Dentro do ICP": filtradas.filter((r) => r.dentro_icp).length, "Fora do ICP": filtradas.filter((r) => r.fora_icp).length };
+
+  // séries por semana (sobre filtradas com data)
+  const semanas = {};
+  for (const r of filtradas) {
+    if (!r.data_programada) continue;
+    const s = semanaSeg(r.data_programada);
+    (semanas[s] = semanas[s] || { posts: 0, views: 0, seg: 0 });
+    semanas[s].posts += 1;
+    semanas[s].views += Number(r.views_7d) || 0;
+    semanas[s].seg += Number(r.seguidores_org) || 0;
+  }
+  const semKeys = Object.keys(semanas).sort();
+
+  const top = comDados.slice().sort((a, b) => (b.views_7d || 0) - (a.views_7d || 0)).slice(0, 10);
+  const ruins = filtradas.filter((r) => r.score === "RUIM").sort((a, b) => (b.data_programada || "").localeCompare(a.data_programada || "")).slice(0, 10);
+
+  const selCls = "rounded-lg border border-line bg-white px-2 py-1 text-sm focus:border-brand focus:outline-none";
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">✍️ Conteúdo</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">Métricas</h1>
+      <p class="mt-1 text-xs text-muted">
+        Calendário de conteúdo · atualizado ${atualizado} ·
+        <a href=${CONTEUDO_SHEET_URL} target="_blank" rel="noopener" class="text-brand hover:underline">abrir planilha ↗</a>
+      </p>
+
+      <h2 class="mt-5 text-sm font-semibold uppercase tracking-wider text-muted">Posts por objetivo</h2>
+      <div class="mt-3 grid gap-3 sm:grid-cols-3">
+        ${resumo.map((o) => {
+          const real = Number(o.percentual || 0), meta = Number(o.meta || 0);
+          const bate = real >= meta - 0.001;
+          const cor = o.objetivo === "Total" ? "#8f887d" : (bate ? "#4CAF6E" : "#EEB44E");
+          return html`
+            <div class="rounded-2xl border border-line bg-card p-4">
+              <div class="text-sm font-semibold text-ink">${o.objetivo}</div>
+              <div class="mt-1 text-2xl font-semibold text-ink">${nf(o.qtde)} <span class="text-sm font-normal text-muted">posts</span></div>
+              <div class="mt-2 h-3 overflow-hidden rounded bg-black/[0.05]">
+                <div class="h-full rounded" style=${`width:${(real * 100).toFixed(1)}%;background:${cor}`}></div>
+              </div>
+              <div class="mt-1 flex justify-between text-[11px] text-muted">
+                <span>realizado ${(real * 100).toFixed(0)}%</span>
+                <span>meta ${(meta * 100).toFixed(0)}%</span>
+              </div>
+            </div>`;
+        })}
+      </div>
+
+      <div class="mt-6 flex flex-wrap items-end gap-3 rounded-xl border border-line bg-card p-3">
+        <label class="text-sm">
+          <span class="mb-1 block text-[11px] font-medium uppercase tracking-wide text-muted">Período</span>
+          <select class=${selCls} value=${janela} onChange=${(e) => setJanela(e.target.value)}>
+            <option value="4">Últimas 4 semanas</option>
+            <option value="8">Últimas 8 semanas</option>
+            <option value="12">Últimas 12 semanas</option>
+            <option value="tudo">Tudo</option>
+          </select>
+        </label>
+        <label class="text-sm">
+          <span class="mb-1 block text-[11px] font-medium uppercase tracking-wide text-muted">Tipo</span>
+          <select class=${selCls} value=${tipo} onChange=${(e) => setTipo(e.target.value)}>
+            <option value="todos">Todos</option>
+            ${tiposDisp.map((t) => html`<option value=${t}>${t}</option>`)}
+          </select>
+        </label>
+        <label class="text-sm">
+          <span class="mb-1 block text-[11px] font-medium uppercase tracking-wide text-muted">Funil</span>
+          <select class=${selCls} value=${funil} onChange=${(e) => setFunil(e.target.value)}>
+            <option value="todos">Todos</option>
+            ${funisDisp.map((f) => html`<option value=${f}>${f}</option>`)}
+          </select>
+        </label>
+        <label class="flex items-center gap-2 text-sm text-ink/80">
+          <input type="checkbox" checked=${soComDados} onChange=${(e) => setSoComDados(e.target.checked)} />
+          Só posts com métricas
+        </label>
+        <div class="ml-auto text-xs text-muted">${filtradas.length} post(s) · ${comDados.length} com métricas</div>
+      </div>
+
+      <div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <${KPI} label="Posts (com métricas)" valor=${nf(comDados.length)} sub=${nf(filtradas.length) + " no período"} />
+        <${KPI} label="Views 7 dias" valor=${nfShort(viewsTot)} sub=${comDados.length ? "~" + nfShort(Math.round(viewsTot / comDados.length)) + "/post" : ""} />
+        <${KPI} label="Engajamento real" valor=${engMedio.toFixed(1) + "%"} sub="média dos posts" />
+        <${KPI} label="Seguidores orgânicos" valor=${nf(soma("seguidores_org"))} sub="ganhos no período" />
+        <${KPI} label="Curtidas" valor=${nfShort(soma("curtidas"))} />
+        <${KPI} label="Comentários" valor=${nfShort(soma("comentarios"))} />
+        <${KPI} label="Salvamentos" valor=${nfShort(soma("salvamentos"))} />
+        <${KPI} label="Compartilhamentos" valor=${nfShort(soma("compartilhamentos"))} />
+        <${KPI} label="Pontuação média" valor=${nf(Math.round(mediaDe(comDados, "pontuacao")))} />
+        <${KPI} label="Posts Ótimo/Excelente" valor=${scored.length ? Math.round((bons / scored.length) * 100) + "%" : "—"} sub=${bons + " de " + scored.length + " avaliados"} />
+      </div>
+
+      <h2 class="mt-8 text-sm font-semibold uppercase tracking-wider text-muted">Distribuições</h2>
+      <div class="mt-3 grid gap-3 lg:grid-cols-2">
+        <${DistBloco} titulo="Tipo de conteúdo" contagem=${distTipo} />
+        <${DistBloco} titulo="Funil" contagem=${distFunil} />
+        <${DistBloco} titulo="Objetivo" contagem=${distObjetivo} />
+        <${DistBloco} titulo="Fase de Marketing" contagem=${distFase} />
+        <${DistBloco} titulo="Score" contagem=${distScore} />
+        <${DistBloco} titulo="ICP" contagem=${distIcp} />
+      </div>
+
+      <h2 class="mt-8 text-sm font-semibold uppercase tracking-wider text-muted">Evolução por semana</h2>
+      <div class="mt-3 grid gap-3 sm:grid-cols-3">
+        ${[["Posts/semana", "posts"], ["Views/semana", "views"], ["Seguidores/semana", "seg"]].map(([lab, k]) => html`
+          <div class="rounded-xl border border-line bg-card p-4">
+            <div class="mb-2 text-xs uppercase tracking-wide text-muted">${lab}</div>
+            <${Sparkline} values=${semKeys.map((s) => semanas[s][k])} />
+            <div class="mt-1 flex justify-between text-[11px] text-muted">
+              <span>${semKeys[0] ? fmtDate(semKeys[0]) : ""}</span>
+              <span>${semKeys.length ? fmtDate(semKeys[semKeys.length - 1]) : ""}</span>
+            </div>
+          </div>`)}
+      </div>
+
+      <h2 class="mt-8 text-sm font-semibold uppercase tracking-wider text-muted">Top 10 por views (7 dias)</h2>
+      <div class="mt-3 overflow-x-auto rounded-xl border border-line bg-card">
+        <table class="w-full min-w-[640px] text-left text-sm">
+          <thead class="border-b border-line text-xs uppercase tracking-wide text-muted">
+            <tr><th class="px-4 py-3 font-medium">Tema</th><th class="px-4 py-3 font-medium">Tipo</th><th class="px-4 py-3 font-medium">Funil</th><th class="px-4 py-3 font-medium">Score</th><th class="px-4 py-3 text-right font-medium">Views</th><th class="px-4 py-3 text-right font-medium">Eng.</th></tr>
+          </thead>
+          <tbody class="divide-y divide-line">
+            ${top.map((r) => html`
+              <tr key=${r.linha}>
+                <td class="px-4 py-2.5 font-medium text-ink">${r.tema || "—"}</td>
+                <td class="px-4 py-2.5 text-muted">${r.tipo || "—"}</td>
+                <td class="px-4 py-2.5 text-muted">${r.funil || "—"}</td>
+                <td class="px-4 py-2.5 text-muted">${r.score || "—"}</td>
+                <td class="px-4 py-2.5 text-right tabular-nums">${nf(r.views_7d)}</td>
+                <td class="px-4 py-2.5 text-right tabular-nums text-muted">${r.engajamento_real != null ? (r.engajamento_real * 100).toFixed(1) + "%" : "—"}</td>
+              </tr>`)}
+          </tbody>
+        </table>
+      </div>
+
+      ${ruins.length ? html`
+        <h2 class="mt-8 text-sm font-semibold uppercase tracking-wider text-muted">Posts com Score "RUIM" (revisar)</h2>
+        <div class="mt-3 overflow-x-auto rounded-xl border border-line bg-card">
+          <table class="w-full min-w-[560px] text-left text-sm">
+            <thead class="border-b border-line text-xs uppercase tracking-wide text-muted">
+              <tr><th class="px-4 py-3 font-medium">Data</th><th class="px-4 py-3 font-medium">Tema</th><th class="px-4 py-3 font-medium">Tipo</th><th class="px-4 py-3 text-right font-medium">Views</th></tr>
+            </thead>
+            <tbody class="divide-y divide-line">
+              ${ruins.map((r) => html`
+                <tr key=${r.linha}>
+                  <td class="px-4 py-2.5 text-muted">${fmtDate(r.data_programada)}</td>
+                  <td class="px-4 py-2.5 font-medium text-ink">${r.tema || "—"}</td>
+                  <td class="px-4 py-2.5 text-muted">${r.tipo || "—"}</td>
+                  <td class="px-4 py-2.5 text-right tabular-nums">${nf(r.views_7d)}</td>
+                </tr>`)}
+            </tbody>
+          </table>
+        </div>` : null}
+
+      <p class="mt-4 text-xs text-muted">
+        Fonte: aba "Calendário" da planilha de conteúdo. Atualização automática diária pela tarefa
+        <code class="rounded bg-black/[0.05] px-1">sync-conteudo-metricas-os</code>.
+      </p>
+    </div>`;
+}
+
 /* ============================ CS · Pesquisas de Alunos ============================ */
 
 async function fetchPesquisas() {
@@ -3347,21 +3601,21 @@ function HomePage({ me, sections }) {
   useEffect(() => {
     (async () => {
       try {
-        const [ev, pesq, ig, docs, ferr] = await Promise.all([
+        const [ev, pesq, conteudo, docs, ferr] = await Promise.all([
           fetchEventos(hoje, fimSemana),
           sb.from("pesquisa_avatar").select("chave,ativo,total_respostas,ultima_resposta_em,janela_dias"),
-          sb.from("ig_perfil").select("atualizado_em,seguidores").eq("id", 1).maybeSingle(),
+          sb.from("conteudo_calendario").select("data_programada,views_7d,atualizado_em"),
           sb.from("kb_documents").select("id", { count: "exact", head: true }),
           sb.from("os_ferramentas").select("status"),
         ]);
         setData({
           eventos: ev,
           pesquisas: pesq.data || [],
-          ig: ig.data || null,
+          conteudo: conteudo.data || [],
           docCount: docs.count || 0,
           ferramentas: ferr.data || [],
         });
-      } catch (e) { notify(errMsg(e), "err"); setData({ eventos: [], pesquisas: [], ig: null, docCount: 0, ferramentas: [] }); }
+      } catch (e) { notify(errMsg(e), "err"); setData({ eventos: [], pesquisas: [], conteudo: [], docCount: 0, ferramentas: [] }); }
     })();
   }, []);
 
@@ -3384,7 +3638,12 @@ function HomePage({ me, sections }) {
 
   const pAtivas = data ? data.pesquisas.filter((r) => r.total_respostas && (r.ativo || (r.ultima_resposta_em && Date.now() - new Date(r.ultima_resposta_em).getTime() < (r.janela_dias || 30) * 86400000))).length : 0;
   const ferrErro = data ? data.ferramentas.filter((f) => f.status === "erro").length : 0;
-  const igAtual = data && data.ig && data.ig.atualizado_em ? fmtDate(data.ig.atualizado_em) : "—";
+  const cont30 = (() => {
+    if (!data || !data.conteudo) return { posts: 0, views: 0 };
+    const lim = somaDias(hoje, -30);
+    const rec = data.conteudo.filter((r) => r.data_programada && r.data_programada >= lim && r.data_programada <= hoje && r.views_7d != null);
+    return { posts: rec.length, views: rec.reduce((a, r) => a + (Number(r.views_7d) || 0), 0) };
+  })();
 
   const Chip = ({ it }) => {
     if (it.tipo === "feriado") {
@@ -3440,10 +3699,10 @@ function HomePage({ me, sections }) {
             <div class="mt-1 text-2xl font-semibold text-ink">${pAtivas}/6</div>
             <div class="text-xs text-muted">ativas</div>
           </a>
-          <a href="#/conteudo/instagram" class="rounded-xl border border-line bg-card p-4 transition hover:border-brand/40">
-            <div class="text-xs uppercase tracking-wide text-muted">Instagram</div>
-            <div class="mt-1 text-2xl font-semibold text-ink">${data.ig ? nfShort(data.ig.seguidores) : "—"}</div>
-            <div class="text-xs text-muted">seguidores · att. ${igAtual}</div>
+          <a href="#/conteudo/metricas" class="rounded-xl border border-line bg-card p-4 transition hover:border-brand/40">
+            <div class="text-xs uppercase tracking-wide text-muted">Conteúdo (30 dias)</div>
+            <div class="mt-1 text-2xl font-semibold text-ink">${nf(cont30.posts)}</div>
+            <div class="text-xs text-muted">posts · ${nfShort(cont30.views)} views 7d</div>
           </a>
           <a href="#/ferramentas" class="rounded-xl border border-line bg-card p-4 transition hover:border-brand/40">
             <div class="text-xs uppercase tracking-wide text-muted">Ferramentas</div>
@@ -3705,7 +3964,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "perfil") return html`<${ProfilePage} me=${me} onProfileChanged=${reload} />`;
   if (p0 === "admin" && me.role === "admin") return html`<${AdminPage} me=${me} />`;
   if (p0 === "farol") return html`<${FarolPage} me=${me} />`;
-  if (p0 === "conteudo" && p1 === "instagram") return html`<${InstagramPage} />`;
+  if (p0 === "conteudo" && (p1 === "metricas" || p1 === "instagram")) return html`<${ConteudoMetricasPage} />`;
   if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
   if (p0 === "pedagogico" && p1 === "gerador-materiais") return html`<${GeradorMateriaisPage} me=${me} />`;
