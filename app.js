@@ -70,6 +70,8 @@ const NAV = [
   { id: "cs", nome: "CS / Suporte", icone: "🤝", itens: [
     { slug: "metricas-atendimento", nome: "Métricas de Atendimento",
       desc: "Volume de atendimentos, tempo de primeira resposta, tempo de resolução e satisfação do CS. Base de dados a definir." },
+    { slug: "chat-cademi", nome: "Chat da Cademí",
+      desc: "Perguntas e respostas do chatbot de dúvidas de conteúdo (popup na área de membros), para acompanhar o que as alunas perguntam." },
     { slug: "pesquisas", nome: "Pesquisas de Alunos",
       desc: "Principais insights e as pesquisas completas.",
       links: [
@@ -2341,6 +2343,78 @@ function PesquisasPage() {
     </div>`;
 }
 
+/* ============================ CS / Suporte · Chat da Cademí ============================ */
+
+async function fetchChatWidgetLogs() {
+  const { data, error } = await sb.from("chat_widget_logs").select("*")
+    .order("created_at", { ascending: false }).limit(200);
+  if (error) throw error;
+  return data || [];
+}
+
+function ChatLogCard({ r }) {
+  const [open, setOpen] = useState(false);
+  const resposta = r.resposta || "";
+  const curta = resposta.length > 220 && !open ? resposta.slice(0, 220) + "…" : resposta;
+  return html`
+    <div class="rounded-xl border border-line bg-card p-4">
+      <div class="flex items-start justify-between gap-3">
+        <p class="text-sm font-medium text-ink">${r.pergunta}</p>
+        <span class="shrink-0 text-xs text-muted">${fmtDate(r.created_at, true)}</span>
+      </div>
+      ${r.erro
+        ? html`<p class="mt-2 text-sm text-[#9c2b23]">Erro: ${r.erro}</p>`
+        : html`
+          <p class="mt-2 whitespace-pre-wrap text-sm text-ink/80">${curta}</p>
+          ${resposta.length > 220 && html`
+            <button type="button" class="mt-1 text-xs text-brand hover:underline" onClick=${() => setOpen((o) => !o)}>
+              ${open ? "ver menos" : "ver resposta completa"}
+            </button>`}
+          ${!!(r.fontes && r.fontes.length) && html`
+            <p class="mt-2 text-xs text-muted">Fonte: ${r.fontes.map((f) => f.titulo).join(", ")}</p>`}
+        `}
+    </div>`;
+}
+
+function ChatCademiPage() {
+  const [rows, setRows] = useState(null);
+  const [busca, setBusca] = useState("");
+
+  useEffect(() => {
+    fetchChatWidgetLogs().then(setRows).catch((e) => { notify(errMsg(e), "err"); setRows([]); });
+  }, []);
+
+  if (!rows) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
+
+  const q = busca.trim().toLowerCase();
+  const filtradas = q
+    ? rows.filter((r) => (r.pergunta || "").toLowerCase().includes(q) || (r.resposta || "").toLowerCase().includes(q))
+    : rows;
+  const dia = 24 * 60 * 60 * 1000;
+  const ultimas24h = rows.filter((r) => Date.now() - new Date(r.created_at).getTime() < dia).length;
+  const erros = rows.filter((r) => r.erro).length;
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">🤝 CS / Suporte</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">Chat da Cademí</h1>
+      <p class="mt-1 text-xs text-muted">
+        Perguntas e respostas do chatbot de dúvidas de conteúdo (popup na Cademí, treinado só com a seção Metodologia) ·
+        ${rows.length} conversas · ${ultimas24h} nas últimas 24h${erros ? ` · ${erros} com erro` : ""}
+      </p>
+
+      <input type="text" placeholder="Buscar por pergunta ou resposta…" value=${busca}
+        onInput=${(e) => setBusca(e.target.value)}
+        class="mt-4 w-full max-w-md rounded-lg border border-line px-3 py-2 text-sm outline-none focus:border-brand" />
+
+      <div class="mt-4 grid gap-3">
+        ${filtradas.length
+          ? filtradas.map((r) => html`<${ChatLogCard} key=${r.id} r=${r} />`)
+          : html`<p class="text-sm text-muted">Nenhuma conversa ainda.</p>`}
+      </div>
+    </div>`;
+}
+
 /* ============================ Conteúdo · Gerador de Conteúdos ============================ */
 
 const INSIGHT_CATS = [
@@ -3966,6 +4040,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "conteudo" && (p1 === "metricas" || p1 === "instagram")) return html`<${ConteudoMetricasPage} />`;
   if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
+  if (p0 === "cs" && p1 === "chat-cademi") return html`<${ChatCademiPage} />`;
   if (p0 === "pedagogico" && p1 === "gerador-materiais") return html`<${GeradorMateriaisPage} me=${me} />`;
   if (p0 === "pedagogico" && p1 === "gerador-slides") return html`<${GeradorSlidesPage} me=${me} />`;
   if (p0 === "pedagogico" && p1 === "gerador-feedbacks")
