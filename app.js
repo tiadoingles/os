@@ -2362,6 +2362,10 @@ function ChatLogCard({ r }) {
         <p class="text-sm font-medium text-ink">${r.pergunta}</p>
         <span class="shrink-0 text-xs text-muted">${fmtDate(r.created_at, true)}</span>
       </div>
+      ${r.stop_reason && r.stop_reason !== "end_turn" && html`
+        <span class="mt-2 inline-block rounded-full bg-[#fdf3d6] px-2 py-0.5 text-[11px] text-[#8a6d1a]">
+          possível resposta cortada (${r.stop_reason})
+        </span>`}
       ${r.erro
         ? html`<p class="mt-2 text-sm text-[#9c2b23]">Erro: ${r.erro}</p>`
         : html`
