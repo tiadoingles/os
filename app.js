@@ -70,6 +70,8 @@ const NAV = [
   { id: "cs", nome: "CS / Suporte", icone: "🤝", itens: [
     { slug: "faq", nome: "FAQ",
       desc: "Pergunte sobre processos de CS/Suporte — a IA responde com base nos documentos da pasta CS:Suporte do Drive." },
+    { slug: "envios-livros", nome: "Envios de Livros",
+      desc: "Cadastro e acompanhamento dos envios de material didático e do livro Mente Aberta e Língua Solta." },
     { slug: "metricas-atendimento", nome: "Métricas de Atendimento",
       desc: "Volume de atendimentos, tempo de primeira resposta, tempo de resolução e satisfação do CS. Base de dados a definir." },
     { slug: "chat-cademi", nome: "Chat da Cademí",
@@ -2258,6 +2260,337 @@ function FaqPage({ me }) {
     </div>`;
 }
 
+/* ============================ CS / Suporte · Envios de Livros ============================ */
+
+// fmtDate() passa por `new Date(string)`, que interpreta "AAAA-MM-DD" como
+// meia-noite UTC — em fuso negativo (Brasil) isso mostra o dia ANTERIOR. Pros
+// campos de data pura desta página (sem hora), monta a Date a partir dos
+// componentes locais em vez de parsear a string ISO.
+function fmtDataISO(iso) {
+  if (!iso) return "—";
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+const LIVROS_PRODUTOS = ["Material Didático", "Livro Mente Aberta e Língua Solta"];
+const UF_LIST = ["AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG", "PA", "PB", "PR",
+  "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"];
+
+async function fetchEnviosLivros() {
+  const { data, error } = await sb.from("livros_envios").select("*")
+    .order("data_cadastro", { ascending: false }).order("created_at", { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+
+// Resumo pra dashboard da página e pro cartão da Home: enviados, pendentes, e
+// quantos pendentes já passaram de 7 dias desde o cadastro do envio.
+function resumoEnvios(lista, hoje) {
+  const limite = somaDias(hoje, -7);
+  let enviados = 0, pendentes = 0, atrasados = 0;
+  for (const e of lista) {
+    if (e.status === "enviado") enviados++;
+    else {
+      pendentes++;
+      if (e.data_cadastro && e.data_cadastro <= limite) atrasados++;
+    }
+  }
+  return { enviados, pendentes, atrasados };
+}
+
+function filtrarEnvios(lista, { busca, dataDe, dataAte }) {
+  let out = lista;
+  const q = (busca || "").trim().toLowerCase();
+  if (q) {
+    out = out.filter((e) =>
+      (e.nome || "").toLowerCase().includes(q) ||
+      (e.email || "").toLowerCase().includes(q) ||
+      (e.cpf || "").toLowerCase().includes(q));
+  }
+  if (dataDe) out = out.filter((e) => e.data_cadastro && e.data_cadastro >= dataDe);
+  if (dataAte) out = out.filter((e) => e.data_cadastro && e.data_cadastro <= dataAte);
+  return out;
+}
+
+function EnvioForm({ me, onSalvo, onCancelar }) {
+  const [produtos, setProdutos] = useState([]);
+  const [dataVenda, setDataVenda] = useState("");
+  const [nome, setNome] = useState("");
+  const [cpf, setCpf] = useState("");
+  const [email, setEmail] = useState("");
+  const [telefone, setTelefone] = useState("");
+  const [cep, setCep] = useState("");
+  const [endereco, setEndereco] = useState("");
+  const [numero, setNumero] = useState("");
+  const [complemento, setComplemento] = useState("");
+  const [bairro, setBairro] = useState("");
+  const [cidade, setCidade] = useState("");
+  const [estado, setEstado] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  function toggleProduto(p) {
+    setProdutos((cur) => (cur.includes(p) ? cur.filter((x) => x !== p) : [...cur, p]));
+  }
+
+  async function salvar(e) {
+    e && e.preventDefault();
+    if (!produtos.length) { notify("Escolha ao menos um produto.", "err"); return; }
+    if (!nome.trim() || !cpf.trim() || !email.trim() || !telefone.trim() || !cep.trim() ||
+        !endereco.trim() || !numero.trim() || !bairro.trim() || !cidade.trim() || !estado) {
+      notify("Preencha todos os campos obrigatórios — o endereço completo é essencial pro envio.", "err");
+      return;
+    }
+    setBusy(true);
+    try {
+      const { error } = await sb.from("livros_envios").insert({
+        produtos,
+        data_venda: dataVenda || null,
+        nome: nome.trim(),
+        cpf: cpf.trim(),
+        email: email.trim(),
+        telefone: telefone.trim(),
+        cep: cep.trim(),
+        endereco: endereco.trim(),
+        numero: numero.trim(),
+        complemento: complemento.trim() || null,
+        bairro: bairro.trim(),
+        cidade: cidade.trim(),
+        estado,
+        criado_por: me ? me.id : null,
+      });
+      if (error) throw error;
+      notify("Envio cadastrado.", "ok");
+      onSalvo();
+    } catch (e2) { notify(errMsg(e2), "err"); }
+    finally { setBusy(false); }
+  }
+
+  return html`
+    <form onSubmit=${salvar} class="mt-3 rounded-2xl border border-line bg-card p-5">
+      <div class="grid gap-3 sm:grid-cols-2">
+        <div class="sm:col-span-2">
+          <${Field} label="Produto" required>
+            <div class="flex flex-wrap gap-4 pt-1">
+              ${LIVROS_PRODUTOS.map((p) => html`
+                <label class="flex items-center gap-1.5 text-sm text-ink">
+                  <input type="checkbox" checked=${produtos.includes(p)} onChange=${() => toggleProduto(p)} />
+                  ${p}
+                </label>`)}
+            </div>
+          <//>
+        </div>
+        <${Field} label="Data da venda">
+          <input type="date" class=${inputCls} value=${dataVenda} onInput=${(e) => setDataVenda(e.target.value)} />
+        <//>
+        <${Field} label="Data do cadastro de envio">
+          <input class=${cx(inputCls, "bg-black/[0.03] text-muted")} value=${fmtDataISO(hojeISO())} disabled />
+        <//>
+        <${Field} label="Nome da aluna" required>
+          <input class=${inputCls} value=${nome} onInput=${(e) => setNome(e.target.value)} autofocus />
+        <//>
+        <${Field} label="CPF" required>
+          <input class=${inputCls} placeholder="000.000.000-00" value=${cpf} onInput=${(e) => setCpf(e.target.value)} />
+        <//>
+        <${Field} label="Email" required>
+          <input type="email" class=${inputCls} value=${email} onInput=${(e) => setEmail(e.target.value)} />
+        <//>
+        <${Field} label="Telefone (DDD + número)" required>
+          <input class=${inputCls} placeholder="(00) 00000-0000" value=${telefone} onInput=${(e) => setTelefone(e.target.value)} />
+        <//>
+        <${Field} label="CEP" required>
+          <input class=${inputCls} placeholder="00000-000" value=${cep} onInput=${(e) => setCep(e.target.value)} />
+        <//>
+        <${Field} label="Endereço" required>
+          <input class=${inputCls} value=${endereco} onInput=${(e) => setEndereco(e.target.value)} />
+        <//>
+        <${Field} label="Número" required>
+          <input class=${inputCls} value=${numero} onInput=${(e) => setNumero(e.target.value)} />
+        <//>
+        <${Field} label="Complemento">
+          <input class=${inputCls} value=${complemento} onInput=${(e) => setComplemento(e.target.value)} />
+        <//>
+        <${Field} label="Bairro" required>
+          <input class=${inputCls} value=${bairro} onInput=${(e) => setBairro(e.target.value)} />
+        <//>
+        <${Field} label="Cidade" required>
+          <input class=${inputCls} value=${cidade} onInput=${(e) => setCidade(e.target.value)} />
+        <//>
+        <${Field} label="Estado" required>
+          <select class=${inputCls} value=${estado} onChange=${(e) => setEstado(e.target.value)}>
+            <option value="">Selecione</option>
+            ${UF_LIST.map((uf) => html`<option value=${uf}>${uf}</option>`)}
+          </select>
+        <//>
+      </div>
+      <div class="mt-4 flex justify-end gap-2">
+        <${Btn} variant="ghost" type="button" onClick=${onCancelar}>Cancelar<//>
+        <${Btn} type="submit" loading=${busy}>Cadastrar envio<//>
+      </div>
+    </form>`;
+}
+
+function EnvioDetalheModal({ envio, onClose, onAtualizado }) {
+  const [busy, setBusy] = useState(false);
+
+  async function alternarStatus() {
+    setBusy(true);
+    try {
+      const novoStatus = envio.status === "enviado" ? "pendente" : "enviado";
+      const payload = { status: novoStatus, enviado_em: novoStatus === "enviado" ? new Date().toISOString() : null };
+      const { data, error } = await sb.from("livros_envios").update(payload).eq("id", envio.id).select().maybeSingle();
+      if (error) throw error;
+      notify(novoStatus === "enviado" ? "Marcado como enviado." : "Marcado como pendente novamente.", "ok");
+      onAtualizado(data || { ...envio, ...payload });
+    } catch (e) { notify(errMsg(e), "err"); }
+    finally { setBusy(false); }
+  }
+
+  const endereco = [
+    [envio.endereco, envio.numero].filter(Boolean).join(", "),
+    envio.complemento,
+    envio.bairro,
+    envio.cidade ? `${envio.cidade}/${envio.estado || ""}` : null,
+    envio.cep ? `CEP ${envio.cep}` : null,
+  ].filter(Boolean).join(" · ");
+
+  return html`
+    <${Modal} title=${envio.nome} onClose=${onClose} wide>
+      <div class="grid gap-4 text-sm sm:grid-cols-2">
+        <div><div class="text-xs uppercase tracking-wide text-muted">Produto</div>
+          <div class="mt-0.5 text-ink">${(envio.produtos || []).join(" · ") || "—"}</div></div>
+        <div><div class="text-xs uppercase tracking-wide text-muted">Status</div>
+          <div class="mt-0.5">${envio.status === "enviado"
+            ? html`<${Badge} class="bg-[#e3ecdf] text-[#4c6b3f]">Enviado<//>`
+            : html`<${Badge} class="bg-[#f3ecd8] text-[#8a6a1f]">Pendente<//>`}</div></div>
+        <div><div class="text-xs uppercase tracking-wide text-muted">Data da venda</div>
+          <div class="mt-0.5 text-ink">${envio.data_venda ? fmtDataISO(envio.data_venda) : "—"}</div></div>
+        <div><div class="text-xs uppercase tracking-wide text-muted">Data do cadastro</div>
+          <div class="mt-0.5 text-ink">${fmtDataISO(envio.data_cadastro)}</div></div>
+        <div><div class="text-xs uppercase tracking-wide text-muted">CPF</div>
+          <div class="mt-0.5 text-ink">${envio.cpf || "—"}</div></div>
+        <div><div class="text-xs uppercase tracking-wide text-muted">Email</div>
+          <div class="mt-0.5 text-ink">${envio.email || "—"}</div></div>
+        <div><div class="text-xs uppercase tracking-wide text-muted">Telefone</div>
+          <div class="mt-0.5 text-ink">${envio.telefone || "—"}</div></div>
+        <div class="sm:col-span-2"><div class="text-xs uppercase tracking-wide text-muted">Endereço</div>
+          <div class="mt-0.5 text-ink">${endereco || "—"}</div></div>
+      </div>
+      <div class="mt-5 flex justify-end gap-2">
+        <${Btn} variant="ghost" type="button" onClick=${onClose}>Fechar<//>
+        <${Btn} type="button" loading=${busy} onClick=${alternarStatus}>
+          ${envio.status === "enviado" ? "Marcar como pendente" : "✔ Marcar como enviado"}
+        <//>
+      </div>
+    <//>`;
+}
+
+function EnviosLivrosPage({ me }) {
+  const [lista, setLista] = useState(null); // null = carregando
+  const [showForm, setShowForm] = useState(false);
+  const [busca, setBusca] = useState("");
+  const [dataDe, setDataDe] = useState("");
+  const [dataAte, setDataAte] = useState("");
+  const [selecionado, setSelecionado] = useState(null);
+  const hoje = hojeISO();
+
+  async function recarregar() {
+    try { setLista(await fetchEnviosLivros()); }
+    catch (e) { notify(errMsg(e), "err"); setLista([]); }
+  }
+  useEffect(() => { recarregar(); }, []);
+
+  const resumo = useMemo(() => resumoEnvios(lista || [], hoje), [lista, hoje]);
+  const filtrados = useMemo(() => filtrarEnvios(lista || [], { busca, dataDe, dataAte }), [lista, busca, dataDe, dataAte]);
+  const limite7d = somaDias(hoje, -7);
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">🤝 CS / Suporte</div>
+      <h1 class="mt-1 flex items-center gap-2 text-2xl font-semibold text-ink">📦 Envios de Livros</h1>
+      <p class="mt-1 text-sm text-muted">
+        Cadastro e acompanhamento dos envios de <b>Material Didático</b> e do livro
+        <b>Mente Aberta e Língua Solta</b>.
+      </p>
+
+      ${lista === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
+        <div class="mt-5 grid gap-3 sm:grid-cols-2">
+          <div class="rounded-2xl border border-line bg-card p-5">
+            <div class="text-xs uppercase tracking-wide text-muted">Envios realizados</div>
+            <div class="mt-1 text-3xl font-semibold text-ink">${nf(resumo.enviados)}</div>
+          </div>
+          <div class=${cx("rounded-2xl border p-5", resumo.atrasados > 0 ? "border-[#e3b7ae] bg-[#faefec]" : "border-line bg-card")}>
+            <div class="text-xs uppercase tracking-wide text-muted">Envios pendentes</div>
+            <div class=${cx("mt-1 text-3xl font-semibold", resumo.atrasados > 0 ? "text-[#a44b43]" : "text-ink")}>${nf(resumo.pendentes)}</div>
+            ${resumo.atrasados > 0 && html`
+              <div class="mt-1.5 text-xs font-medium text-[#a44b43]">⚠️ ${resumo.atrasados} há mais de 7 dias sem envio</div>`}
+          </div>
+        </div>
+
+        <div class="mt-5">
+          <${Btn} variant=${showForm ? "ghost" : "primary"} type="button" onClick=${() => setShowForm((v) => !v)}>
+            ${showForm ? "✕ Fechar" : "＋ Cadastrar novo envio"}
+          <//>
+          ${showForm && html`<${EnvioForm} me=${me} onCancelar=${() => setShowForm(false)}
+            onSalvo=${() => { setShowForm(false); recarregar(); }} />`}
+        </div>
+
+        <div class="mt-6 flex flex-wrap items-center gap-2">
+          <input class=${cx(inputCls, "max-w-xs")} placeholder="Buscar por nome, email ou CPF"
+            value=${busca} onInput=${(e) => setBusca(e.target.value)} />
+          <span class="text-xs text-muted">de</span>
+          <input type="date" class=${cx(inputCls, "w-auto")} value=${dataDe} onInput=${(e) => setDataDe(e.target.value)} />
+          <span class="text-xs text-muted">até</span>
+          <input type="date" class=${cx(inputCls, "w-auto")} value=${dataAte} onInput=${(e) => setDataAte(e.target.value)} />
+          ${(busca || dataDe || dataAte) ? html`
+            <button type="button" class="text-xs text-muted underline" onClick=${() => { setBusca(""); setDataDe(""); setDataAte(""); }}>limpar filtros</button>` : null}
+          <span class="ml-auto text-xs text-muted">${nf(filtrados.length)} de ${nf(lista.length)}</span>
+        </div>
+
+        <div class="mt-3 overflow-x-auto rounded-2xl border border-line bg-card">
+          <table class="w-full min-w-[820px] text-sm">
+            <thead>
+              <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
+                <th class="px-4 py-2.5">Aluna</th>
+                <th class="px-4 py-2.5">Produto</th>
+                <th class="px-4 py-2.5">Cidade/UF</th>
+                <th class="px-4 py-2.5">Data cadastro</th>
+                <th class="px-4 py-2.5">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filtrados.length === 0 ? html`
+                <tr><td colspan="5" class="px-4 py-8 text-center text-sm text-muted">Nenhum envio encontrado.</td></tr>` :
+                filtrados.map((e) => {
+                  const atrasado = e.status === "pendente" && e.data_cadastro && e.data_cadastro <= limite7d;
+                  return html`
+                    <tr class="border-b border-line last:border-0 hover:bg-black/[0.02]">
+                      <td class="px-4 py-2.5">
+                        <button type="button" class="font-medium text-ink hover:text-brand hover:underline" onClick=${() => setSelecionado(e)}>${e.nome}</button>
+                        <div class="text-xs text-muted">${e.email || "—"}</div>
+                      </td>
+                      <td class="px-4 py-2.5 text-xs text-muted">${(e.produtos || []).join(" · ") || "—"}</td>
+                      <td class="px-4 py-2.5 text-xs text-muted">${e.cidade ? `${e.cidade}/${e.estado || ""}` : "—"}</td>
+                      <td class="px-4 py-2.5 text-xs text-muted">${fmtDataISO(e.data_cadastro)}</td>
+                      <td class="px-4 py-2.5">
+                        ${e.status === "enviado"
+                          ? html`<${Badge} class="bg-[#e3ecdf] text-[#4c6b3f]">Enviado<//>`
+                          : html`<span class="flex items-center gap-1.5">
+                              <${Badge} class="bg-[#f3ecd8] text-[#8a6a1f]">Pendente<//>
+                              ${atrasado ? html`<span class="text-xs font-medium text-[#a44b43]">⚠️ atrasado</span>` : null}
+                            </span>`}
+                      </td>
+                    </tr>`;
+                })}
+            </tbody>
+          </table>
+        </div>
+      `}
+
+      ${selecionado && html`<${EnvioDetalheModal} envio=${selecionado} onClose=${() => setSelecionado(null)}
+        onAtualizado=${(novo) => { setSelecionado(novo); recarregar(); }} />`}
+    </div>`;
+}
+
 /* ============================ Conteúdo · Métricas Instagram ============================ */
 
 const nf = (n) => (n == null ? "—" : Number(n).toLocaleString("pt-BR"));
@@ -4079,12 +4412,13 @@ function HomePage({ me, sections }) {
   useEffect(() => {
     (async () => {
       try {
-        const [ev, pesq, conteudo, docs, ferr] = await Promise.all([
+        const [ev, pesq, conteudo, docs, ferr, envios] = await Promise.all([
           fetchEventos(hoje, fimSemana),
           sb.from("pesquisa_avatar").select("chave,ativo,total_respostas,ultima_resposta_em,janela_dias"),
           sb.from("conteudo_calendario").select("data_programada,views_7d,atualizado_em"),
           sb.from("kb_documents").select("id", { count: "exact", head: true }),
           sb.from("os_ferramentas").select("status"),
+          sb.from("livros_envios").select("status,data_cadastro"),
         ]);
         setData({
           eventos: ev,
@@ -4092,8 +4426,9 @@ function HomePage({ me, sections }) {
           conteudo: conteudo.data || [],
           docCount: docs.count || 0,
           ferramentas: ferr.data || [],
+          envios: envios.data || [],
         });
-      } catch (e) { notify(errMsg(e), "err"); setData({ eventos: [], pesquisas: [], conteudo: [], docCount: 0, ferramentas: [] }); }
+      } catch (e) { notify(errMsg(e), "err"); setData({ eventos: [], pesquisas: [], conteudo: [], docCount: 0, ferramentas: [], envios: [] }); }
     })();
   }, []);
 
@@ -4116,6 +4451,7 @@ function HomePage({ me, sections }) {
 
   const pAtivas = data ? data.pesquisas.filter((r) => r.total_respostas && (r.ativo || (r.ultima_resposta_em && Date.now() - new Date(r.ultima_resposta_em).getTime() < (r.janela_dias || 30) * 86400000))).length : 0;
   const ferrErro = data ? data.ferramentas.filter((f) => f.status === "erro").length : 0;
+  const envioResumo = data ? resumoEnvios(data.envios || [], hoje) : { enviados: 0, pendentes: 0, atrasados: 0 };
   const cont30 = (() => {
     if (!data || !data.conteudo) return { posts: 0, views: 0 };
     const lim = somaDias(hoje, -30);
@@ -4166,7 +4502,7 @@ function HomePage({ me, sections }) {
           </div>
         </div>
 
-        <div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           <a href="#/base" class="rounded-xl border border-line bg-card p-4 transition hover:border-brand/40">
             <div class="text-xs uppercase tracking-wide text-muted">Base de Conhecimento</div>
             <div class="mt-1 text-2xl font-semibold text-ink">${nf(data.docCount)}</div>
@@ -4181,6 +4517,11 @@ function HomePage({ me, sections }) {
             <div class="text-xs uppercase tracking-wide text-muted">Conteúdo (30 dias)</div>
             <div class="mt-1 text-2xl font-semibold text-ink">${nf(cont30.posts)}</div>
             <div class="text-xs text-muted">posts · ${nfShort(cont30.views)} views 7d</div>
+          </a>
+          <a href="#/cs/envios-livros" class=${cx("rounded-xl border p-4 transition hover:border-brand/40", envioResumo.atrasados > 0 ? "border-[#e3b7ae] bg-[#faefec]" : "border-line bg-card")}>
+            <div class="text-xs uppercase tracking-wide text-muted">Envios de livros</div>
+            <div class=${cx("mt-1 text-2xl font-semibold", envioResumo.atrasados > 0 ? "text-[#a44b43]" : "text-ink")}>${nf(envioResumo.pendentes)}</div>
+            <div class="text-xs text-muted">${envioResumo.atrasados > 0 ? `⚠️ ${envioResumo.atrasados} atrasado(s)` : "pendente(s)"}</div>
           </a>
           <a href="#/ferramentas" class="rounded-xl border border-line bg-card p-4 transition hover:border-brand/40">
             <div class="text-xs uppercase tracking-wide text-muted">Ferramentas</div>
@@ -4445,6 +4786,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "conteudo" && (p1 === "metricas" || p1 === "instagram")) return html`<${ConteudoMetricasPage} />`;
   if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
   if (p0 === "cs" && p1 === "faq") return html`<${FaqPage} me=${me} />`;
+  if (p0 === "cs" && p1 === "envios-livros") return html`<${EnviosLivrosPage} me=${me} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
   if (p0 === "cs" && p1 === "chat-cademi") return html`<${ChatCademiPage} />`;
   if (p0 === "pedagogico" && p1 === "gerador-materiais") return html`<${GeradorMateriaisPage} me=${me} />`;
