@@ -167,6 +167,23 @@ function errMsg(e) {
   return (e && (e.message || e.error_description || e.error)) || "Algo deu errado.";
 }
 
+// Planilhas do Google que recebem uma linha nova quando algo é cadastrado no OS.
+// A escrita passa pela Edge Function "planilha" -> Web App do Apps Script.
+const PLANILHA_ENVIOS_ID = "1kF6EbOADoJb_lYLpRZWAtd0-oFB1dBRP2GM-0MoeQDY"; // Bônus Livros Mentoria (aba Dados Alunos)
+const PLANILHA_CORRECOES_ID = "1KbqBnO67rleLh_zIbKj9o0FSIqxtAC-Z6N_Ie-WV6u0"; // Correções de FAQ
+
+// Acrescenta uma ou mais linhas numa planilha. Retorna { ok, appended } ou
+// { ok:false, error }. Não lança — quem chama decide o que fazer no erro.
+async function appendPlanilha(spreadsheetId, rows) {
+  try {
+    const { data, error } = await sb.functions.invoke("planilha", { body: { spreadsheetId, rows } });
+    if (error) return { ok: false, error: errMsg(error) };
+    return data || { ok: false, error: "sem resposta" };
+  } catch (e) {
+    return { ok: false, error: errMsg(e) };
+  }
+}
+
 function parseHash() {
   const raw = location.hash.replace(/^#/, "") || "/";
   const [path, qs] = raw.split("?");
@@ -2016,7 +2033,7 @@ function CadastrarRespostaModal({ secaoSlug, me, onClose, onSalvo }) {
   async function confirmarCadastro() {
     setBusy(true);
     try {
-      const { error } = await sb.from("faq_interacoes").insert({
+      const { data: novo, error } = await sb.from("faq_interacoes").insert({
         secao_slug: secaoSlug,
         pergunta: pergunta.trim(),
         resposta_ia: "", // não veio de uma resposta da IA — cadastro manual direto
@@ -2028,9 +2045,20 @@ function CadastrarRespostaModal({ secaoSlug, me, onClose, onSalvo }) {
         corrigida_em: new Date().toISOString(),
         corrigida_por: me ? me.id : null,
         criado_por: me ? me.id : null,
-      });
+      }).select("id").maybeSingle();
       if (error) throw error;
-      notify("Nova resposta cadastrada — já vale para perguntas parecidas e entra na planilha \"Correções de FAQ\" em até 30 min.", "ok");
+
+      // Linha na planilha "Correções de FAQ": Data da correção, Tema da Pergunta,
+      // Pergunta que foi feita, Resposta que foi dada (vazia num cadastro manual),
+      // Resposta corrigida.
+      const hojeBR = hojeISO().split("-").reverse().join("/");
+      const r = await appendPlanilha(PLANILHA_CORRECOES_ID, [[
+        hojeBR, tema.trim(), pergunta.trim(), "", resposta.trim(),
+      ]]);
+      if (r.ok && novo && novo.id) await sb.from("faq_interacoes").update({ sincronizado_drive: true }).eq("id", novo.id);
+      notify(r.ok
+        ? "Nova resposta cadastrada — já vale para perguntas parecidas e entrou na planilha \"Correções de FAQ\"."
+        : "Resposta salva no OS, mas não consegui escrever na planilha agora (" + r.error + ").", r.ok ? "ok" : "err");
       onSalvo && onSalvo();
       onClose();
     } catch (e) { notify(errMsg(e), "err"); }
@@ -2088,7 +2116,7 @@ function CadastrarRespostaModal({ secaoSlug, me, onClose, onSalvo }) {
     <//>`;
 }
 
-function FaqFeedback({ interacaoId, secaoSlug, tema, me, onCorrigida }) {
+function FaqFeedback({ interacaoId, secaoSlug, tema, pergunta, respostaIa, me, onCorrigida }) {
   const [status, setStatus] = useState(null); // null | "aceita" | "corrigindo" | "corrigida"
   const [texto, setTexto] = useState("");
   const [temaCorrigido, setTemaCorrigido] = useState(tema || "");
@@ -2108,16 +2136,26 @@ function FaqFeedback({ interacaoId, secaoSlug, tema, me, onCorrigida }) {
     if (!respostaCorrigida) return; // obrigatório — não deixa salvar em branco
     setSalvando(true);
     try {
+      const temaFinal = (temaCorrigido || "").trim() || tema || "";
       const { error } = await sb.from("faq_interacoes").update({
         status: "corrigida",
         resposta_corrigida: respostaCorrigida,
-        tema_corrigido: (temaCorrigido || "").trim() || null,
+        tema_corrigido: temaFinal || null,
         corrigida_em: new Date().toISOString(),
         corrigida_por: me ? me.id : null,
       }).eq("id", interacaoId);
       if (error) throw error;
       setStatus("corrigida");
-      notify("Correção salva — já vale para a próxima pergunta parecida e entra na planilha \"Correções de FAQ\" em até 30 min.", "ok");
+
+      // Linha na planilha "Correções de FAQ".
+      const hojeBR = hojeISO().split("-").reverse().join("/");
+      const r = await appendPlanilha(PLANILHA_CORRECOES_ID, [[
+        hojeBR, temaFinal, pergunta || "", respostaIa || "", respostaCorrigida,
+      ]]);
+      if (r.ok) await sb.from("faq_interacoes").update({ sincronizado_drive: true }).eq("id", interacaoId);
+      notify(r.ok
+        ? "Correção salva — já vale para a próxima pergunta parecida e entrou na planilha \"Correções de FAQ\"."
+        : "Correção salva no OS, mas não consegui escrever na planilha agora (" + r.error + ").", r.ok ? "ok" : "err");
       onCorrigida && onCorrigida();
     } catch (e2) { notify(errMsg(e2), "err"); }
     finally { setSalvando(false); }
@@ -2174,7 +2212,7 @@ function FaqPage({ me }) {
     try {
       const d = await aiCall("ask", { pergunta: pergunta.trim(), secao_slug: SECAO_SLUG });
       if (d && d.configured === false) { setConfigured(false); return; }
-      setResp(d);
+      setResp({ ...d, pergunta: pergunta.trim() });
       if (d && typeof d.total_docs === "number") setBase((b) => ({ nome: (b && b.nome) || d.secao, total: d.total_docs }));
     } catch (e2) { notify(errMsg(e2), "err"); }
     finally { setBusy(false); }
@@ -2236,7 +2274,8 @@ function FaqPage({ me }) {
             <div class="mt-4 border-t border-line pt-3 text-xs text-muted">
               Fontes: ${resp.fontes.map((f, i) => html`<span>${i ? " · " : ""}${f.titulo}</span>`)}
             </div>` : null}
-          <${FaqFeedback} interacaoId=${resp.interacao_id} secaoSlug=${SECAO_SLUG} tema=${resp.tema} me=${me}
+          <${FaqFeedback} interacaoId=${resp.interacao_id} secaoSlug=${SECAO_SLUG} tema=${resp.tema}
+            pergunta=${resp.pergunta} respostaIa=${resp.resposta} me=${me}
             onCorrigida=${() => fetchUltimasCorrecoes(SECAO_SLUG).then(setUltimasCorrecoes)} />
         </div>`}
 
@@ -2342,7 +2381,7 @@ function EnvioForm({ me, onSalvo, onCancelar }) {
     }
     setBusy(true);
     try {
-      const { error } = await sb.from("livros_envios").insert({
+      const { data: novo, error } = await sb.from("livros_envios").insert({
         produtos,
         data_venda: dataVenda || null,
         nome: nome.trim(),
@@ -2357,9 +2396,30 @@ function EnvioForm({ me, onSalvo, onCancelar }) {
         cidade: cidade.trim(),
         estado,
         criado_por: me ? me.id : null,
-      });
+      }).select("id").maybeSingle();
       if (error) throw error;
-      notify("Envio cadastrado.", "ok");
+
+      // Linha na planilha "Bônus Livros Mentoria" (aba Dados Alunos) — 16 colunas,
+      // a 9ª (índice 8) é um separador em branco. ENVIO LIVRO / ENVIO APOSTILA
+      // entram desmarcados (false), como os cadastros recentes da planilha.
+      const prodTxt = [
+        produtos.includes("Material Didático") ? "Apostila" : null,
+        produtos.includes("Livro Mente Aberta e Língua Solta") ? "Livro" : null,
+      ].filter(Boolean).join(", ");
+      const linha = [
+        false, false, prodTxt,
+        dataVenda ? dataVenda.split("-").reverse().join("/") : "",
+        nome.trim(), cpf.trim(), email.trim(), telefone.trim(), "",
+        cep.trim(), endereco.trim(), numero.trim(), complemento.trim(),
+        bairro.trim(), cidade.trim(), estado,
+      ];
+      const r = await appendPlanilha(PLANILHA_ENVIOS_ID, [linha]);
+      if (r.ok) {
+        if (novo && novo.id) await sb.from("livros_envios").update({ sincronizado_planilha: true }).eq("id", novo.id);
+        notify("Envio cadastrado e adicionado à planilha.", "ok");
+      } else {
+        notify("Envio salvo no OS, mas não consegui escrever na planilha agora (" + r.error + "). Confira depois.", "err");
+      }
       onSalvo();
     } catch (e2) { notify(errMsg(e2), "err"); }
     finally { setBusy(false); }
