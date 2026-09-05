@@ -920,6 +920,72 @@ function Markdown({ text }) {
   return html`<div class="prose-doc rounded-xl border border-line bg-white p-5" dangerouslySetInnerHTML=${{ __html: htmlStr }}></div>`;
 }
 
+// Converte Markdown (o que a IA gera) para o subconjunto de formatacao que o
+// WhatsApp entende, para copiar/colar sem perder negrito/italico/lista:
+// WhatsApp usa *negrito* (asterisco simples), _italico_ (underscore), ~riscado~
+// (til simples) e nao tem cabecalho, link nem crase de codigo.
+function mdParaWhatsapp(md) {
+  if (!md) return "";
+  let t = String(md).replace(/\r\n/g, "\n");
+
+  // Protege negrito (**texto** / __texto__) antes de mexer no italico -- markdown
+  // usa asterisco simples pra italico, mas o WhatsApp usa asterisco simples pra
+  // NEGRITO, entao precisa resolver o negrito primeiro. Usa caracteres de
+  // controle (U+0001/U+0002) como marcador -- nao aparecem em texto normal, e
+  // nao colidem com numeros de verdade que estejam na resposta.
+  const negritos = [];
+  const ABRE = String.fromCharCode(1), FECHA = String.fromCharCode(2);
+  const protegeNegrito = (txt) => ABRE + (negritos.push(txt) - 1) + FECHA;
+  t = t.replace(/\*\*(.+?)\*\*/g, (_, txt) => protegeNegrito(txt));
+  t = t.replace(/__(.+?)__/g, (_, txt) => protegeNegrito(txt));
+
+  // Riscado ~~texto~~ (GFM) -> ~texto~ (WhatsApp)
+  t = t.replace(/~~(.+?)~~/g, "~$1~");
+
+  // O que sobrou de asterisco simples era italico em markdown -> underscore
+  t = t.replace(/\*(.+?)\*/g, "_$1_");
+
+  // Links [texto](url) -> "texto (url)"
+  t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)");
+
+  // Cabecalhos (# .. ######) -> vira negrito (protegido, junto com os ja achados)
+  t = t.replace(/^#{1,6}\s+(.+)$/gm, (_, txt) => protegeNegrito(txt));
+
+  // Restaura os negritos como *texto* (negrito do WhatsApp)
+  const marcador = new RegExp(ABRE + "(\\d+)" + FECHA, "g");
+  t = t.replace(marcador, (_, i) => `*${negritos[Number(i)]}*`);
+
+  // Marcadores de lista "- item" / "* item" no inicio da linha -> "\u2022 item"
+  t = t.replace(/^[ \t]*[-*]\s+/gm, "\u2022 ");
+
+  // Crase de codigo inline / bloco de codigo -> texto puro (WhatsApp nao tem)
+  t = t.replace(/```[a-z]*\n?([\s\S]*?)```/g, "$1");
+  t = t.replace(/`([^`]+)`/g, "$1");
+
+  // Limpa excesso de linhas em branco
+  t = t.replace(/\n{3,}/g, "\n\n");
+  return t.trim();
+}
+
+function CopyRespostaBtn({ text }) {
+  const [copiado, setCopiado] = useState(false);
+  async function copiar() {
+    try {
+      await navigator.clipboard.writeText(mdParaWhatsapp(text));
+      setCopiado(true);
+      notify("Resposta copiada — cole no WhatsApp sem perder negrito/itálico/lista.", "ok");
+      setTimeout(() => setCopiado(false), 2000);
+    } catch (e) {
+      notify("Não consegui copiar automaticamente — selecione o texto da resposta e copie manualmente.", "err");
+    }
+  }
+  return html`
+    <${Btn} type="button" variant="ghost" onClick=${copiar}
+      title="Copiar em um formato que cola certinho no WhatsApp (negrito, itálico, listas)">
+      ${copiado ? "✅ Copiado" : "📋 Copiar"}
+    <//>`;
+}
+
 function FilePreview({ version }) {
   const [url, setUrl] = useState(null);
   const [err, setErr] = useState(null);
@@ -1846,6 +1912,9 @@ function PedirIA() {
 
       ${resp && html`
         <div class="mt-5 rounded-2xl border border-line bg-card p-5">
+          <div class="mb-2 flex justify-end">
+            <${CopyRespostaBtn} text=${resp.resposta} />
+          </div>
           <${Markdown} text=${resp.resposta} />
           ${resp.fontes && resp.fontes.length ? html`
             <div class="mt-4 border-t border-line pt-3 text-xs text-muted">
@@ -1874,6 +1943,92 @@ async function fetchUltimasCorrecoes(slug, limit = 5) {
     .eq("secao_slug", slug).eq("status", "corrigida")
     .order("corrigida_em", { ascending: false }).limit(limit);
   return error ? [] : (data || []);
+}
+
+function CadastrarRespostaModal({ secaoSlug, me, onClose, onSalvo }) {
+  const [passo, setPasso] = useState("form"); // "form" | "confirmar"
+  const [pergunta, setPergunta] = useState("");
+  const [tema, setTema] = useState("");
+  const [resposta, setResposta] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  function irParaConfirmar(e) {
+    e && e.preventDefault();
+    if (!pergunta.trim() || !tema.trim() || !resposta.trim()) {
+      notify("Preencha a pergunta, o tema e a resposta correta antes de cadastrar.", "err");
+      return;
+    }
+    setPasso("confirmar");
+  }
+
+  async function confirmarCadastro() {
+    setBusy(true);
+    try {
+      const { error } = await sb.from("faq_interacoes").insert({
+        secao_slug: secaoSlug,
+        pergunta: pergunta.trim(),
+        resposta_ia: "", // não veio de uma resposta da IA — cadastro manual direto
+        confianca: "alta",
+        tema: tema.trim(),
+        tema_corrigido: tema.trim(),
+        status: "corrigida",
+        resposta_corrigida: resposta.trim(),
+        corrigida_em: new Date().toISOString(),
+        corrigida_por: me ? me.id : null,
+        criado_por: me ? me.id : null,
+      });
+      if (error) throw error;
+      notify("Nova resposta cadastrada — já vale para perguntas parecidas e entra na planilha \"Correções de FAQ\" em até 30 min.", "ok");
+      onSalvo && onSalvo();
+      onClose();
+    } catch (e) { notify(errMsg(e), "err"); }
+    finally { setBusy(false); }
+  }
+
+  if (passo === "confirmar") {
+    return html`
+      <${Modal} title="Confira antes de registrar" onClose=${onClose}>
+        <div class="space-y-3 text-sm">
+          <div>
+            <div class="text-xs font-medium uppercase tracking-wide text-muted">Pergunta</div>
+            <div class="mt-0.5 text-ink">${pergunta}</div>
+          </div>
+          <div>
+            <div class="text-xs font-medium uppercase tracking-wide text-muted">Tema</div>
+            <div class="mt-0.5 text-ink">${tema}</div>
+          </div>
+          <div>
+            <div class="text-xs font-medium uppercase tracking-wide text-muted">Resposta correta</div>
+            <div class="mt-0.5 whitespace-pre-wrap text-ink">${resposta}</div>
+          </div>
+        </div>
+        <div class="mt-5 flex justify-end gap-2">
+          <${Btn} variant="ghost" type="button" onClick=${() => setPasso("form")} disabled=${busy}>← Voltar e editar<//>
+          <${Btn} type="button" loading=${busy} onClick=${confirmarCadastro}>Confirmar e registrar<//>
+        </div>
+      <//>`;
+  }
+
+  return html`
+    <${Modal} title="Cadastrar nova resposta" onClose=${onClose}>
+      <form onSubmit=${irParaConfirmar} class="space-y-3">
+        <${Field} label="Pergunta" required>
+          <textarea class=${cx(inputCls, "min-h-[70px]")} placeholder="Qual pergunta essa resposta cobre?"
+            value=${pergunta} onInput=${(e) => setPergunta(e.target.value)} autofocus></textarea>
+        <//>
+        <${Field} label="Tema" required>
+          <input class=${inputCls} placeholder="Ex.: Renovação de acesso" value=${tema} onInput=${(e) => setTema(e.target.value)} />
+        <//>
+        <${Field} label="Resposta correta" required>
+          <textarea class=${cx(inputCls, "min-h-[110px]")} placeholder="Escreva a resposta certa para essa pergunta"
+            value=${resposta} onInput=${(e) => setResposta(e.target.value)}></textarea>
+        <//>
+        <div class="flex justify-end gap-2 pt-1">
+          <${Btn} variant="ghost" type="button" onClick=${onClose}>Cancelar<//>
+          <${Btn} type="submit">Cadastrar<//>
+        </div>
+      </form>
+    <//>`;
 }
 
 function FaqFeedback({ interacaoId, secaoSlug, tema, me, onCorrigida }) {
@@ -1947,6 +2102,7 @@ function FaqPage({ me }) {
   const [configured, setConfigured] = useState(null);
   const [base, setBase] = useState(null); // { nome, total }
   const [ultimasCorrecoes, setUltimasCorrecoes] = useState([]);
+  const [showCadastro, setShowCadastro] = useState(false);
 
   useEffect(() => {
     aiCall("status").then((d) => setConfigured(!!(d && d.configured))).catch(() => setConfigured(false));
@@ -1998,13 +2154,22 @@ function FaqPage({ me }) {
           onKeyDown=${(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) perguntar(e); }} disabled=${configured === false}></textarea>
         <div class="mt-2 flex items-center gap-2">
           <${Btn} type="submit" loading=${busy} disabled=${configured === false}>Perguntar<//>
+          <${Btn} type="button" variant="ghost" onClick=${() => setShowCadastro(true)}>📝 Cadastrar nova resposta<//>
           <span class="text-xs text-muted">⌘/Ctrl + Enter</span>
         </div>
       </form>
 
+      ${showCadastro && html`
+        <${CadastrarRespostaModal} secaoSlug=${SECAO_SLUG} me=${me}
+          onClose=${() => setShowCadastro(false)}
+          onSalvo=${() => fetchUltimasCorrecoes(SECAO_SLUG).then(setUltimasCorrecoes)} />`}
+
       ${resp && html`
         <div class="mt-5 rounded-2xl border border-line bg-card p-5">
-          ${resp.tema ? html`<div class="mb-2 text-xs font-medium uppercase tracking-wide text-muted">Tema: ${resp.tema}</div>` : null}
+          <div class="mb-2 flex items-center justify-between gap-3">
+            ${resp.tema ? html`<div class="text-xs font-medium uppercase tracking-wide text-muted">Tema: ${resp.tema}</div>` : html`<div></div>`}
+            <${CopyRespostaBtn} text=${resp.resposta} />
+          </div>
           ${resp.confianca === "baixa" && html`
             <div class="mb-3 rounded-lg border border-[#f0d9a8] bg-[#fdf5e6] px-3 py-2 text-xs text-[#8a6a1f]">
               ⚠️ Confiança baixa — os documentos não cobrem isso com clareza. Revise esta resposta antes de confiar totalmente.
