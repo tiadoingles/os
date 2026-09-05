@@ -1868,17 +1868,90 @@ async function fetchSecaoContagem(slug) {
   return { nome: sec.nome, total: count || 0 };
 }
 
-function FaqPage() {
+async function fetchUltimasCorrecoes(slug, limit = 5) {
+  const { data, error } = await sb.from("faq_interacoes")
+    .select("id,pergunta,resposta_corrigida,tema,tema_corrigido,corrigida_em")
+    .eq("secao_slug", slug).eq("status", "corrigida")
+    .order("corrigida_em", { ascending: false }).limit(limit);
+  return error ? [] : (data || []);
+}
+
+function FaqFeedback({ interacaoId, secaoSlug, tema, me, onCorrigida }) {
+  const [status, setStatus] = useState(null); // null | "aceita" | "corrigindo" | "corrigida"
+  const [texto, setTexto] = useState("");
+  const [temaCorrigido, setTemaCorrigido] = useState(tema || "");
+  const [salvando, setSalvando] = useState(false);
+
+  if (!interacaoId) return null;
+
+  async function aceitar() {
+    setStatus("aceita");
+    try { await sb.from("faq_interacoes").update({ status: "aceita" }).eq("id", interacaoId); }
+    catch (e) { notify(errMsg(e), "err"); }
+  }
+
+  async function salvarCorrecao(e) {
+    e && e.preventDefault();
+    const respostaCorrigida = texto.trim();
+    if (!respostaCorrigida) return; // obrigatório — não deixa salvar em branco
+    setSalvando(true);
+    try {
+      const { error } = await sb.from("faq_interacoes").update({
+        status: "corrigida",
+        resposta_corrigida: respostaCorrigida,
+        tema_corrigido: (temaCorrigido || "").trim() || null,
+        corrigida_em: new Date().toISOString(),
+        corrigida_por: me ? me.id : null,
+      }).eq("id", interacaoId);
+      if (error) throw error;
+      setStatus("corrigida");
+      notify("Correção salva — já vale para a próxima pergunta parecida e entra na planilha \"Correções de FAQ\" em até 30 min.", "ok");
+      onCorrigida && onCorrigida();
+    } catch (e2) { notify(errMsg(e2), "err"); }
+    finally { setSalvando(false); }
+  }
+
+  if (status === "aceita")
+    return html`<div class="mt-4 flex items-center gap-2 border-t border-line pt-3 text-sm text-emerald-700">✓ Marcada como correta</div>`;
+
+  if (status === "corrigida")
+    return html`<div class="mt-4 flex items-center gap-2 border-t border-line pt-3 text-sm text-emerald-700">✓ Correção salva</div>`;
+
+  if (status === "corrigindo")
+    return html`
+      <form onSubmit=${salvarCorrecao} class="mt-4 border-t border-line pt-3">
+        <label class="block text-sm font-medium text-ink">Escreva a resposta correta <span class="text-brand">*</span></label>
+        <textarea class=${cx(inputCls, "mt-1 min-h-[90px]")} placeholder="Qual é a resposta certa para esta pergunta?"
+          value=${texto} onInput=${(e) => setTexto(e.target.value)} autofocus></textarea>
+        <label class="mt-2 block text-xs font-medium text-muted">Tema (opcional, ajuda a organizar)</label>
+        <input class=${cx(inputCls, "mt-1")} value=${temaCorrigido} onInput=${(e) => setTemaCorrigido(e.target.value)} />
+        <div class="mt-2 flex items-center gap-2">
+          <${Btn} type="submit" loading=${salvando} disabled=${!texto.trim()}>Salvar correção<//>
+          <${Btn} type="button" variant="ghost" onClick=${() => setStatus(null)}>Cancelar<//>
+        </div>
+      </form>`;
+
+  return html`
+    <div class="mt-4 flex items-center gap-2 border-t border-line pt-3">
+      <span class="text-xs text-muted">Essa resposta está certa?</span>
+      <${Btn} variant="ghost" onClick=${aceitar}>✅ Está certa<//>
+      <${Btn} variant="danger" onClick=${() => setStatus("corrigindo")}>✏️ Não está certa, corrigir<//>
+    </div>`;
+}
+
+function FaqPage({ me }) {
   const SECAO_SLUG = "cs-suporte";
   const [pergunta, setPergunta] = useState("");
   const [busy, setBusy] = useState(false);
-  const [resp, setResp] = useState(null); // { resposta, fontes, secao, total_docs }
+  const [resp, setResp] = useState(null); // { resposta, fontes, secao, total_docs, confianca, tema, interacao_id }
   const [configured, setConfigured] = useState(null);
   const [base, setBase] = useState(null); // { nome, total }
+  const [ultimasCorrecoes, setUltimasCorrecoes] = useState([]);
 
   useEffect(() => {
     aiCall("status").then((d) => setConfigured(!!(d && d.configured))).catch(() => setConfigured(false));
     fetchSecaoContagem(SECAO_SLUG).then(setBase).catch(() => setBase({ nome: null, total: 0 }));
+    fetchUltimasCorrecoes(SECAO_SLUG).then(setUltimasCorrecoes);
   }, []);
 
   async function perguntar(e) {
@@ -1901,7 +1974,8 @@ function FaqPage() {
       <p class="mt-1 text-sm text-muted">
         Pergunte sobre processos de CS/Suporte — a IA responde com base nos documentos da pasta
         <b>CS:Suporte</b> (dentro de <b>00. OS TIA DO INGLÊS</b> no Google Drive), sincronizados todo dia
-        automaticamente. Se a resposta não estiver na base, ela avisa em vez de inventar.
+        automaticamente. Se a resposta não estiver 100% clara na base, ela avisa em vez de inventar — e toda
+        resposta pode ser aceita ou corrigida logo abaixo.
       </p>
 
       <div class="mt-3 flex items-center justify-between rounded-xl border border-line bg-card px-4 py-2.5 text-xs text-muted">
@@ -1930,11 +2004,30 @@ function FaqPage() {
 
       ${resp && html`
         <div class="mt-5 rounded-2xl border border-line bg-card p-5">
+          ${resp.tema ? html`<div class="mb-2 text-xs font-medium uppercase tracking-wide text-muted">Tema: ${resp.tema}</div>` : null}
+          ${resp.confianca === "baixa" && html`
+            <div class="mb-3 rounded-lg border border-[#f0d9a8] bg-[#fdf5e6] px-3 py-2 text-xs text-[#8a6a1f]">
+              ⚠️ Confiança baixa — os documentos não cobrem isso com clareza. Revise esta resposta antes de confiar totalmente.
+            </div>`}
           <${Markdown} text=${resp.resposta} />
           ${resp.fontes && resp.fontes.length ? html`
             <div class="mt-4 border-t border-line pt-3 text-xs text-muted">
               Fontes: ${resp.fontes.map((f, i) => html`<span>${i ? " · " : ""}${f.titulo}</span>`)}
             </div>` : null}
+          <${FaqFeedback} interacaoId=${resp.interacao_id} secaoSlug=${SECAO_SLUG} tema=${resp.tema} me=${me}
+            onCorrigida=${() => fetchUltimasCorrecoes(SECAO_SLUG).then(setUltimasCorrecoes)} />
+        </div>`}
+
+      ${ultimasCorrecoes.length > 0 && html`
+        <div class="mt-6">
+          <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Últimas correções desta seção</div>
+          <div class="space-y-2">
+            ${ultimasCorrecoes.map((c) => html`
+              <div class="rounded-xl border border-line bg-card/60 p-3 text-xs">
+                <div class="font-medium text-ink">${c.pergunta}</div>
+                <div class="mt-1 text-muted">${c.resposta_corrigida}</div>
+              </div>`)}
+          </div>
         </div>`}
 
       <p class="mt-4 text-xs text-muted">
@@ -4131,7 +4224,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "farol") return html`<${FarolPage} me=${me} />`;
   if (p0 === "conteudo" && (p1 === "metricas" || p1 === "instagram")) return html`<${ConteudoMetricasPage} />`;
   if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
-  if (p0 === "cs" && p1 === "faq") return html`<${FaqPage} />`;
+  if (p0 === "cs" && p1 === "faq") return html`<${FaqPage} me=${me} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
   if (p0 === "cs" && p1 === "chat-cademi") return html`<${ChatCademiPage} />`;
   if (p0 === "pedagogico" && p1 === "gerador-materiais") return html`<${GeradorMateriaisPage} me=${me} />`;

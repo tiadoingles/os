@@ -6,3 +6,6 @@ node_modules/
 
 # Segredos locais da sincronização
 .sync/
+
+# Config local do preview do Claude (servidor de dev), não é parte do app
+.claude/
