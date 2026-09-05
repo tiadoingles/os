@@ -2337,7 +2337,7 @@ function resumoEnvios(lista, hoje) {
   return { enviados, pendentes, atrasados };
 }
 
-function filtrarEnvios(lista, { busca, dataDe, dataAte }) {
+function filtrarEnvios(lista, { busca, dataDe, dataAte, produtos, status }) {
   let out = lista;
   const q = (busca || "").trim().toLowerCase();
   if (q) {
@@ -2348,6 +2348,11 @@ function filtrarEnvios(lista, { busca, dataDe, dataAte }) {
   }
   if (dataDe) out = out.filter((e) => e.data_cadastro && e.data_cadastro >= dataDe);
   if (dataAte) out = out.filter((e) => e.data_cadastro && e.data_cadastro <= dataAte);
+  if (status) out = out.filter((e) => e.status === status);
+  if (produtos && produtos.length) {
+    // a linha precisa conter TODOS os produtos marcados no filtro
+    out = out.filter((e) => produtos.every((p) => (e.produtos || []).includes(p)));
+  }
   return out;
 }
 
@@ -2550,8 +2555,18 @@ function EnviosLivrosPage({ me }) {
   const [busca, setBusca] = useState("");
   const [dataDe, setDataDe] = useState("");
   const [dataAte, setDataAte] = useState("");
+  const [produtosFiltro, setProdutosFiltro] = useState([]);
+  const [statusFiltro, setStatusFiltro] = useState("");
   const [selecionado, setSelecionado] = useState(null);
   const hoje = hojeISO();
+
+  const temFiltro = busca || dataDe || dataAte || produtosFiltro.length || statusFiltro;
+  function limparFiltros() {
+    setBusca(""); setDataDe(""); setDataAte(""); setProdutosFiltro([]); setStatusFiltro("");
+  }
+  function toggleProdutoFiltro(p) {
+    setProdutosFiltro((cur) => (cur.includes(p) ? cur.filter((x) => x !== p) : [...cur, p]));
+  }
 
   async function recarregar() {
     try { setLista(await fetchEnviosLivros()); }
@@ -2560,7 +2575,9 @@ function EnviosLivrosPage({ me }) {
   useEffect(() => { recarregar(); }, []);
 
   const resumo = useMemo(() => resumoEnvios(lista || [], hoje), [lista, hoje]);
-  const filtrados = useMemo(() => filtrarEnvios(lista || [], { busca, dataDe, dataAte }), [lista, busca, dataDe, dataAte]);
+  const filtrados = useMemo(
+    () => filtrarEnvios(lista || [], { busca, dataDe, dataAte, produtos: produtosFiltro, status: statusFiltro }),
+    [lista, busca, dataDe, dataAte, produtosFiltro, statusFiltro]);
   const limite7d = somaDias(hoje, -7);
 
   return html`
@@ -2594,16 +2611,32 @@ function EnviosLivrosPage({ me }) {
             onSalvo=${() => { setShowForm(false); recarregar(); }} />`}
         </div>
 
-        <div class="mt-6 flex flex-wrap items-center gap-2">
-          <input class=${cx(inputCls, "max-w-xs")} placeholder="Buscar por nome, email ou CPF"
-            value=${busca} onInput=${(e) => setBusca(e.target.value)} />
-          <span class="text-xs text-muted">de</span>
-          <input type="date" class=${cx(inputCls, "w-auto")} value=${dataDe} onInput=${(e) => setDataDe(e.target.value)} />
-          <span class="text-xs text-muted">até</span>
-          <input type="date" class=${cx(inputCls, "w-auto")} value=${dataAte} onInput=${(e) => setDataAte(e.target.value)} />
-          ${(busca || dataDe || dataAte) ? html`
-            <button type="button" class="text-xs text-muted underline" onClick=${() => { setBusca(""); setDataDe(""); setDataAte(""); }}>limpar filtros</button>` : null}
-          <span class="ml-auto text-xs text-muted">${nf(filtrados.length)} de ${nf(lista.length)}</span>
+        <div class="mt-6 space-y-2">
+          <div class="flex flex-wrap items-center gap-2">
+            <input class=${cx(inputCls, "max-w-xs")} placeholder="Buscar por nome, email ou CPF"
+              value=${busca} onInput=${(e) => setBusca(e.target.value)} />
+            <span class="text-xs text-muted">de</span>
+            <input type="date" class=${cx(inputCls, "w-auto")} value=${dataDe} onInput=${(e) => setDataDe(e.target.value)} />
+            <span class="text-xs text-muted">até</span>
+            <input type="date" class=${cx(inputCls, "w-auto")} value=${dataAte} onInput=${(e) => setDataAte(e.target.value)} />
+            <span class="ml-auto text-xs text-muted">${nf(filtrados.length)} de ${nf(lista.length)}</span>
+          </div>
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="text-xs font-medium text-muted">Produto:</span>
+            ${LIVROS_PRODUTOS.map((p) => html`
+              <label class="flex items-center gap-1.5 text-xs text-ink">
+                <input type="checkbox" checked=${produtosFiltro.includes(p)} onChange=${() => toggleProdutoFiltro(p)} />
+                ${p}
+              </label>`)}
+            <span class="ml-2 text-xs font-medium text-muted">Status:</span>
+            <select class=${cx(inputCls, "w-auto py-1 text-xs")} value=${statusFiltro} onChange=${(e) => setStatusFiltro(e.target.value)}>
+              <option value="">Todos</option>
+              <option value="pendente">Pendentes</option>
+              <option value="enviado">Enviados</option>
+            </select>
+            ${temFiltro ? html`
+              <button type="button" class="text-xs text-muted underline" onClick=${limparFiltros}>limpar filtros</button>` : null}
+          </div>
         </div>
 
         <div class="mt-3 overflow-x-auto rounded-2xl border border-line bg-card">
