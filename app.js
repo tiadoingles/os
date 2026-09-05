@@ -3553,9 +3553,23 @@ function farolMesLabel(m) {
 }
 const FAROL_ROT_CONS = { soma: "soma", media: "média", ultimo: "último" };
 const FAROL_ANOS = (() => { const a = new Date().getFullYear(); return [a - 2, a - 1, a, a + 1]; })();
+const FAROL_SETORES = [
+  ["geral", "Geral"],
+  ["comercial", "Comercial"],
+  ["financeiro", "Financeiro"],
+  ["pedagogico", "Pedagógico"],
+  ["cs", "CS / Suporte"],
+  ["conteudo", "Conteúdo"],
+];
 
 function FarolPage({ me }) {
-  const setor = "geral"; // quadro único do OS
+  const [setor, setSetor] = useState(() => {
+    try { return localStorage.getItem("farol_setor") || "geral"; } catch { return "geral"; }
+  });
+  const escolherSetor = (s) => {
+    setSetor(s);
+    try { localStorage.setItem("farol_setor", s); } catch { /* ignore */ }
+  };
   const [loading, setLoading] = useState(true);
   const [mes, setMes] = useState(farolMesAtual());
   const [semanas, setSemanas] = useState(4);
@@ -3596,15 +3610,21 @@ function FarolPage({ me }) {
         cfg = ins.data;
       }
       if (!vivo) return;
-      const m = (cfg && cfg.mes) || farolMesAtual();
+      // Ao escolher um setor, sempre começa no mês vigente (não no último editado).
+      const m = farolMesAtual();
       setMes(m);
       setSemanas((cfg && cfg.semanas) || 4);
-      setComparar([]); setLinhasComp(null);
+      setComparar([m]); setLinhasComp(null);
       await Promise.all([carregarMes(m), carregarMeses()]);
       if (vivo) setLoading(false);
     })();
     return () => { vivo = false; };
   }, [setor]);
+
+  // Com exatamente 1 mês selecionado, ele passa a ser o mês em edição.
+  useEffect(() => {
+    if (comparar.length === 1 && comparar[0] !== mes) mudarMes(comparar[0]);
+  }, [comparar.join(",")]);
 
   // Carrega os dados do comparativo quando 2+ meses estão selecionados.
   useEffect(() => {
@@ -3689,7 +3709,11 @@ function FarolPage({ me }) {
     notify(`${ins.length} indicadores copiados de ${farolMesLabel(prev)}.`, "ok");
   }
 
-  const toggleComparar = (m) => setComparar((c) => (c.includes(m) ? c.filter((x) => x !== m) : [...c, m].sort()));
+  // Multi-seleção de meses: sempre fica ao menos 1 (não dá pra desmarcar o último).
+  const toggleComparar = (m) => setComparar((c) => {
+    if (c.includes(m)) return c.length > 1 ? c.filter((x) => x !== m) : c;
+    return [...c, m].sort();
+  });
 
   if (loading) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
 
@@ -3747,36 +3771,48 @@ function FarolPage({ me }) {
         mostrando onde agir antes de o mês fechar. Tudo é salvo automaticamente.
       </p>
 
+      <div class="mt-4 rounded-xl border border-line bg-card p-4">
+        <div class="text-xs font-medium uppercase tracking-wide text-muted">Área da empresa</div>
+        <div class="mt-2 flex flex-wrap gap-1.5">
+          ${FAROL_SETORES.map(([id, nome]) => html`
+            <button type="button" onClick=${() => escolherSetor(id)}
+              class=${cx("rounded-full border px-3 py-1 text-xs transition",
+                setor === id ? "border-brand bg-brand-light font-medium text-brand-dark" : "border-line text-ink/60 hover:bg-black/[0.04]")}>
+              ${nome}
+            </button>`)}
+        </div>
+      </div>
+
       ${(() => {
-        const opcoesMes = [...new Set([...(mesesDisp || []), mes])].sort();
+        const opcoesMes = [...new Set([...(mesesDisp || []), mes, farolMesAtual()])].sort();
         const modoComp = comparar.length >= 2;
         return html`
-          <div class="mt-4 rounded-xl border border-line bg-card p-4">
-            <div class="text-xs font-medium uppercase tracking-wide text-muted">Comparar meses</div>
+          <div class="mt-3 rounded-xl border border-line bg-card p-4">
+            <div class="text-xs font-medium uppercase tracking-wide text-muted">Meses — acompanhamento e evolução</div>
             <div class="mt-2 flex flex-wrap items-center gap-1.5">
               ${opcoesMes.map((m) => html`
                 <button type="button" onClick=${() => toggleComparar(m)}
                   class=${cx("rounded-full border px-2.5 py-1 text-xs transition",
                     comparar.includes(m) ? "border-brand bg-brand-light font-medium text-brand-dark" : "border-line text-ink/60 hover:bg-black/[0.04]")}>
-                  ${farolMesLabel(m)}${m === mes ? " ·" : ""}
+                  ${farolMesLabel(m)}${m === mes && !modoComp ? " ·" : ""}
                 </button>`)}
-              ${comparar.length ? html`<button type="button" class="ml-1 text-xs text-muted hover:text-ink" onClick=${() => setComparar([])}>limpar</button>` : null}
+              ${comparar.length > 1 ? html`<button type="button" class="ml-1 text-xs text-muted hover:text-ink" onClick=${() => setComparar([farolMesAtual()])}>só o mês vigente</button>` : null}
             </div>
             <p class="mt-1.5 text-[11px] text-muted">
-              ${modoComp ? `Comparando ${comparar.length} meses (somente leitura).` : "Selecione 2 ou mais meses para ver o comparativo lado a lado. O ponto (·) marca o mês em edição."}
+              ${modoComp ? `Comparando ${comparar.length} meses (somente leitura).` : "1 mês selecionado: acompanhe e edite esse mês. Marque 2 ou mais para ver o comparativo lado a lado."}
             </p>
           </div>
 
           <div class=${cx("mt-3 flex flex-wrap items-end gap-4 rounded-xl border border-line bg-card p-4", modoComp && "opacity-60")}>
             <label class="text-sm">
-              <span class="mb-1 block text-xs font-medium uppercase tracking-wide text-muted">Mês em edição</span>
+              <span class="mb-1 block text-xs font-medium uppercase tracking-wide text-muted">Ir para outro mês</span>
               <div class="flex gap-2">
                 <select class=${txtInput} value=${mes.slice(5, 7)} disabled=${!podeEditar || modoComp}
-                  onChange=${(e) => mudarMes(mes.slice(0, 4) + "-" + e.target.value)}>
+                  onChange=${(e) => setComparar([mes.slice(0, 4) + "-" + e.target.value])}>
                   ${MESES.map((nm, i) => html`<option value=${String(i + 1).padStart(2, "0")}>${nm.charAt(0).toUpperCase() + nm.slice(1)}</option>`)}
                 </select>
                 <select class=${txtInput} value=${mes.slice(0, 4)} disabled=${!podeEditar || modoComp}
-                  onChange=${(e) => mudarMes(e.target.value + "-" + mes.slice(5, 7))}>
+                  onChange=${(e) => setComparar([e.target.value + "-" + mes.slice(5, 7)])}>
                   ${FAROL_ANOS.map((a) => html`<option value=${String(a)}>${a}</option>`)}
                 </select>
               </div>
