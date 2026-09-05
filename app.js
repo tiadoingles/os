@@ -68,6 +68,8 @@ const NAV = [
   ]},
 
   { id: "cs", nome: "CS / Suporte", icone: "🤝", itens: [
+    { slug: "faq", nome: "FAQ",
+      desc: "Pergunte sobre processos de CS/Suporte — a IA responde com base nos documentos da pasta CS:Suporte do Drive." },
     { slug: "metricas-atendimento", nome: "Métricas de Atendimento",
       desc: "Volume de atendimentos, tempo de primeira resposta, tempo de resolução e satisfação do CS. Base de dados a definir." },
     { slug: "chat-cademi", nome: "Chat da Cademí",
@@ -1854,6 +1856,92 @@ function PedirIA() {
       <div class="mt-4 text-xs text-muted">
         Cada pergunta consome créditos da conta Anthropic da empresa.
       </div>
+    </div>`;
+}
+
+/* ============================ CS / Suporte · FAQ ============================ */
+
+async function fetchSecaoContagem(slug) {
+  const { data: sec, error: e1 } = await sb.from("kb_sections").select("id,nome").eq("slug", slug).maybeSingle();
+  if (e1 || !sec) return { nome: null, total: 0 };
+  const { count } = await sb.from("kb_documents").select("id", { count: "exact", head: true }).eq("section_id", sec.id).eq("status", "publicado");
+  return { nome: sec.nome, total: count || 0 };
+}
+
+function FaqPage() {
+  const SECAO_SLUG = "cs-suporte";
+  const [pergunta, setPergunta] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [resp, setResp] = useState(null); // { resposta, fontes, secao, total_docs }
+  const [configured, setConfigured] = useState(null);
+  const [base, setBase] = useState(null); // { nome, total }
+
+  useEffect(() => {
+    aiCall("status").then((d) => setConfigured(!!(d && d.configured))).catch(() => setConfigured(false));
+    fetchSecaoContagem(SECAO_SLUG).then(setBase).catch(() => setBase({ nome: null, total: 0 }));
+  }, []);
+
+  async function perguntar(e) {
+    e && e.preventDefault();
+    if (!pergunta.trim()) return;
+    setBusy(true); setResp(null);
+    try {
+      const d = await aiCall("ask", { pergunta: pergunta.trim(), secao_slug: SECAO_SLUG });
+      if (d && d.configured === false) { setConfigured(false); return; }
+      setResp(d);
+      if (d && typeof d.total_docs === "number") setBase((b) => ({ nome: (b && b.nome) || d.secao, total: d.total_docs }));
+    } catch (e2) { notify(errMsg(e2), "err"); }
+    finally { setBusy(false); }
+  }
+
+  return html`
+    <div class="max-w-2xl">
+      <div class="text-sm text-muted">🤝 CS / Suporte</div>
+      <h1 class="mt-1 flex items-center gap-2 text-2xl font-semibold text-ink">💬 FAQ</h1>
+      <p class="mt-1 text-sm text-muted">
+        Pergunte sobre processos de CS/Suporte — a IA responde com base nos documentos da pasta
+        <b>CS:Suporte</b> (dentro de <b>00. OS TIA DO INGLÊS</b> no Google Drive), sincronizados todo dia
+        automaticamente. Se a resposta não estiver na base, ela avisa em vez de inventar.
+      </p>
+
+      <div class="mt-3 flex items-center justify-between rounded-xl border border-line bg-card px-4 py-2.5 text-xs text-muted">
+        <span>Base atual: ${base ? html`<b class="text-ink">${nf(base.total)}</b>` : "…"} documento(s) ${base && base.nome ? `em "${base.nome}"` : ""}</span>
+        <a href="#/secao/cs-suporte" class="font-medium text-brand hover:underline">ver documentos →</a>
+      </div>
+
+      ${configured === false && html`
+        <div class="mt-5 rounded-2xl border border-[#efd9d3] bg-[#faefec] p-5">
+          <div class="text-sm font-medium text-ink">IA ainda não conectada</div>
+          <p class="mt-1 text-sm text-muted">
+            Falta o segredo <code class="rounded bg-black/[0.05] px-1">ANTHROPIC_API_KEY</code> nas Edge Functions do Supabase.
+            Depois de adicioná-lo, esta página funciona sozinha.
+          </p>
+        </div>`}
+
+      <form onSubmit=${perguntar} class="mt-5">
+        <textarea class=${cx(inputCls, "min-h-[100px]")} placeholder="Ex.: Como faço para renovar o acesso de uma mentorada?"
+          value=${pergunta} onInput=${(e) => setPergunta(e.target.value)}
+          onKeyDown=${(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) perguntar(e); }} disabled=${configured === false}></textarea>
+        <div class="mt-2 flex items-center gap-2">
+          <${Btn} type="submit" loading=${busy} disabled=${configured === false}>Perguntar<//>
+          <span class="text-xs text-muted">⌘/Ctrl + Enter</span>
+        </div>
+      </form>
+
+      ${resp && html`
+        <div class="mt-5 rounded-2xl border border-line bg-card p-5">
+          <${Markdown} text=${resp.resposta} />
+          ${resp.fontes && resp.fontes.length ? html`
+            <div class="mt-4 border-t border-line pt-3 text-xs text-muted">
+              Fontes: ${resp.fontes.map((f, i) => html`<span>${i ? " · " : ""}${f.titulo}</span>`)}
+            </div>` : null}
+        </div>`}
+
+      <p class="mt-4 text-xs text-muted">
+        A pasta ainda está vazia ou incompleta? Adicione os documentos em <b>CS:Suporte</b> no Drive — o sync
+        diário (<code class="rounded bg-black/[0.05] px-1">sync-drive-os</code>) traz para cá sozinho, e as
+        respostas passam a citar as fontes automaticamente.
+      </p>
     </div>`;
 }
 
@@ -4043,6 +4131,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "farol") return html`<${FarolPage} me=${me} />`;
   if (p0 === "conteudo" && (p1 === "metricas" || p1 === "instagram")) return html`<${ConteudoMetricasPage} />`;
   if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
+  if (p0 === "cs" && p1 === "faq") return html`<${FaqPage} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
   if (p0 === "cs" && p1 === "chat-cademi") return html`<${ChatCademiPage} />`;
   if (p0 === "pedagogico" && p1 === "gerador-materiais") return html`<${GeradorMateriaisPage} me=${me} />`;
