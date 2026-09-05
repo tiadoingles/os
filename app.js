@@ -1945,12 +1945,62 @@ async function fetchUltimasCorrecoes(slug, limit = 5) {
   return error ? [] : (data || []);
 }
 
+// Lista os temas "padrão" já usados na seção (um por resposta confirmada), pra
+// sugerir reaproveitar em vez de criar uma variação nova do mesmo assunto.
+async function fetchTemasExistentes(slug) {
+  const { data, error } = await sb.from("faq_interacoes")
+    .select("tema,tema_corrigido")
+    .eq("secao_slug", slug).eq("status", "corrigida");
+  if (error || !data) return [];
+  const vistos = new Set();
+  const out = [];
+  for (const r of data) {
+    const t = (r.tema_corrigido || r.tema || "").trim();
+    const chave = t.toLowerCase();
+    if (t && !vistos.has(chave)) { vistos.add(chave); out.push(t); }
+  }
+  return out;
+}
+
+function normalizarTexto(s) {
+  return (s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").trim();
+}
+
+// Similaridade simples entre dois temas (0..1): 1 = idênticos, 0.9 = um contém
+// o outro, senão índice de Jaccard sobre as palavras (>=3 letras) em comum.
+function similaridadeTemas(a, b) {
+  const na = normalizarTexto(a), nb = normalizarTexto(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  if (na.includes(nb) || nb.includes(na)) return 0.9;
+  const toks = (s) => new Set(s.split(/[^a-z0-9]+/).filter((w) => w.length >= 3));
+  const ta = toks(na), tb = toks(nb);
+  if (!ta.size || !tb.size) return 0;
+  let inter = 0;
+  for (const w of ta) if (tb.has(w)) inter++;
+  return inter / new Set([...ta, ...tb]).size;
+}
+
 function CadastrarRespostaModal({ secaoSlug, me, onClose, onSalvo }) {
   const [passo, setPasso] = useState("form"); // "form" | "confirmar"
   const [pergunta, setPergunta] = useState("");
   const [tema, setTema] = useState("");
   const [resposta, setResposta] = useState("");
   const [busy, setBusy] = useState(false);
+  const [temasExistentes, setTemasExistentes] = useState([]);
+
+  useEffect(() => { fetchTemasExistentes(secaoSlug).then(setTemasExistentes); }, [secaoSlug]);
+
+  const sugestaoTema = useMemo(() => {
+    const t = tema.trim();
+    if (!t || !temasExistentes.length) return null;
+    let melhor = null, melhorScore = 0;
+    for (const ex of temasExistentes) {
+      const score = similaridadeTemas(t, ex);
+      if (score > melhorScore) { melhorScore = score; melhor = ex; }
+    }
+    return melhor && melhorScore >= 0.5 && normalizarTexto(melhor) !== normalizarTexto(t) ? melhor : null;
+  }, [tema, temasExistentes]);
 
   function irParaConfirmar(e) {
     e && e.preventDefault();
@@ -2018,6 +2068,11 @@ function CadastrarRespostaModal({ secaoSlug, me, onClose, onSalvo }) {
         <//>
         <${Field} label="Tema" required>
           <input class=${inputCls} placeholder="Ex.: Renovação de acesso" value=${tema} onInput=${(e) => setTema(e.target.value)} />
+          ${sugestaoTema && html`
+            <div class="mt-1.5 flex items-center justify-between gap-2 rounded-lg border border-[#cfe0d8] bg-[#eef6f1] px-3 py-2 text-xs text-[#3c6552]">
+              <span>💡 Já existe o tema padrão "<b>${sugestaoTema}</b>" — usar esse em vez de criar um novo?</span>
+              <button type="button" class="shrink-0 font-medium underline" onClick=${() => setTema(sugestaoTema)}>Usar esse</button>
+            </div>`}
         <//>
         <${Field} label="Resposta correta" required>
           <textarea class=${cx(inputCls, "min-h-[110px]")} placeholder="Escreva a resposta certa para essa pergunta"
