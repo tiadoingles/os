@@ -3188,7 +3188,10 @@ function ChatLogCard({ r }) {
   return html`
     <div class="rounded-xl border border-line bg-card p-4">
       <div class="flex items-start justify-between gap-3">
-        <p class="text-sm font-medium text-ink">${r.pergunta}</p>
+        <div>
+          <p class="text-sm font-medium text-ink">${r.pergunta}</p>
+          ${!!r.email && html`<p class="mt-0.5 text-xs text-muted">${r.email}</p>`}
+        </div>
         <span class="shrink-0 text-xs text-muted">${fmtDate(r.created_at, true)}</span>
       </div>
       ${r.stop_reason && r.stop_reason !== "end_turn" && html`

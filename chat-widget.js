@@ -14,6 +14,9 @@
     "Aqui, eu consigo tirar todas as suas dúvidas sobre o CONTEÚDO do seu curso dentro da Plataforma.",
     "Me conta, qual a sua dúvida de CONTEÚDO?",
   ];
+  var EMAIL_ASK = "Antes de começar, me conta seu e-mail, por favor 💌";
+  var EMAIL_INVALID = "Hmm, esse e-mail não parece válido. Pode digitar de novo?";
+  var EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
   function sessionId() {
     try {
@@ -27,6 +30,13 @@
     } catch (e) {
       return String(Date.now());
     }
+  }
+
+  function getStoredEmail() {
+    try { return sessionStorage.getItem("tia_chat_email") || ""; } catch (e) { return ""; }
+  }
+  function storeEmail(v) {
+    try { sessionStorage.setItem("tia_chat_email", v); } catch (e) { /* ignora */ }
   }
 
   function escapeHtml(s) {
@@ -141,11 +151,17 @@
   }
 
   var greeted = false;
+  var email = getStoredEmail();
+  var awaitingEmail = !email;
   function openPanel() {
     panel.classList.add("open");
     if (!greeted) {
       for (var i = 0; i < GREETING_PARTS.length; i++) {
         addMessage("bot", "<p>" + GREETING_PARTS[i] + "</p>");
+      }
+      if (awaitingEmail) {
+        addMessage("bot", "<p>" + EMAIL_ASK + "</p>");
+        inputEl.placeholder = "seu@email.com";
       }
       greeted = true;
     }
@@ -175,8 +191,26 @@
 
   var sending = false;
   function send() {
-    var pergunta = inputEl.value.trim();
-    if (!pergunta || sending) return;
+    var texto = inputEl.value.trim();
+    if (!texto || sending) return;
+
+    if (awaitingEmail) {
+      addMessage("user", "<p>" + escapeHtml(texto) + "</p>");
+      inputEl.value = "";
+      inputEl.style.height = "auto";
+      if (!EMAIL_RE.test(texto)) {
+        addMessage("error", "<p>" + EMAIL_INVALID + "</p>");
+        return;
+      }
+      email = texto;
+      storeEmail(email);
+      awaitingEmail = false;
+      inputEl.placeholder = "Digite sua pergunta...";
+      addMessage("bot", "<p>Perfeito, obrigada! Agora sim, pode mandar sua dúvida de conteúdo 😊</p>");
+      return;
+    }
+
+    var pergunta = texto;
     sending = true;
     sendBtn.disabled = true;
     addMessage("user", "<p>" + escapeHtml(pergunta) + "</p>");
@@ -191,7 +225,7 @@
         apikey: ANON_KEY,
         Authorization: "Bearer " + ANON_KEY,
       },
-      body: JSON.stringify({ pergunta: pergunta, session_id: sessionId() }),
+      body: JSON.stringify({ pergunta: pergunta, session_id: sessionId(), email: email }),
     })
       .then(function (r) {
         return r.json().then(function (data) {
