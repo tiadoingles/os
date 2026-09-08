@@ -3176,44 +3176,61 @@ function PesquisasPage() {
 
 async function fetchChatWidgetLogs() {
   const { data, error } = await sb.from("chat_widget_logs").select("*")
-    .order("created_at", { ascending: false }).limit(200);
+    .order("created_at", { ascending: false }).limit(2000);
   if (error) throw error;
   return data || [];
 }
 
-function ChatLogCard({ r }) {
+// Lista fixa de categorias das dúvidas (espelha CHAT_CATEGORIAS na Edge Function
+// public-chat). "Fora de escopo" = pergunta que não é sobre conteúdo.
+const CHAT_CATEGORIAS = [
+  "Gramática",
+  "Vocabulário e expressões",
+  "Pronúncia e MYPA",
+  "Listening / compreensão",
+  "Speaking / travar ao falar",
+  "Técnicas do Método",
+  "Materiais e módulos",
+  "Motivação / bloqueio",
+  "Fora de escopo",
+  "Outro",
+];
+
+const CHAT_CAT_CLS = {
+  "Gramática": "bg-[#e6f2fb] text-[#2c5b78]",
+  "Vocabulário e expressões": "bg-[#e3ecdf] text-[#4c6b3f]",
+  "Pronúncia e MYPA": "bg-[#f3ecd8] text-[#8a6a1f]",
+  "Listening / compreensão": "bg-[#e8e4f3] text-[#5b4c8a]",
+  "Speaking / travar ao falar": "bg-[#fbe7e4] text-[#a44b43]",
+  "Técnicas do Método": "bg-[#dfeeec] text-[#3f6b64]",
+  "Materiais e módulos": "bg-[#f0e8df] text-[#7a5c3f]",
+  "Motivação / bloqueio": "bg-[#f7e4ef] text-[#8a3f6d]",
+  "Fora de escopo": "bg-[#f4ddda] text-[#9c2b23]",
+  "Outro": "bg-black/[0.05] text-ink",
+};
+
+function ChatRespostaCel({ r }) {
   const [open, setOpen] = useState(false);
-  const resposta = r.resposta || "";
-  const curta = resposta.length > 220 && !open ? resposta.slice(0, 220) + "…" : resposta;
+  if (r.erro) return html`<span class="text-[#9c2b23]">Erro: ${r.erro}</span>`;
+  const resp = r.resposta || "—";
+  const longo = resp.length > 200;
+  const txt = longo && !open ? resp.slice(0, 200) + "…" : resp;
   return html`
-    <div class="rounded-xl border border-line bg-card p-4">
-      <div class="flex items-start justify-between gap-3">
-        <div>
-          <p class="text-sm font-medium text-ink">${r.pergunta}</p>
-          ${!!r.email && html`<p class="mt-0.5 text-xs text-muted">${r.email}</p>`}
-        </div>
-        <span class="shrink-0 text-xs text-muted">${fmtDate(r.created_at, true)}</span>
-      </div>
-      ${r.stop_reason && r.stop_reason !== "end_turn" && html`
-        <span class="mt-2 inline-block rounded-full bg-[#fdf3d6] px-2 py-0.5 text-[11px] text-[#8a6d1a]">
-          possível resposta cortada (${r.stop_reason})
-        </span>`}
-      ${r.erro
-        ? html`<p class="mt-2 text-sm text-[#9c2b23]">Erro: ${r.erro}</p>`
-        : html`
-          <p class="mt-2 whitespace-pre-wrap text-sm text-ink/80">${curta}</p>
-          ${resposta.length > 220 && html`
-            <button type="button" class="mt-1 text-xs text-brand hover:underline" onClick=${() => setOpen((o) => !o)}>
-              ${open ? "ver menos" : "ver resposta completa"}
-            </button>`}
-          ${!!(r.fontes && r.fontes.length) && html`
-            <p class="mt-2 text-xs text-muted">Fonte: ${r.fontes.map((f) => f.titulo).join(", ")}</p>`}
-        `}
+    <div>
+      ${r.stop_reason && r.stop_reason !== "end_turn"
+        ? html`<span class="mr-1" title=${`possível resposta cortada (${r.stop_reason})`}>⚠️</span>` : null}
+      <span class="whitespace-pre-wrap">${txt}</span>
+      ${longo ? html`<button type="button" class="ml-1 whitespace-nowrap text-xs text-brand hover:underline"
+        onClick=${() => setOpen((o) => !o)}>${open ? "ver menos" : "ver tudo"}</button>` : null}
     </div>`;
 }
 
 function ChatCademiPage() {
   const [rows, setRows] = useState(null);
+  const [periodo, setPeriodo] = useState("30"); // 7 | 30 | 90 | tudo | custom
+  const [dataDe, setDataDe] = useState("");
+  const [dataAte, setDataAte] = useState("");
+  const [emailFiltro, setEmailFiltro] = useState("");
   const [busca, setBusca] = useState("");
 
   useEffect(() => {
@@ -3222,31 +3239,128 @@ function ChatCademiPage() {
 
   if (!rows) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
 
+  let de, ate;
+  if (periodo === "custom") {
+    de = dataDe || "0000-01-01";
+    ate = dataAte || "9999-12-31";
+  } else if (periodo === "tudo") {
+    de = "0000-01-01"; ate = "9999-12-31";
+  } else {
+    de = somaDias(hojeISO(), -(Number(periodo) - 1));
+    ate = hojeISO();
+  }
+  const diaDe = (r) => isoDia(new Date(r.created_at));
+  const noPeriodo = rows.filter((r) => { const d = diaDe(r); return d >= de && d <= ate; });
+
+  const ef = emailFiltro.trim().toLowerCase();
   const q = busca.trim().toLowerCase();
-  const filtradas = q
-    ? rows.filter((r) => (r.pergunta || "").toLowerCase().includes(q) || (r.resposta || "").toLowerCase().includes(q))
-    : rows;
-  const dia = 24 * 60 * 60 * 1000;
-  const ultimas24h = rows.filter((r) => Date.now() - new Date(r.created_at).getTime() < dia).length;
-  const erros = rows.filter((r) => r.erro).length;
+  const filtradas = noPeriodo.filter((r) => {
+    if (ef && !(r.email || "").toLowerCase().includes(ef)) return false;
+    if (q && !((r.pergunta || "").toLowerCase().includes(q) || (r.resposta || "").toLowerCase().includes(q))) return false;
+    return true;
+  });
+
+  const nPerguntas = noPeriodo.length;
+  const nRespostas = noPeriodo.filter((r) => r.resposta && !r.erro).length;
+  const nForaEscopo = noPeriodo.filter((r) => r.categoria === "Fora de escopo").length;
+  const nCortadas = noPeriodo.filter((r) => r.stop_reason && r.stop_reason !== "end_turn").length;
+
+  const contagemCat = {};
+  for (const r of noPeriodo) {
+    const c = r.categoria || "Outro";
+    contagemCat[c] = (contagemCat[c] || 0) + 1;
+  }
+
+  const rotuloPeriodo = periodo === "custom"
+    ? `${dataDe || "…"} a ${dataAte || "…"}`
+    : periodo === "tudo" ? "todo o período" : `últimos ${periodo} dias`;
+
+  const limparFiltros = () => {
+    setPeriodo("30"); setDataDe(""); setDataAte(""); setEmailFiltro(""); setBusca("");
+  };
 
   return html`
     <div>
       <div class="text-sm text-muted">🤝 CS / Suporte</div>
       <h1 class="mt-1 text-2xl font-semibold text-ink">Chat da Cademí</h1>
-      <p class="mt-1 text-xs text-muted">
-        Perguntas e respostas do chatbot de dúvidas de conteúdo (popup na Cademí, treinado só com a seção Metodologia) ·
-        ${rows.length} conversas · ${ultimas24h} nas últimas 24h${erros ? ` · ${erros} com erro` : ""}
+      <p class="mt-1 max-w-3xl text-xs text-muted">
+        Perguntas e respostas do chatbot de dúvidas de conteúdo (popup na Cademí, treinado só com a seção Metodologia).
+        Cada resposta é categorizada automaticamente. As mesmas colunas vão para a
+        ${" "}<a class="text-brand hover:underline" target="_blank" rel="noopener"
+          href="https://docs.google.com/spreadsheets/d/1XX_WrLzhW8ORSi4PY2yUghg7GAGHt0_4aRy2lP0-KzY/edit">planilha do Google</a>.
       </p>
 
-      <input type="text" placeholder="Buscar por pergunta ou resposta…" value=${busca}
-        onInput=${(e) => setBusca(e.target.value)}
-        class="mt-4 w-full max-w-md rounded-lg border border-line px-3 py-2 text-sm outline-none focus:border-brand" />
+      <div class="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <${KPI} label="Perguntas" valor=${nf(nPerguntas)} sub=${rotuloPeriodo} />
+        <${KPI} label="Respostas" valor=${nf(nRespostas)}
+          sub=${`${nPerguntas ? Math.round((nRespostas / nPerguntas) * 100) : 0}% das perguntas`} />
+        <${KPI} label="Não são de conteúdo" valor=${nf(nForaEscopo)} sub=${"categoria “Fora de escopo”"} />
+        <${KPI} label="Respostas cortadas" valor=${nf(nCortadas)} sub="pararam antes do fim" />
+      </div>
+      <div class="mt-3">
+        <${DistBloco} titulo="Principais categorias de dúvida" contagem=${contagemCat} />
+      </div>
 
-      <div class="mt-4 grid gap-3">
-        ${filtradas.length
-          ? filtradas.map((r) => html`<${ChatLogCard} key=${r.id} r=${r} />`)
-          : html`<p class="text-sm text-muted">Nenhuma conversa ainda.</p>`}
+      <div class="mt-4 flex flex-wrap items-end gap-3 rounded-xl border border-line bg-card p-3">
+        <div class="w-full sm:w-44">
+          <label class="block text-xs text-muted">Período</label>
+          <select class=${cx(inputCls, "mt-1")} value=${periodo} onChange=${(e) => setPeriodo(e.target.value)}>
+            <option value="7">Últimos 7 dias</option>
+            <option value="30">Últimos 30 dias</option>
+            <option value="90">Últimos 90 dias</option>
+            <option value="tudo">Tudo</option>
+            <option value="custom">Entre datas…</option>
+          </select>
+        </div>
+        ${periodo === "custom" ? html`
+          <div class="w-full sm:w-40">
+            <label class="block text-xs text-muted">De</label>
+            <input type="date" class=${cx(inputCls, "mt-1")} value=${dataDe} onInput=${(e) => setDataDe(e.target.value)} />
+          </div>
+          <div class="w-full sm:w-40">
+            <label class="block text-xs text-muted">Até</label>
+            <input type="date" class=${cx(inputCls, "mt-1")} value=${dataAte} onInput=${(e) => setDataAte(e.target.value)} />
+          </div>` : null}
+        <div class="w-full sm:w-48">
+          <label class="block text-xs text-muted">Email</label>
+          <input type="text" placeholder="parte do email…" class=${cx(inputCls, "mt-1")} value=${emailFiltro}
+            onInput=${(e) => setEmailFiltro(e.target.value)} />
+        </div>
+        <div class="w-full sm:w-64">
+          <label class="block text-xs text-muted">Palavra na pergunta/resposta</label>
+          <input type="text" placeholder="buscar…" class=${cx(inputCls, "mt-1")} value=${busca}
+            onInput=${(e) => setBusca(e.target.value)} />
+        </div>
+        <button type="button" class="pb-2 text-xs text-brand hover:underline" onClick=${limparFiltros}>limpar filtros</button>
+        <span class="pb-2 text-xs text-muted">${filtradas.length} de ${noPeriodo.length}</span>
+      </div>
+
+      <div class="mt-4 overflow-x-auto rounded-2xl border border-line bg-card">
+        <table class="w-full min-w-[900px] text-sm">
+          <thead>
+            <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
+              <th class="px-3 py-2 font-medium">Data/hora</th>
+              <th class="px-3 py-2 font-medium">Email</th>
+              <th class="px-3 py-2 font-medium">Pergunta</th>
+              <th class="px-3 py-2 font-medium">Resposta</th>
+              <th class="px-3 py-2 font-medium">Categoria</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filtradas.length ? filtradas.map((r) => html`
+              <tr key=${r.id} class="border-b border-line/60 align-top">
+                <td class="whitespace-nowrap px-3 py-2 text-xs text-muted">${fmtDate(r.created_at, true)}</td>
+                <td class="px-3 py-2 text-xs text-ink/80">${r.email || "—"}</td>
+                <td class="px-3 py-2 text-ink/90" style="max-width:22rem">${r.pergunta || "—"}</td>
+                <td class="px-3 py-2 text-ink/80" style="max-width:32rem"><${ChatRespostaCel} r=${r} /></td>
+                <td class="px-3 py-2">
+                  <${Badge} class=${CHAT_CAT_CLS[r.categoria] || CHAT_CAT_CLS["Outro"]}>${r.categoria || "—"}<//>
+                </td>
+              </tr>`)
+              : html`<tr><td colspan="5" class="px-3 py-6 text-center text-sm text-muted">
+                  Nenhuma conversa no período/filtro.</td></tr>`}
+          </tbody>
+        </table>
       </div>
     </div>`;
 }
