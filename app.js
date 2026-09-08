@@ -4021,7 +4021,7 @@ function FilaPedidos({ pedidos, podeEditar, tabela, tarefa, estimativa, minutosE
     try {
       const { error } = await sb.from(tabela).update({ prioridade: true }).eq("id", id);
       if (error) throw error;
-      notify("Gerando agora — entra na próxima checagem da fila (a cada 10 min, ou na hora com \"Run now\" em Scheduled).", "ok");
+      notify("Priorizado — vai ser o próximo da fila.", "ok");
       onMudou && onMudou();
     } catch (e) { notify(errMsg(e), "err"); }
   }
@@ -4061,8 +4061,8 @@ function FilaPedidos({ pedidos, podeEditar, tabela, tarefa, estimativa, minutosE
               })}
             </div>`}
       <p class="mt-3 text-xs text-muted">
-        A geração roda pela tarefa agendada do Claude <code class="rounded bg-black/[0.05] px-1">${tarefa}</code>
-        (verifica a fila a cada 10 min; “Gerar agora” prioriza, e “Run now” em Scheduled roda na hora).
+        A geração roda automaticamente em segundo plano. Assim que fica pronta, os botões de
+        download e do Canva aparecem aqui no card — não precisa fazer mais nada.
       </p>
     </div>`;
 }
