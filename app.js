@@ -4317,8 +4317,9 @@ function GeradorSlidesPage({ me }) {
       <h1 class="mt-1 text-2xl font-semibold text-ink">Gerador de Slides</h1>
       <p class="mt-1 text-sm text-muted">
         Preencha o briefing da aula. Ao enviar, a geração do deck de slides no Canva entra na fila —
-        seguindo as skills do Método (metodologia, avatar, marca, MYPA e <i>slides</i>). Se for parte do
-        fluxo semanal, também são gerados resumo, quiz de 18, tarefa em vídeo e perguntas do Lab.
+        seguindo as skills do Método (metodologia, avatar, marca, MYPA e <i>slides</i>). O download do
+        PPTX é um link temporário (algumas horas); o link do Canva é permanente e de lá dá para
+        reexportar quando quiser (Compartilhar → Baixar → PowerPoint).
       </p>
 
       <div class="mt-5">
