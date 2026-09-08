@@ -8,6 +8,7 @@
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhtdmxrbHR5dnlobHhmeWFvdnBlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyOTI2MDIsImV4cCI6MjEwMzg2ODYwMn0.w_mVu76PhRqwuyIlxqYi4uqOxTUcRFO0kQ2cFCaJMu8";
   var ENDPOINT = SUPABASE_URL + "/functions/v1/public-chat";
   var BRAND = "#ea5167";
+  var BUBBLE_ICON_URL = "https://tiadoingles.com.br/wp-content/uploads/2026/09/Screenshot-2026-09-08-at-11.58.59.png";
   var GREETING =
     "Oi, eu sou o TIRA DÚVIDAS sobre CONTEÚDOS da Tia do Inglês!\nMe conta, qual a sua dúvida sobre conteúdo?";
 
@@ -64,11 +65,11 @@
   var css =
     ":host{all:initial}" +
     "*{box-sizing:border-box}" +
-    "#tia-chat-bubble{position:fixed;bottom:20px;right:20px;width:60px;height:60px;border-radius:50%;" +
-    "background:" + BRAND + ";box-shadow:0 4px 16px rgba(0,0,0,.2);border:none;cursor:pointer;z-index:999998;" +
-    "display:flex;align-items:center;justify-content:center;transition:transform .15s ease}" +
+    "#tia-chat-bubble{position:fixed;bottom:20px;right:20px;width:64px;height:64px;border-radius:50%;" +
+    "background:" + BRAND + " url(" + BUBBLE_ICON_URL + ") center/cover no-repeat;" +
+    "box-shadow:0 4px 16px rgba(0,0,0,.25);border:none;cursor:pointer;z-index:999998;" +
+    "display:flex;align-items:center;justify-content:center;transition:transform .15s ease;overflow:hidden}" +
     "#tia-chat-bubble:hover{transform:scale(1.06)}" +
-    "#tia-chat-bubble svg{width:28px;height:28px}" +
     "#tia-chat-panel{position:fixed;bottom:92px;right:20px;width:360px;max-width:calc(100vw - 24px);" +
     "height:520px;max-height:calc(100vh - 120px);background:#fff;border-radius:16px;" +
     "box-shadow:0 12px 40px rgba(0,0,0,.25);z-index:999999;display:none;flex-direction:column;overflow:hidden;" +
@@ -102,10 +103,6 @@
   var bubble = document.createElement("button");
   bubble.id = "tia-chat-bubble";
   bubble.setAttribute("aria-label", "Abrir chat de dúvidas");
-  bubble.innerHTML =
-    '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
-    '<path d="M4 4h16v12H7l-3 3V4z" stroke="#fff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' +
-    "</svg>";
 
   var panel = document.createElement("div");
   panel.id = "tia-chat-panel";
