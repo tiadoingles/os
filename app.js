@@ -57,6 +57,8 @@ const NAV = [
   ]},
 
   { id: "pedagogico", nome: "Pedagógico", icone: "🎓", itens: [
+    { slug: "aulas-praticas", nome: "Aulas ao vivo e Práticas",
+      desc: "Cronograma das Aulas ao vivo do Método e das Sessões Práticas — datas, temas e links de slide/material, anteriores e próximas." },
     { slug: "materiais", nome: "Materiais (Base/Consulta)",
       desc: "Biblioteca pedagógica para consulta: metodologia, MYPA, roteiros e apostilas do método." },
     { slug: "gerador-materiais", nome: "Gerador de Materiais",
@@ -4261,6 +4263,128 @@ function SlidesGrupo({ label, obrig, hint, children }) {
     </div>`;
 }
 
+/* ===================== Pedagógico · Aulas ao vivo e Práticas ===================== */
+
+const AULAS_PLANILHA_URL = "https://docs.google.com/spreadsheets/d/1RFa9L8HYY2z4FFx1OeNNOFX7fuSHV8BmjlFeBooeJT8/edit";
+const AULAS_FORMATOS = [
+  { id: "ao_vivo", nome: "Aulas ao vivo Método Tia do Inglês" },
+  { id: "pratica", nome: "Sessões Práticas" },
+];
+
+async function fetchAulasAgenda() {
+  const { data, error } = await sb.from("aulas_agenda").select("*").order("data", { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+function AulaLinkCel({ url }) {
+  if (!url) return html`<span class="text-muted">—</span>`;
+  return html`<${Btn} as="a" variant="ghost" href=${url} target="_blank" rel="noopener" class="!px-2.5 !py-1 !text-xs">Abrir ↗<//>`;
+}
+
+function AulaSubTabela({ titulo, aulas, formato }) {
+  const ehPratica = formato === "pratica";
+  return html`
+    <div class="mt-3">
+      <div class="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">${titulo} · ${nf(aulas.length)}</div>
+      ${aulas.length === 0 ? html`
+        <div class="rounded-xl border border-dashed border-line bg-card/60 px-4 py-4 text-center text-xs text-muted">Nenhuma aula.</div>` : html`
+        <div class="overflow-x-auto rounded-2xl border border-line bg-card">
+          <table class="w-full min-w-[640px] text-sm">
+            <thead>
+              <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
+                <th class="px-4 py-2.5">Data</th>
+                <th class="px-4 py-2.5">Tema</th>
+                <th class="px-4 py-2.5">Slide</th>
+                ${ehPratica ? html`<th class="px-4 py-2.5">Quiz</th>` : null}
+                <th class="px-4 py-2.5">Material</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${aulas.map((a) => html`
+                <tr class="border-b border-line last:border-0 align-top hover:bg-black/[0.02]">
+                  <td class="px-4 py-2.5 whitespace-nowrap text-xs text-muted">${fmtDataISO(a.data)}</td>
+                  <td class="px-4 py-2.5">
+                    <div class="font-medium text-ink">${a.tema}</div>
+                    ${ehPratica && a.observacoes ? html`<div class="mt-0.5 whitespace-pre-wrap text-xs text-muted">${a.observacoes}</div>` : null}
+                  </td>
+                  <td class="px-4 py-2.5"><${AulaLinkCel} url=${a.link_slide} /></td>
+                  ${ehPratica ? html`<td class="px-4 py-2.5"><${AulaLinkCel} url=${a.link_quiz} /></td>` : null}
+                  <td class="px-4 py-2.5"><${AulaLinkCel} url=${a.link_material} /></td>
+                </tr>`)}
+            </tbody>
+          </table>
+        </div>`}
+    </div>`;
+}
+
+function AulasPraticasPage() {
+  const [lista, setLista] = useState(null);
+  const [tipoFiltro, setTipoFiltro] = useState("todos");
+  const [dataDe, setDataDe] = useState("");
+  const [dataAte, setDataAte] = useState("");
+  const hoje = hojeISO();
+
+  useEffect(() => {
+    fetchAulasAgenda().then(setLista).catch((e) => { notify(errMsg(e), "err"); setLista([]); });
+  }, []);
+
+  const temFiltro = tipoFiltro !== "todos" || dataDe || dataAte;
+  const filtradas = useMemo(() => {
+    let out = lista || [];
+    if (tipoFiltro !== "todos") out = out.filter((a) => a.formato === tipoFiltro);
+    if (dataDe) out = out.filter((a) => a.data >= dataDe);
+    if (dataAte) out = out.filter((a) => a.data <= dataAte);
+    return out;
+  }, [lista, tipoFiltro, dataDe, dataAte]);
+
+  const formatosVisiveis = tipoFiltro === "todos" ? AULAS_FORMATOS : AULAS_FORMATOS.filter((f) => f.id === tipoFiltro);
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">🎓 Pedagógico</div>
+      <h1 class="mt-1 flex items-center gap-2 text-2xl font-semibold text-ink">🗓️ Aulas ao vivo e Práticas</h1>
+      <p class="mt-1 text-sm text-muted">
+        Cronograma das <b>Aulas ao vivo do Método</b> e das <b>Sessões Práticas</b>, com data, tema e os
+        links de slide/material. Separado por <b>anteriores</b> e <b>próximas</b>.
+      </p>
+
+      ${lista === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
+        <div class="mt-5 flex flex-wrap items-center gap-2">
+          <select class=${cx(inputCls, "w-auto py-1 text-sm")} value=${tipoFiltro} onChange=${(e) => setTipoFiltro(e.target.value)}>
+            <option value="todos">Todos os tipos</option>
+            <option value="ao_vivo">Aulas ao vivo do Método</option>
+            <option value="pratica">Sessões Práticas</option>
+          </select>
+          <span class="text-xs text-muted">de</span>
+          <input type="date" class=${cx(inputCls, "w-auto")} value=${dataDe} onInput=${(e) => setDataDe(e.target.value)} />
+          <span class="text-xs text-muted">até</span>
+          <input type="date" class=${cx(inputCls, "w-auto")} value=${dataAte} onInput=${(e) => setDataAte(e.target.value)} />
+          ${temFiltro ? html`<button type="button" class="text-xs text-muted underline" onClick=${() => { setTipoFiltro("todos"); setDataDe(""); setDataAte(""); }}>limpar filtros</button>` : null}
+          <span class="ml-auto text-xs text-muted">${nf(filtradas.length)} aula(s)</span>
+        </div>
+
+        ${formatosVisiveis.map((f) => {
+          const doFormato = filtradas.filter((a) => a.formato === f.id);
+          const proximas = doFormato.filter((a) => a.data >= hoje);
+          const anteriores = doFormato.filter((a) => a.data < hoje).slice().reverse();
+          return html`
+            <div class="mt-6">
+              <h2 class="text-sm font-semibold uppercase tracking-wider text-ink">${f.nome}</h2>
+              <${AulaSubTabela} titulo="Próximas" aulas=${proximas} formato=${f.id} />
+              <${AulaSubTabela} titulo="Anteriores" aulas=${anteriores} formato=${f.id} />
+            </div>`;
+        })}
+
+        <p class="mt-6 text-xs text-muted">
+          Você edita o cronograma direto na
+          <a href=${AULAS_PLANILHA_URL} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">planilha do Drive</a>
+          (datas, temas, observações e os links) — o OS sincroniza todo dia (<code class="rounded bg-black/[0.05] px-1">sync-aulas-praticas-os</code>).
+        </p>
+      `}
+    </div>`;
+}
+
 function GeradorSlidesPage({ me }) {
   const [pedidos, setPedidos] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -4919,6 +5043,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "cs" && p1 === "envios-livros") return html`<${EnviosLivrosPage} me=${me} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
   if (p0 === "cs" && p1 === "chat-cademi") return html`<${ChatCademiPage} />`;
+  if (p0 === "pedagogico" && p1 === "aulas-praticas") return html`<${AulasPraticasPage} />`;
   if (p0 === "pedagogico" && p1 === "gerador-materiais") return html`<${GeradorMateriaisPage} me=${me} />`;
   if (p0 === "pedagogico" && p1 === "gerador-slides") return html`<${GeradorSlidesPage} me=${me} />`;
   if (p0 === "pedagogico" && p1 === "gerador-feedbacks")
