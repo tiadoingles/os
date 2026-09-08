@@ -8,9 +8,12 @@
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhtdmxrbHR5dnlobHhmeWFvdnBlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyOTI2MDIsImV4cCI6MjEwMzg2ODYwMn0.w_mVu76PhRqwuyIlxqYi4uqOxTUcRFO0kQ2cFCaJMu8";
   var ENDPOINT = SUPABASE_URL + "/functions/v1/public-chat";
   var BRAND = "#ea5167";
-  var BUBBLE_ICON_URL = "https://tiadoingles.com.br/wp-content/uploads/2026/09/Screenshot-2026-09-08-at-11.58.59.png";
-  var GREETING =
-    "Oi, eu sou o TIRA DÚVIDAS sobre CONTEÚDOS da Tia do Inglês!\nMe conta, qual a sua dúvida sobre conteúdo?";
+  var BUBBLE_ICON_URL = "https://tiadoingles.github.io/os/chat-bubble-icon.png";
+  var GREETING_PARTS = [
+    "Hey there, eu sou a TIRA DÚVIDAS sobre CONTEÚDO da <em>Tia do Inglês</em>",
+    "Aqui, eu consigo tirar todas as suas dúvidas sobre o CONTEÚDO do seu curso dentro da Plataforma.",
+    "Me conta, qual a sua dúvida de CONTEÚDO?",
+  ];
 
   function sessionId() {
     try {
@@ -141,7 +144,9 @@
   function openPanel() {
     panel.classList.add("open");
     if (!greeted) {
-      addMessage("bot", "<p>" + escapeHtml(GREETING).replace(/\n/g, "<br>") + "</p>");
+      for (var i = 0; i < GREETING_PARTS.length; i++) {
+        addMessage("bot", "<p>" + GREETING_PARTS[i] + "</p>");
+      }
       greeted = true;
     }
     inputEl.focus();
