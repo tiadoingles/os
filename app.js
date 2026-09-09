@@ -3088,10 +3088,29 @@ function tempoDesde(iso) {
   return `há ${anos} ${anos === 1 ? "ano" : "anos"}`;
 }
 
-function PesquisaCard({ p }) {
+function PesquisaCard({ p, onRegen }) {
+  const [regenBusy, setRegenBusy] = useState(false);
   const janelaMs = (p.janela_dias || 30) * 86400000;
   const recente = p.ultima_resposta_em && Date.now() - new Date(p.ultima_resposta_em).getTime() < janelaMs;
   const ativo = !!p.ativo || !!recente;
+
+  async function regenerarResumo() {
+    if (regenBusy) return;
+    setRegenBusy(true);
+    try {
+      const { data, error } = await sb.functions.invoke("sync", {
+        body: { op: "regenerar_resumo_pesquisa", chave: p.chave },
+      });
+      if (error) throw error;
+      if (data && data.error) throw new Error(data.error);
+      notify("Resumo do avatar atualizado com IA.", "ok");
+      onRegen && (await onRegen());
+    } catch (e) {
+      notify(errMsg(e), "err");
+    } finally {
+      setRegenBusy(false);
+    }
+  }
 
   let pill, pillCls;
   if (!p.total_respostas) { pill = "AGUARDANDO"; pillCls = PILL_WARN; }
@@ -3129,8 +3148,14 @@ function PesquisaCard({ p }) {
         : html`<p class="mt-3 text-sm text-muted">Resumo do avatar ainda não gerado.</p>`}
 
       <div class="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3 text-[11px] text-muted">
-        <span>${p.resumo_atualizado_em ? "Resumo atualizado " + fmtDate(p.resumo_atualizado_em) : ""}</span>
-        ${p.fonte_url ? html`<a href=${p.fonte_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">abrir pesquisa ↗</a>` : null}
+        <span>${p.resumo_atualizado_em ? "Resumo atualizado " + fmtDate(p.resumo_atualizado_em) : "Resumo nunca gerado"}</span>
+        <div class="flex items-center gap-3">
+          <button type="button" onClick=${regenerarResumo} disabled=${regenBusy}
+            class="font-medium text-brand hover:underline disabled:opacity-50">
+            ${regenBusy ? html`<span class="spinner mr-1"></span>gerando resumo…` : "↻ Atualizar resumo (IA)"}
+          </button>
+          ${p.fonte_url ? html`<a href=${p.fonte_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">abrir pesquisa ↗</a>` : null}
+        </div>
       </div>
     </div>`;
 }
@@ -3142,9 +3167,8 @@ function mdToHtml(text) {
 
 function PesquisasPage() {
   const [rows, setRows] = useState(null);
-  useEffect(() => {
-    fetchPesquisas().then(setRows).catch((e) => { notify(errMsg(e), "err"); setRows([]); });
-  }, []);
+  const recarregar = () => fetchPesquisas().then(setRows).catch((e) => { notify(errMsg(e), "err"); setRows([]); });
+  useEffect(() => { recarregar(); }, []);
 
   if (!rows) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
 
@@ -3162,12 +3186,13 @@ function PesquisasPage() {
       </p>
 
       <div class="mt-5 grid gap-4 lg:grid-cols-2">
-        ${rows.map((p) => html`<${PesquisaCard} key=${p.chave} p=${p} />`)}
+        ${rows.map((p) => html`<${PesquisaCard} key=${p.chave} p=${p} onRegen=${recarregar} />`)}
       </div>
 
       <p class="mt-4 text-xs text-muted">
-        Fonte: formulários de pesquisa no Google Drive. Atualização automática diária (tarefa <code class="rounded bg-black/[0.05] px-1">sync-pesquisas-os</code>):
-        recalcula contagem, data da última resposta, o sinal ATIVO e regenera o resumo do avatar.
+        Fonte: formulários de pesquisa no Google Drive. Contagem, data da última resposta e o sinal ATIVO são
+        atualizados sozinhos a cada 30&nbsp;min (sync no servidor). O <strong>resumo do avatar (IA)</strong> só é
+        gerado quando você clica em “↻ Atualizar resumo (IA)” no card.
       </p>
     </div>`;
 }
