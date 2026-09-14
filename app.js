@@ -293,6 +293,95 @@ async function fetchFerramentas() {
   return data || [];
 }
 
+/* ---- Squad de Agentes ---- */
+
+async function fetchSquadAgentes() {
+  const { data, error } = await sb
+    .from("os_squad_agentes")
+    .select("*")
+    .order("ordem")
+    .order("nome");
+  if (error) throw error;
+  return data || [];
+}
+
+const SQUAD_GRUPO_ORDER = ["topo", "maestro", "pool", "exclusivo"];
+const SQUAD_GRUPO_LABEL = {
+  topo: "Topo",
+  maestro: "Maestro de cada aba",
+  pool: "Pool compartilhado",
+  exclusivo: "Especialistas exclusivos",
+};
+
+function SquadPage() {
+  const [agentes, setAgentes] = useState(null);
+  useEffect(() => {
+    fetchSquadAgentes().then(setAgentes).catch((e) => { notify(errMsg(e), "err"); setAgentes([]); });
+  }, []);
+
+  if (agentes === null)
+    return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
+
+  const porGrupo = SQUAD_GRUPO_ORDER.map((g) => [g, agentes.filter((a) => a.grupo === g)]).filter(([, l]) => l.length);
+  const ativos = agentes.filter((a) => a.ativo).length;
+  const precisamAtualizar = agentes.filter((a) => a.precisa_atualizacao).length;
+
+  return html`
+    <div>
+      <div>
+        <h1 class="flex items-center gap-2 text-2xl font-semibold text-ink">🤖 Squad de Agentes</h1>
+        <p class="mt-1 max-w-2xl text-sm text-muted">
+          Time de subagentes do Claude Code responsável por manter e melhorar cada aba do OS — um maestro por
+          aba, um pool de especialistas compartilhados entre abas e especialistas exclusivos de uma única aba.
+        </p>
+      </div>
+
+      <div class="mt-4 flex flex-wrap gap-2 text-xs">
+        <span class="inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 ring-1 ring-line">${agentes.length} agentes</span>
+        <span class="inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 ring-1 ring-line">
+          <span class="inline-block h-1.5 w-1.5 rounded-full bg-[#7d9b6e]"></span>${ativos} ativos
+        </span>
+        ${precisamAtualizar > 0 ? html`
+          <span class="inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 ring-1 ring-line">
+            <span class="inline-block h-1.5 w-1.5 rounded-full bg-[#bfa94e]"></span>${precisamAtualizar} precisam de atualização
+          </span>` : null}
+      </div>
+
+      ${porGrupo.map(([g, lista]) => html`
+        <div class="mt-6" key=${g}>
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-muted">${SQUAD_GRUPO_LABEL[g]}</h2>
+          <div class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+            ${lista.map((a) => html`
+              <div key=${a.id} class="rounded-xl border border-line bg-white p-4">
+                <div class="flex flex-wrap items-start justify-between gap-2">
+                  <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <span class="font-medium text-ink">${a.nome}</span>
+                      <span class="rounded bg-black/[0.05] px-1.5 py-0.5 font-mono text-[11px] text-muted">${a.slug}</span>
+                    </div>
+                    <p class="mt-1 text-sm text-ink/75">${a.funcao}</p>
+                  </div>
+                  <div class="flex shrink-0 flex-wrap justify-end gap-1.5">
+                    <${Badge} class=${a.ativo ? PILL_OK : PILL_NEUTRAL}>${a.ativo ? "Ativo" : "Inativo"}<//>
+                    ${a.precisa_atualizacao ? html`<${Badge} class=${PILL_WARN}>Precisa de atualização<//>` : null}
+                  </div>
+                </div>
+                ${a.abas && a.abas.length ? html`
+                  <div class="mt-2 flex flex-wrap gap-1">
+                    ${a.abas.map((ab) => html`<span key=${ab} class="rounded-full bg-black/[0.04] px-2 py-0.5 text-[11px] text-muted">${ab}</span>`)}
+                  </div>` : null}
+                <div class="mt-2 text-xs text-muted">
+                  ${a.ultima_execucao_em
+                    ? html`Última tarefa: ${a.ultima_tarefa || "—"} · ${fmtDate(a.ultima_execucao_em, true)}`
+                    : "Nenhuma tarefa registrada ainda"}
+                </div>
+                ${a.precisa_atualizacao && a.motivo_atualizacao ? html`<p class="mt-1 text-xs text-[#7c7440]">${a.motivo_atualizacao}</p>` : null}
+              </div>`)}
+          </div>
+        </div>`)}
+    </div>`;
+}
+
 // Checagem automática feita no navegador. Só funciona para os endpoints que
 // respondem com CORS: o próprio Supabase, a Edge Function e o site no GitHub Pages.
 async function checkFerramenta(f) {
@@ -663,6 +752,7 @@ function Shell({ me, route, children }) {
       </div>
 
       <nav class="flex-1 space-y-0.5 overflow-y-auto px-2 py-3">
+        ${linkItem("Squad de Agentes", "🤖", "/squad", route.path === "/squad")}
         ${linkItem("Início", "🏠", "/", homeActive)}
         ${linkItem("Farol do Lucro", "🚦", "/farol", p0 === "farol")}
         ${linkItem("Pedir a IA", "✨", "/pedir-ia", route.path === "/pedir-ia")}
@@ -5175,6 +5265,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "doc") return html`<${DocDetail} id=${p1} me=${me} sections=${sections} />`;
   if (p0 === "novo") return html`<${NewDocPage} me=${me} sections=${sections} query=${route.query} />`;
   if (p0 === "ferramentas") return html`<${FerramentasPage} me=${me} />`;
+  if (p0 === "squad") return html`<${SquadPage} />`;
   if (p0 === "pedir-ia") return html`<${PedirIA} />`;
   if (p0 === "perfil") return html`<${ProfilePage} me=${me} onProfileChanged=${reload} />`;
   if (p0 === "admin" && me.role === "admin") return html`<${AdminPage} me=${me} />`;

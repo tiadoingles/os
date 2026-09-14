@@ -7,5 +7,7 @@ node_modules/
 # Segredos locais da sincronização
 .sync/
 
-# Config local do preview do Claude (servidor de dev), não é parte do app
-.claude/
+# Config local do preview do Claude (servidor de dev, específica da máquina)
+.claude/launch.json
+
+# .claude/agents/ (squad de subagentes do OS) fica versionado de propósito
