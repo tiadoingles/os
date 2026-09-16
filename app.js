@@ -4288,6 +4288,9 @@ function FilaPedidos({ pedidos, podeEditar, tabela, tarefa, estimativa, minutosE
                       </div>
                     </div>
                     ${p.status === "pendente" && p.prioridade ? html`<div class="mt-1 text-[11px] text-muted">Gerando em breve — previsão: pronto em até ${minEst(p)} min.</div>` : null}
+                    ${p.status === "pendente" && !p.prioridade && (Date.now() - new Date(p.created_at).getTime()) > 30 * 60000
+                      ? html`<div class="mt-1 text-[11px] font-medium" style="color:#a44b43">Na fila há ${fmtMin(Date.now() - new Date(p.created_at).getTime())} — mais que o esperado (a fila roda a cada ~10 min). Avise a equipe técnica se continuar assim.</div>`
+                      : null}
                     ${desdeMs != null ? html`<div class="mt-1 text-[11px] text-muted">gerando há ${fmtMin(desdeMs)} · previsão: mais ~${restanteMin} min</div>` : null}
                     ${p.status === "pronto" ? html`<div class="mt-2 flex flex-wrap gap-2">${linksPronto(p)}</div>` : null}
                     ${p.log ? html`<div class="mt-2 whitespace-pre-wrap text-xs text-muted">${p.log}</div>` : null}
