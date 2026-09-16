@@ -1590,7 +1590,14 @@ function ProfilePage({ me, onProfileChanged }) {
     </div>`;
 }
 
+async function fetchSyncStatus() {
+  const { data, error } = await sb.from("sync_status").select("*").order("ordem");
+  if (error) throw error;
+  return data || [];
+}
+
 function AdminPage({ me }) {
+  const [tab, setTab] = useState("usuarios");
   const [users, setUsers] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
   const [tempResult, setTempResult] = useState(null);
@@ -1620,39 +1627,50 @@ function AdminPage({ me }) {
     <div>
       <div class="flex items-center justify-between">
         <h1 class="text-2xl font-semibold text-ink">Administração</h1>
-        <${Btn} onClick=${() => setShowCreate(true)}>+ Novo usuário<//>
+        ${tab === "usuarios" ? html`<${Btn} onClick=${() => setShowCreate(true)}>+ Novo usuário<//>` : null}
       </div>
-      <p class="mt-1 text-sm text-muted">Crie contas, defina papéis e gere senhas temporárias. Não é necessário e-mail de confirmação.</p>
 
-      <div class="mt-6 overflow-x-auto rounded-xl border border-line bg-white">
-        ${users === null
-          ? html`<div class="p-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
-          : html`
-          <table class="w-full min-w-[640px] text-left text-sm">
-            <thead class="border-b border-line text-xs uppercase tracking-wide text-muted">
-              <tr><th class="px-4 py-3 font-medium">Pessoa</th><th class="px-4 py-3 font-medium">Papel</th><th class="px-4 py-3 font-medium">Desde</th><th class="px-4 py-3"></th></tr>
-            </thead>
-            <tbody class="divide-y divide-line">
-              ${users.map((u) => html`
-                <tr key=${u.id}>
-                  <td class="px-4 py-3"><div class="font-medium text-ink">${u.nome || "—"}</div><div class="text-xs text-muted">${u.email}</div></td>
-                  <td class="px-4 py-3">
-                    <select class=${cx(inputCls, "w-auto py-1")} value=${u.role} disabled=${u.id === me.id}
-                      onChange=${(e) => setRole(u, e.target.value)}>
-                      <option value="leitor">Leitor</option><option value="editor">Editor</option><option value="admin">Admin</option>
-                    </select>
-                  </td>
-                  <td class="px-4 py-3 text-muted">${fmtDate(u.created_at)}</td>
-                  <td class="px-4 py-3 text-right">
-                    <div class="flex justify-end gap-2">
-                      <button class="text-xs text-muted hover:text-ink" onClick=${() => resetPw(u)}>Nova senha</button>
-                      ${u.id !== me.id ? html`<button class="text-xs text-red-500 hover:text-red-700" onClick=${() => removeUser(u)}>Excluir</button>` : null}
-                    </div>
-                  </td>
-                </tr>`)}
-            </tbody>
-          </table>`}
+      <div class="mt-4 flex gap-2 border-b border-line">
+        <button class=${cx("px-3 py-2 text-sm font-medium", tab === "usuarios" ? "border-b-2 border-brand text-ink" : "text-muted hover:text-ink")}
+          onClick=${() => setTab("usuarios")}>Usuários</button>
+        <button class=${cx("px-3 py-2 text-sm font-medium", tab === "sincronizacoes" ? "border-b-2 border-brand text-ink" : "text-muted hover:text-ink")}
+          onClick=${() => setTab("sincronizacoes")}>Sincronizações</button>
       </div>
+
+      ${tab === "usuarios" ? html`
+      <div>
+        <p class="mt-3 text-sm text-muted">Crie contas, defina papéis e gere senhas temporárias. Não é necessário e-mail de confirmação.</p>
+
+        <div class="mt-4 overflow-x-auto rounded-xl border border-line bg-white">
+          ${users === null
+            ? html`<div class="p-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
+            : html`
+            <table class="w-full min-w-[640px] text-left text-sm">
+              <thead class="border-b border-line text-xs uppercase tracking-wide text-muted">
+                <tr><th class="px-4 py-3 font-medium">Pessoa</th><th class="px-4 py-3 font-medium">Papel</th><th class="px-4 py-3 font-medium">Desde</th><th class="px-4 py-3"></th></tr>
+              </thead>
+              <tbody class="divide-y divide-line">
+                ${users.map((u) => html`
+                  <tr key=${u.id}>
+                    <td class="px-4 py-3"><div class="font-medium text-ink">${u.nome || "—"}</div><div class="text-xs text-muted">${u.email}</div></td>
+                    <td class="px-4 py-3">
+                      <select class=${cx(inputCls, "w-auto py-1")} value=${u.role} disabled=${u.id === me.id}
+                        onChange=${(e) => setRole(u, e.target.value)}>
+                        <option value="leitor">Leitor</option><option value="editor">Editor</option><option value="admin">Admin</option>
+                      </select>
+                    </td>
+                    <td class="px-4 py-3 text-muted">${fmtDate(u.created_at)}</td>
+                    <td class="px-4 py-3 text-right">
+                      <div class="flex justify-end gap-2">
+                        <button class="text-xs text-muted hover:text-ink" onClick=${() => resetPw(u)}>Nova senha</button>
+                        ${u.id !== me.id ? html`<button class="text-xs text-red-500 hover:text-red-700" onClick=${() => removeUser(u)}>Excluir</button>` : null}
+                      </div>
+                    </td>
+                  </tr>`)}
+              </tbody>
+            </table>`}
+        </div>
+      </div>` : html`<${SincronizacoesPage} />`}
 
       ${showCreate && html`<${CreateUserModal} onClose=${() => setShowCreate(false)}
         onCreated=${async (res) => { setShowCreate(false); setTempResult(res); await load(); }} />`}
@@ -1667,6 +1685,108 @@ function AdminPage({ me }) {
           <div class="mt-4 flex justify-end"><${Btn} onClick=${() => { navigator.clipboard && navigator.clipboard.writeText(`E-mail: ${tempResult.email}\nSenha: ${tempResult.senha}`); notify("Copiado.", "ok"); }}>Copiar<//></div>
         <//>`}
     </div>`;
+}
+
+function SincronizacoesPage() {
+  const [rows, setRows] = useState(null);
+
+  const load = useCallback(async () => {
+    try { setRows(await fetchSyncStatus()); }
+    catch (e) { notify(errMsg(e), "err"); setRows([]); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  return html`
+    <div>
+      <p class="mt-3 text-sm text-muted">Tarefas de sincronização e checagem que rodam sozinhas todo dia. Use o botão pra rodar uma agora, sem esperar o horário programado.</p>
+
+      <div class="mt-4 overflow-x-auto rounded-xl border border-line bg-white">
+        ${rows === null
+          ? html`<div class="p-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
+          : html`
+          <table class="w-full min-w-[720px] text-left text-sm">
+            <thead class="border-b border-line text-xs uppercase tracking-wide text-muted">
+              <tr>
+                <th class="px-4 py-3 font-medium">Sincronização</th>
+                <th class="px-4 py-3 font-medium">Cadência</th>
+                <th class="px-4 py-3 font-medium">Última execução</th>
+                <th class="px-4 py-3"></th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-line">
+              ${rows.map((r) => html`<${SyncRow} key=${r.chave} row=${r} onDone=${load} />`)}
+            </tbody>
+          </table>`}
+        ${rows && rows.length === 0 ? html`<${Empty} title="Nenhuma sincronização cadastrada" icon="🔄" />` : null}
+      </div>
+    </div>`;
+}
+
+function SyncRow({ row, onDone }) {
+  const [busy, setBusy] = useState(false);
+
+  async function sincronizarAgora() {
+    setBusy(true);
+    try {
+      const { data, error } = await sb.functions.invoke("sync", { body: { op: row.chave, manual: true } });
+      if (error) {
+        let msg = error.message;
+        try { const j = await error.context.json(); if (j && j.error) msg = j.error; } catch (_) { /* ignore */ }
+        throw new Error(msg);
+      }
+      if (data && data.error) throw new Error(data.error);
+      const res = (data && data.resultados && data.resultados[0]) || {};
+      if (res.erro) throw new Error(res.erro);
+      notify(`“${row.nome}” sincronizado agora.`, "ok");
+      await onDone();
+    } catch (e) {
+      notify(errMsg(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function solicitarSincronizacao() {
+    setBusy(true);
+    try {
+      const { error } = await sb.from("sync_status").update({ solicitado_em: new Date().toISOString() }).eq("chave", row.chave);
+      if (error) throw error;
+      notify("Solicitado — será executado na próxima vez que o app estiver aberto.", "ok");
+      await onDone();
+    } catch (e) {
+      notify(errMsg(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const solicitadoPendente = row.tipo === "local" && row.solicitado_em &&
+    (!row.ultima_execucao_em || new Date(row.solicitado_em) > new Date(row.ultima_execucao_em));
+
+  let statusPill = PILL_NEUTRAL, statusLabel = "nunca executado";
+  if (row.ultimo_status === "ok") { statusPill = PILL_OK; statusLabel = "ok"; }
+  else if (row.ultimo_status === "erro") { statusPill = PILL_ERR; statusLabel = "erro"; }
+
+  return html`
+    <tr>
+      <td class="px-4 py-3">
+        <div class="font-medium text-ink">${row.nome}</div>
+        ${row.ultimo_detalhe ? html`<div class="mt-0.5 text-xs text-muted">${row.ultimo_detalhe}</div>` : null}
+      </td>
+      <td class="px-4 py-3 text-muted">A cada ${row.cadencia_horas}h</td>
+      <td class="px-4 py-3">
+        <div class="flex items-center gap-2">
+          <${Badge} class=${statusPill}>${statusLabel}<//>
+          <span class="text-xs text-muted">${row.ultima_execucao_em ? tempoDesde(row.ultima_execucao_em) : "nunca"}</span>
+        </div>
+        ${solicitadoPendente ? html`<div class="mt-1 text-[11px] text-muted">Solicitado — será executado na próxima vez que o app estiver aberto.</div>` : null}
+      </td>
+      <td class="px-4 py-3 text-right">
+        ${row.tipo === "server"
+          ? html`<${Btn} variant="ghost" loading=${busy} onClick=${sincronizarAgora}>Sincronizar agora<//>`
+          : html`<${Btn} variant="ghost" loading=${busy} onClick=${solicitarSincronizacao}>Solicitar sincronização<//>`}
+      </td>
+    </tr>`;
 }
 
 function CreateUserModal({ onClose, onCreated }) {
