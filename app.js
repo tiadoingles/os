@@ -2899,6 +2899,7 @@ function EnviosLivrosPage({ me }) {
 /* ============================ Conteúdo · Métricas Instagram ============================ */
 
 const nf = (n) => (n == null ? "—" : Number(n).toLocaleString("pt-BR"));
+const fmtBRL = (n) => "R$ " + (n == null ? "0,00" : Number(n).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 const nfShort = (n) => {
   if (n == null) return "—";
   const a = Math.abs(n);
@@ -5013,6 +5014,124 @@ async function fetchEventos(deISO, ateISO) {
   return data || [];
 }
 
+// Câmbio de referência fixo usado pela Edge Function pra estimar custo em BRL
+// (ver USD_BRL_REF nos comentários de ai/public-chat/sync — mesmo valor,
+// documentado ali; aqui é só pra exibição na legenda do card).
+const USD_BRL_REF_DISPLAY = "5,15";
+
+async function fetchAiUsage(desdeISO) {
+  const { data, error } = await sb.from("ai_usage_log").select("input_tokens,output_tokens,custo_brl,criado_em").gte("criado_em", desdeISO);
+  if (error) throw error;
+  return data || [];
+}
+async function fetchAutomacaoEstado() {
+  const { data, error } = await sb.from("automacao_estado").select("*").eq("id", 1).maybeSingle();
+  if (error) throw error;
+  return data || { pausado: false };
+}
+
+function UsoIABloco({ me }) {
+  const canEdit = me && me.role !== "leitor";
+  const [rows, setRows] = useState(null);
+  const [estado, setEstado] = useState(null);
+  const [busyPausa, setBusyPausa] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const desde = new Date(Date.now() - 30 * 86400000).toISOString();
+      const [u, e] = await Promise.all([fetchAiUsage(desde), fetchAutomacaoEstado()]);
+      setRows(u);
+      setEstado(e);
+    } catch (err) { notify(errMsg(err), "err"); setRows([]); setEstado({ pausado: false }); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  async function pausar() {
+    if (!confirm("Pausar TODAS as automações de IA agora? Isso inclui o chat de alunos, o Pedir a IA e as sincronizações que usam IA — elas param de gastar tokens até alguém retomar.")) return;
+    setBusyPausa(true);
+    try {
+      const { error } = await sb.from("automacao_estado")
+        .update({ pausado: true, pausado_em: new Date().toISOString(), pausado_por: me.id }).eq("id", 1);
+      if (error) throw error;
+      notify("Automações de IA pausadas.", "ok");
+      await load();
+    } catch (err) { notify(errMsg(err), "err"); }
+    finally { setBusyPausa(false); }
+  }
+  async function retomar() {
+    setBusyPausa(true);
+    try {
+      const { error } = await sb.from("automacao_estado").update({ pausado: false }).eq("id", 1);
+      if (error) throw error;
+      notify("Automações de IA retomadas.", "ok");
+      await load();
+    } catch (err) { notify(errMsg(err), "err"); }
+    finally { setBusyPausa(false); }
+  }
+
+  if (rows === null || estado === null) {
+    return html`<div class="mt-6 rounded-2xl border border-line bg-card p-5 text-sm text-muted"><span class="spinner mr-2"></span>Carregando uso de IA…</div>`;
+  }
+
+  const desde24h = Date.now() - 24 * 3600000;
+  const ultimas24h = rows.filter((r) => r.criado_em && new Date(r.criado_em).getTime() >= desde24h);
+  const tokens24h = ultimas24h.reduce((s, r) => s + (r.input_tokens || 0) + (r.output_tokens || 0), 0);
+  const custo24h = ultimas24h.reduce((s, r) => s + (Number(r.custo_brl) || 0), 0);
+
+  const dias = [];
+  for (let i = 29; i >= 0; i--) dias.push(somaDias(hojeISO(), -i));
+  const porDia = {};
+  for (const d of dias) porDia[d] = 0;
+  let custoTotal30 = 0;
+  for (const r of rows) {
+    const d = (r.criado_em || "").slice(0, 10);
+    if (porDia[d] != null) porDia[d] += (r.input_tokens || 0) + (r.output_tokens || 0);
+    custoTotal30 += Number(r.custo_brl) || 0;
+  }
+  const maxDia = Math.max(1, ...dias.map((d) => porDia[d]));
+
+  return html`
+    <div class="mt-6">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="text-sm font-semibold uppercase tracking-wider text-muted">Uso de IA</div>
+        ${canEdit ? (estado.pausado
+          ? html`<${Btn} variant="ghost" loading=${busyPausa} onClick=${retomar}>▶ Retomar automações<//>`
+          : html`<${Btn} variant="danger" loading=${busyPausa} onClick=${pausar}>⏸ Pausar automações de IA<//>`)
+          : null}
+      </div>
+
+      ${estado.pausado ? html`
+        <div class="mt-2 rounded-lg bg-[#f4e0db] px-3 py-2 text-xs font-medium text-[#a44b43]">
+          Automações de IA pausadas${estado.pausado_em ? " " + tempoDesde(estado.pausado_em) : ""} — chat de alunos, Pedir a IA e
+          sincronizações com IA não vão gastar tokens até alguém retomar.
+        </div>` : null}
+
+      <div class="mt-3 grid gap-4 lg:grid-cols-3">
+        <div class="rounded-2xl border border-line bg-card p-5">
+          <div class="text-xs uppercase tracking-wide text-muted">Últimas 24h</div>
+          <div class="mt-1 text-2xl font-semibold text-ink">${nf(tokens24h)}</div>
+          <div class="text-xs text-muted">tokens · ${fmtBRL(custo24h)} (estimado)</div>
+        </div>
+        <div class="rounded-2xl border border-line bg-card p-5 lg:col-span-2">
+          <div class="flex items-end justify-between gap-2">
+            <div class="text-xs uppercase tracking-wide text-muted">Tokens por dia (30 dias)</div>
+            <div class="text-xs text-muted">~${fmtBRL(custoTotal30)} no período</div>
+          </div>
+          <div class="mt-3 flex h-20 items-end gap-[2px]">
+            ${dias.map((d) => html`
+              <div key=${d} class="min-w-[2px] flex-1 rounded-t bg-brand/70" title=${`${d}: ${nf(porDia[d])} tokens`}
+                style=${`height:${Math.max(2, Math.round((porDia[d] / maxDia) * 100))}%`}></div>`)}
+          </div>
+        </div>
+      </div>
+      <p class="mt-2 text-[11px] text-muted">
+        Cobre só o uso via API (Edge Functions: chat de alunos, Pedir a IA, sincronizações com IA) — não inclui as tarefas locais do
+        Claude Code (geração de slides/materiais, sync de skills), que usam a assinatura do Claude Code e não têm um custo em R$ medido
+        aqui. Custo em R$ é uma estimativa: preço de tabela da Anthropic em USD × câmbio de referência fixo (R$ ${USD_BRL_REF_DISPLAY} por US$ 1, não é uma cotação ao vivo).
+      </p>
+    </div>`;
+}
+
 function HomePage({ me, sections }) {
   const [data, setData] = useState(null);
   const hoje = hojeISO();
@@ -5145,6 +5264,8 @@ function HomePage({ me, sections }) {
           <a href="#/agenda/calendario" class="rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink/80 hover:border-brand/40">📅 Calendário</a>
           <a href="#/cs/pesquisas" class="rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink/80 hover:border-brand/40">🤝 Pesquisas de Alunos</a>
         </div>
+
+        <${UsoIABloco} me=${me} />
       `}
     </div>`;
 }
