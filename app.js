@@ -74,6 +74,8 @@ const NAV = [
       desc: "Pergunte sobre processos de CS/Suporte — a IA responde com base nos documentos da pasta CS:Suporte do Drive." },
     { slug: "envios-livros", nome: "Envios de Livros",
       desc: "Cadastro e acompanhamento dos envios de material didático e do livro Mente Aberta e Língua Solta." },
+    { slug: "diagnostico", nome: "Diagnóstico do Mentorado",
+      desc: "Formulário do diagnóstico inicial da mentorada; ao concluir, gera a planilha no Drive (pasta 0.1 Diagnóstico Inicial)." },
     { slug: "metricas-atendimento", nome: "Métricas de Atendimento",
       desc: "Volume de atendimentos, tempo de primeira resposta, tempo de resolução e satisfação do CS. Base de dados a definir." },
     { slug: "chat-cademi", nome: "Chat da Cademí",
@@ -2896,6 +2898,337 @@ function EnviosLivrosPage({ me }) {
     </div>`;
 }
 
+/* ============================ CS · Diagnóstico do Mentorado ============================ */
+// Formulário com os campos da planilha modelo de diagnóstico (aba NOVO). O rascunho
+// é salvo sozinho em cs_diagnosticos; CONCLUIR chama a Edge Function
+// "diagnostico-drive" → Apps Script, que cria "<Nome> - DD/MM/AAAA" no Drive.
+
+const DIAG_ROTINA = ["1x Semana", "2x Semana", "3x Semana", "4x Semana", "5x Semana"];
+const DIAG_SECOES = [
+  { titulo: "Datas", campos: [
+    { k: "data_inicio", l: "Data de início", t: "date" },
+    { k: "onboarding_data", l: "Call de Onboarding (data)", t: "date" },
+    { k: "onboarding_hora", l: "Call de Onboarding (horário)", t: "time" },
+    { k: "data_diagnostico", l: "Data do Diagnóstico [Marcela]", t: "date", req: true },
+    { k: "nivelamento", l: "Resultado do Teste de nivelamento", t: "text", full: true },
+  ]},
+  { titulo: "Dados pessoais", campos: [
+    { k: "nome", l: "Nome completo", t: "text", req: true, full: true },
+    { k: "idade", l: "Idade", t: "number", min: 0, max: 120 },
+    { k: "email", l: "Email", t: "email" },
+    { k: "profissao", l: "Profissão", t: "text" },
+    { k: "horario_pratica", l: "Horário Sessão Prática", t: "select", op: ["17h", "19h"] },
+  ]},
+  { titulo: "Objetivo e dificuldades", campos: [
+    { k: "objetivo", l: "Objetivo", t: "select", op: ["Profissional", "Viagem", "Realização Pessoal", "Outros"] },
+    { k: "objetivo_detalhe", l: "Objetivo em detalhes", t: "textarea", full: true },
+    { k: "dificuldades", l: "Dificuldades (o que mais frustrou antes)", t: "textarea", full: true },
+  ]},
+  { titulo: "Notas e VAC", campos: [
+    { k: "nota_speaking", l: "Nota Speaking (0 a 10)", t: "number", min: 0, max: 10, step: "0.5" },
+    { k: "nota_listening", l: "Nota Listening (0 a 10)", t: "number", min: 0, max: 10, step: "0.5" },
+    { k: "vac", l: "Resultado Teste VAC", t: "select", op: ["Visual", "Auditivo", "Cinestésico"] },
+    { k: "vac_obs", l: "VAC: observações", t: "text" },
+  ]},
+  { titulo: "Histórico", campos: [
+    { k: "o_que_fez", l: "O que já fez antes (tempo e formato)", t: "textarea", full: true },
+  ]},
+  { titulo: "Trilha e rotina", campos: [
+    { k: "trilha", l: "Trilha Inicial", t: "select", op: ["TRILHA 1", "TRILHA 2", "TRILHA 3", "TRILHA 4", "TRILHA 5"] },
+    { k: "trilha_obs", l: "Observação sobre a trilha", t: "text" },
+    { k: "rotina_trilha", l: "Rotina: Trilha", t: "select", op: DIAG_ROTINA },
+    { k: "rotina_arena", l: "Rotina: Arena", t: "select", op: DIAG_ROTINA },
+    { k: "arena_nivel", l: "Nível da Arena", t: "select", op: ["RC", "Básico", "Inter", "Avançado"] },
+    { k: "rotina_labs", l: "Rotina: Labs", t: "select", op: DIAG_ROTINA },
+    { k: "rotina_video", l: "Rotina: Vídeo Semanal", t: "select", op: DIAG_ROTINA },
+    { k: "rotina_pratica", l: "Rotina: Sessão Prática", t: "select", op: DIAG_ROTINA },
+  ]},
+  { titulo: "Meta", campos: [
+    { k: "meta", l: "Meta", t: "text", ph: "Ex.: concluir X aulas até a data Y" },
+    { k: "meta_data", l: "Data da meta", t: "date" },
+  ]},
+  { titulo: "Observações gerais", campos: [
+    { k: "observacoes", l: "Observações gerais", t: "textarea", full: true },
+  ]},
+];
+
+async function fetchDiagnosticos() {
+  const { data, error } = await sb.from("cs_diagnosticos")
+    .select("id, nome, email, data_diagnostico, status, drive_url, concluido_em, updated_at")
+    .order("updated_at", { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+async function fetchDiagnostico(id) {
+  const { data, error } = await sb.from("cs_diagnosticos").select("*").eq("id", id).maybeSingle();
+  if (error) throw error;
+  return data;
+}
+// Colunas de topo (busca/lista) derivadas do jsonb.
+function diagLinha(dados) {
+  return {
+    dados,
+    nome: (dados.nome || "").trim(),
+    email: (dados.email || "").trim() || null,
+    data_diagnostico: dados.data_diagnostico || null,
+  };
+}
+// Concluído, mas editado depois do envio ao Drive (tolerância p/ o próprio update da Edge Function).
+function diagDesatualizado(r) {
+  return !!(r && r.status === "concluido" && r.concluido_em && r.updated_at &&
+    new Date(r.updated_at) - new Date(r.concluido_em) > 5000);
+}
+async function concluirDiagnostico(id) {
+  const { data, error } = await sb.functions.invoke("diagnostico-drive", { body: { id } });
+  if (error) {
+    let msg = error.message;
+    try { const j = await error.context.json(); if (j && j.error) msg = j.error; } catch (_) { /* ignore */ }
+    throw new Error(msg);
+  }
+  if (!data || data.ok !== true) throw new Error((data && data.error) || "Sem resposta do servidor.");
+  return data;
+}
+
+function DiagCampo({ c, valor, onChange, disabled }) {
+  const v = valor == null ? "" : valor;
+  const set = (e) => onChange(c.k, e.target.value);
+  let input;
+  if (c.t === "textarea")
+    input = html`<textarea class=${cx(inputCls, "min-h-[96px]")} rows="4" value=${v} disabled=${disabled} onInput=${set}></textarea>`;
+  else if (c.t === "select")
+    input = html`<select class=${inputCls} value=${v} disabled=${disabled} onChange=${set}>
+      <option value="">—</option>
+      ${c.op.map((o) => html`<option value=${o}>${o}</option>`)}
+    </select>`;
+  else
+    input = html`<input type=${c.t} class=${inputCls} value=${v} disabled=${disabled} placeholder=${c.ph || ""}
+      min=${c.min} max=${c.max} step=${c.step} onInput=${set} />`;
+  return html`<div class=${c.full ? "sm:col-span-2" : ""}><${Field} label=${c.l} required=${c.req}>${input}<//></div>`;
+}
+
+function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
+  const canEdit = me.role !== "leitor";
+  const [dados, setDados] = useState(null);
+  const [row, setRow] = useState(null);
+  const [salvo, setSalvo] = useState("");
+  const [concluindo, setConcluindo] = useState(false);
+  const [erroConcluir, setErroConcluir] = useState("");
+  const idRef = useRef(id || null);
+  const dadosRef = useRef(null);
+  const timer = useRef(null);
+  const salvando = useRef(Promise.resolve());
+  const montado = useRef(true);
+
+  useEffect(() => {
+    if (id && id === idRef.current && dadosRef.current) return; // acabou de ser criado aqui
+    if (timer.current) salvarAgora(); // grava o pendente na linha antiga antes de trocar
+    idRef.current = id || null;
+    if (!id) {
+      const d = { data_diagnostico: hojeISO() };
+      dadosRef.current = d; setDados(d); setRow(null); setSalvo("");
+      return;
+    }
+    setDados(null);
+    fetchDiagnostico(id).then((r) => {
+      if (!r) { notify("Diagnóstico não encontrado.", "err"); onVoltar(); return; }
+      dadosRef.current = r.dados || {}; setDados(r.dados || {}); setRow(r);
+      setSalvo(r.updated_at ? "Rascunho salvo em " + fmtDate(r.updated_at, true) : "");
+    }).catch((e) => { notify(errMsg(e), "err"); onVoltar(); });
+  }, [id]);
+
+  async function salvarAgora() {
+    clearTimeout(timer.current); timer.current = null;
+    const alvo = idRef.current;
+    const linha = diagLinha(dadosRef.current || {});
+    const run = salvando.current.then(async () => {
+      if (alvo && alvo !== idRef.current) { // salvamento de uma linha anterior
+        const { error } = await sb.from("cs_diagnosticos").update(linha).eq("id", alvo);
+        if (error) throw error;
+        return;
+      }
+      setSalvo("Salvando…");
+      if (!idRef.current) {
+        const { data, error } = await sb.from("cs_diagnosticos").insert(linha).select().single();
+        if (error) throw error;
+        idRef.current = data.id; setRow(data);
+        if (montado.current) onCriado(data.id);
+      } else {
+        const { data, error } = await sb.from("cs_diagnosticos").update(linha).eq("id", idRef.current).select().single();
+        if (error) throw error;
+        setRow(data);
+      }
+      setSalvo("Rascunho salvo às " + new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }));
+    });
+    salvando.current = run.catch(() => {});
+    try { await run; return true; }
+    catch (e) { setSalvo("Erro ao salvar"); notify(errMsg(e), "err"); return false; }
+  }
+
+  // Salva o que estiver pendente ao sair da página.
+  useEffect(() => {
+    const aviso = (e) => { if (timer.current) { salvarAgora(); e.preventDefault(); e.returnValue = ""; } };
+    addEventListener("beforeunload", aviso);
+    return () => {
+      removeEventListener("beforeunload", aviso);
+      montado.current = false;
+      if (timer.current) salvarAgora();
+    };
+  }, []);
+
+  async function voltar() {
+    if (timer.current) await salvarAgora();
+    else await salvando.current;
+    onVoltar();
+  }
+
+  function mudar(k, v) {
+    const novo = { ...dadosRef.current, [k]: v };
+    dadosRef.current = novo; setDados(novo);
+    if (!canEdit) return;
+    setSalvo("Alterações não salvas…");
+    clearTimeout(timer.current);
+    timer.current = setTimeout(salvarAgora, 1200);
+  }
+
+  async function concluir() {
+    const d = dadosRef.current || {};
+    if (!(d.nome || "").trim() || !d.data_diagnostico) {
+      notify("Preencha o Nome completo e a Data do Diagnóstico antes de concluir.", "err");
+      return;
+    }
+    setErroConcluir("");
+    setConcluindo(true);
+    try {
+      if (!(await salvarAgora())) return;
+      await concluirDiagnostico(idRef.current);
+      await salvando.current;
+      const atual = await fetchDiagnostico(idRef.current);
+      if (atual) setRow(atual);
+      notify("Planilha salva no Drive.", "ok");
+    } catch (e) {
+      setErroConcluir(errMsg(e));
+    } finally { setConcluindo(false); }
+  }
+
+  async function excluir() {
+    if (!confirm("Excluir este diagnóstico do OS? A planilha no Drive (se houver) não é apagada.")) return;
+    clearTimeout(timer.current); timer.current = null;
+    await salvando.current;
+    if (!idRef.current) { onVoltar(); return; }
+    const { error } = await sb.from("cs_diagnosticos").delete().eq("id", idRef.current);
+    if (error) { notify(errMsg(error), "err"); return; }
+    notify("Diagnóstico excluído.", "ok");
+    onVoltar();
+  }
+
+  if (!dados) return html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
+  const concluido = row && row.status === "concluido";
+
+  return html`
+    <div class="mt-5">
+      <div class="flex flex-wrap items-center gap-3">
+        <button type="button" class="text-sm text-muted hover:text-ink" onClick=${voltar}>← Voltar para a lista</button>
+        ${concluido ? html`<${Badge} class=${PILL_OK}>Concluído<//>` : html`<${Badge} class=${PILL_WARN}>Rascunho<//>`}
+        ${diagDesatualizado(row) ? html`<${Badge} class=${PILL_ERR}>Alterações não enviadas ao Drive<//>` : null}
+        <span class="ml-auto text-xs text-muted">${canEdit ? salvo : "Somente leitura"}</span>
+      </div>
+
+      ${DIAG_SECOES.map((s) => html`
+        <section class="mt-4 rounded-2xl border border-line bg-card p-5">
+          <h2 class="text-sm font-semibold uppercase tracking-wider text-muted">${s.titulo}</h2>
+          <div class="mt-3 grid gap-4 sm:grid-cols-2">
+            ${s.campos.map((c) => html`<${DiagCampo} key=${c.k} c=${c} valor=${dados[c.k]} onChange=${mudar} disabled=${!canEdit} />`)}
+          </div>
+        </section>`)}
+
+      <div class="mt-5 rounded-2xl border border-line bg-card p-5">
+        ${row && row.drive_url ? html`
+          <div class="mb-3 text-sm text-ink">Planilha no Drive:
+            <a class="font-medium text-brand hover:underline" href=${row.drive_url} target="_blank" rel="noopener">abrir planilha ↗</a></div>` : null}
+        ${erroConcluir ? html`<div class="mb-3 rounded-lg bg-[#faefec] px-3 py-2 text-sm text-[#a44b43]">${erroConcluir}</div>` : null}
+        <div class="flex flex-wrap items-center gap-2">
+          ${canEdit ? html`
+            <${Btn} type="button" loading=${concluindo} onClick=${concluir}>
+              ${concluido ? "Atualizar planilha no Drive" : "CONCLUIR DIAGNÓSTICO"}
+            <//>
+            <${Btn} variant="danger" type="button" class="ml-auto" onClick=${excluir}>Excluir<//>` : null}
+        </div>
+        <p class="mt-2 text-xs text-muted">Gera a planilha “Nome completo - DD/MM/AAAA” na pasta 0.1 Diagnóstico Inicial [Marcela]. Concluir de novo atualiza o mesmo arquivo.</p>
+      </div>
+    </div>`;
+}
+
+function DiagnosticoPage({ me, query }) {
+  const id = query && query.id;
+  const novo = query && query.novo;
+  const [lista, setLista] = useState(null);
+  const [busca, setBusca] = useState("");
+  const canEdit = me.role !== "leitor";
+
+  async function recarregar() {
+    try { setLista(await fetchDiagnosticos()); }
+    catch (e) { notify(errMsg(e), "err"); setLista([]); }
+  }
+  useEffect(() => { if (!id && !novo) recarregar(); }, [id, novo]);
+
+  const filtrados = useMemo(() => {
+    const q = busca.trim().toLowerCase();
+    return (lista || []).filter((d) => !q || (d.nome || "").toLowerCase().includes(q) || (d.email || "").toLowerCase().includes(q));
+  }, [lista, busca]);
+
+  const cabecalho = html`
+    <div class="text-sm text-muted">🤝 CS / Suporte</div>
+    <h1 class="mt-1 text-2xl font-semibold text-ink">Diagnóstico do Mentorado</h1>
+    <p class="mt-1 text-sm text-muted">Preencha durante ou depois da call. O rascunho é salvo sozinho; ao concluir, a planilha vai para o Drive.</p>`;
+
+  if (id || novo) return html`<div>${cabecalho}
+    <${DiagnosticoForm} key=${id || "novo"} id=${id} me=${me}
+      onVoltar=${() => go("/cs/diagnostico")}
+      onCriado=${(nid) => history.replaceState(null, "", "#/cs/diagnostico?id=" + nid)} /></div>`;
+
+  return html`
+    <div>
+      ${cabecalho}
+      ${canEdit ? html`<div class="mt-5"><${Btn} type="button" onClick=${() => go("/cs/diagnostico?novo=1")}>＋ Novo diagnóstico<//></div>` : null}
+      ${lista === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
+        <div class="mt-6 flex flex-wrap items-center gap-2">
+          <input class=${cx(inputCls, "max-w-xs")} placeholder="Buscar por nome ou email" value=${busca} onInput=${(e) => setBusca(e.target.value)} />
+          <span class="ml-auto text-xs text-muted">${nf(filtrados.length)} de ${nf(lista.length)}</span>
+        </div>
+        <div class="mt-3 overflow-x-auto rounded-2xl border border-line bg-card">
+          <table class="w-full min-w-[640px] text-sm">
+            <thead>
+              <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
+                <th class="px-4 py-2.5">Mentorada</th>
+                <th class="px-4 py-2.5">Data do diagnóstico</th>
+                <th class="px-4 py-2.5">Status</th>
+                <th class="px-4 py-2.5">Drive</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filtrados.length === 0 ? html`
+                <tr><td colspan="4" class="px-4 py-8 text-center text-sm text-muted">Nenhum diagnóstico ainda.</td></tr>` :
+                filtrados.map((d) => html`
+                  <tr key=${d.id} class="border-b border-line last:border-0 hover:bg-black/[0.02]">
+                    <td class="px-4 py-2.5">
+                      <a href=${"#/cs/diagnostico?id=" + d.id} class="font-medium text-ink hover:text-brand hover:underline">${d.nome || "(sem nome)"}</a>
+                      <div class="text-xs text-muted">${d.email || "—"}</div>
+                    </td>
+                    <td class="px-4 py-2.5 text-xs text-muted">${d.data_diagnostico ? fmtDataISO(d.data_diagnostico) : "—"}</td>
+                    <td class="px-4 py-2.5">${d.status === "concluido"
+                      ? html`<${Badge} class=${PILL_OK}>Concluído<//>`
+                      : html`<${Badge} class=${PILL_WARN}>Rascunho<//>`}
+                      ${diagDesatualizado(d) ? html`<div class="mt-1 text-xs text-[#a44b43]">alterações não enviadas ao Drive</div>` : null}</td>
+                    <td class="px-4 py-2.5 text-xs">${d.drive_url
+                      ? html`<a class="text-brand hover:underline" href=${d.drive_url} target="_blank" rel="noopener">Abrir no Drive ↗</a>`
+                      : html`<span class="text-muted">—</span>`}</td>
+                  </tr>`)}
+            </tbody>
+          </table>
+        </div>`}
+    </div>`;
+}
+
 /* ============================ Conteúdo · Métricas Instagram ============================ */
 
 const nf = (n) => (n == null ? "—" : Number(n).toLocaleString("pt-BR"));
@@ -5518,6 +5851,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
   if (p0 === "cs" && p1 === "faq") return html`<${FaqPage} me=${me} />`;
   if (p0 === "cs" && p1 === "envios-livros") return html`<${EnviosLivrosPage} me=${me} />`;
+  if (p0 === "cs" && p1 === "diagnostico") return html`<${DiagnosticoPage} me=${me} query=${route.query} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
   if (p0 === "cs" && p1 === "chat-cademi") return html`<${ChatCademiPage} />`;
   if (p0 === "pedagogico" && p1 === "aulas-praticas") return html`<${AulasPraticasPage} />`;
