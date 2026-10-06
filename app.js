@@ -2935,7 +2935,7 @@ const DIAG_SECOES = [
   ]},
   { titulo: "Trilha e rotina", campos: [
     { k: "trilha", l: "Trilha Inicial", t: "select", op: ["TRILHA 1", "TRILHA 2", "TRILHA 3", "TRILHA 4", "TRILHA 5"] },
-    { k: "trilha_obs", l: "Observação sobre a trilha", t: "text" },
+    { k: "trilha_obs", l: "Observação sobre a trilha (aparece no PDF da aluna)", t: "text" },
     { k: "rotina_trilha", l: "Rotina: Trilha", t: "select", op: DIAG_ROTINA },
     { k: "rotina_arena", l: "Rotina: Arena", t: "select", op: DIAG_ROTINA },
     { k: "arena_nivel", l: "Nível da Arena (um ou mais)", t: "multi", op: ["RC", "Básico", "Inter", "Avançado"] },
@@ -3003,6 +3003,215 @@ async function concluirDiagnostico(id) {
   }
   if (!data || data.ok !== true) throw new Error((data && data.error) || "Sem resposta do servidor.");
   return data;
+}
+
+// ---- PDF "Plano de Estudos" para a aluna (Trilha e Rotina + Metas) ----
+// pdfmake (texto vetorial, A4) carregado sob demanda pelo cdnjs; fonte Montserrat
+// (TTF do repositório oficial via jsDelivr), com Roboto do pdfmake como reserva.
+const PDFMAKE_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.10/pdfmake.min.js";
+const PDFMAKE_VFS_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.10/vfs_fonts.min.js";
+const MONTSERRAT_URL = "https://cdn.jsdelivr.net/gh/JulietaUla/Montserrat@v7.222/fonts/ttf/Montserrat-";
+let pdfMakePronto = null;
+
+function carregarScript(src) {
+  return new Promise((ok, falha) => {
+    const s = document.createElement("script");
+    s.src = src; s.async = true;
+    s.onload = ok;
+    s.onerror = () => falha(new Error("Não foi possível carregar " + src.split("/").pop()));
+    document.head.appendChild(s);
+  });
+}
+function bufferBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+async function carregarPdfMake() {
+  if (!pdfMakePronto) {
+    pdfMakePronto = (async () => {
+      if (!window.pdfMake) await carregarScript(PDFMAKE_URL);
+      const pm = window.pdfMake;
+      try {
+        const pesos = { normal: "Regular", bold: "Bold", italics: "Italic", bolditalics: "BoldItalic" };
+        const vfs = {};
+        await Promise.all(Object.values(pesos).map(async (p) => {
+          const r = await fetch(MONTSERRAT_URL + p + ".ttf");
+          if (!r.ok) throw new Error("fonte " + p);
+          vfs["Montserrat-" + p + ".ttf"] = bufferBase64(await r.arrayBuffer());
+        }));
+        pm.vfs = { ...(pm.vfs || {}), ...vfs };
+        pm.fonts = { ...(pm.fonts || {}), Montserrat: Object.fromEntries(Object.entries(pesos).map(([k, p]) => [k, "Montserrat-" + p + ".ttf"])) };
+        return { pm, fonte: "Montserrat" };
+      } catch (_) {
+        if (!pm.vfs || !pm.vfs["Roboto-Regular.ttf"]) await carregarScript(PDFMAKE_VFS_URL);
+        return { pm: window.pdfMake, fonte: "Roboto" };
+      }
+    })();
+    pdfMakePronto.catch(() => { pdfMakePronto = null; });
+  }
+  return pdfMakePronto;
+}
+
+function diagDataBR(iso) {
+  const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : "";
+}
+function diagJunta(v) {
+  const a = diagArr(v).map((x) => String(x).trim()).filter(Boolean);
+  return a.length <= 1 ? (a[0] || "") : a.slice(0, -1).join(", ") + " e " + a[a.length - 1];
+}
+
+function montarPlanoAluno(d0, fonte) {
+  const d = diagNormalizar(d0);
+  const C = { marca: "#ea5167", marcaEscura: "#c23a52", marcaClara: "#fbe7e4", creme: "#f6f3ee",
+    borda: "#e8e1d6", texto: "#39352f", suave: "#8f887d" };
+  const nome = (d.nome || "").trim() || "Aluna";
+  const dataDiag = diagDataBR(d.data_diagnostico);
+  const v = (x) => ((x == null ? "" : String(x)).trim() || "—");
+
+  const titulo = (t) => ({
+    headlineLevel: 1,
+    stack: [
+      { text: t.toUpperCase(), fontSize: 10, bold: true, color: C.marcaEscura, characterSpacing: 1.4, margin: [0, 16, 0, 4] },
+      { canvas: [{ type: "line", x1: 0, y1: 0, x2: 499, y2: 0, lineWidth: 1, lineColor: C.marca }], margin: [0, 0, 0, 8] },
+    ],
+  });
+  const tabelaSuave = {
+    hLineWidth: () => 0.6, vLineWidth: () => 0,
+    hLineColor: () => C.borda,
+    paddingLeft: () => 10, paddingRight: () => 10, paddingTop: () => 6, paddingBottom: () => 6,
+  };
+
+  // Rotina
+  const horarios = diagJunta(d.horario_pratica);
+  const niveis = diagJunta(d.arena_nivel);
+  const praticaDet = d.rotina_pratica === "Sim" && horarios ? "Horário: " + horarios : "";
+  const rotina = [
+    ["Trilha", v(d.rotina_trilha), ""],
+    ["Arena de Conversação", v(d.rotina_arena), niveis ? (diagArr(d.arena_nivel).length > 1 ? "Níveis: " : "Nível: ") + niveis : ""],
+    ["Fluent Labs", v(d.rotina_labs), ""],
+    ["Vídeo Semanal", v(d.rotina_video), ""],
+    ["Sessão Prática", v(d.rotina_pratica), praticaDet],
+  ];
+  const corpoRotina = [
+    ["Atividade", "Frequência", "Detalhes"].map((t) => ({ text: t, bold: true, fontSize: 9, color: C.marcaEscura, fillColor: C.marcaClara })),
+    ...rotina.map((r, i) => [
+      { text: r[0], bold: true, fillColor: i % 2 ? C.creme : null },
+      { text: r[1], color: r[1] === "—" ? C.suave : C.texto, fillColor: i % 2 ? C.creme : null },
+      { text: r[2] || "—", color: r[2] ? C.texto : C.suave, fillColor: i % 2 ? C.creme : null },
+    ]),
+  ];
+
+  // Metas
+  const metas = (d.metas || []).filter((m) => m && ((m.descricao || "").trim() || m.data));
+  const tabelaMetas = (lista, inicio, linhaTopo) => ({
+    table: {
+      widths: [26, "*", 78], dontBreakRows: true,
+      body: lista.map((m, j) => { const i = inicio + j; return [
+        { text: String(i + 1), bold: true, color: "#ffffff", fillColor: C.marca, alignment: "center", fontSize: 11 },
+        { text: (m.descricao || "").trim() || "—", fontSize: 10.5 },
+        { stack: [{ text: "até", fontSize: 7.5, color: C.suave }, { text: diagDataBR(m.data) || "—", bold: true, color: C.marcaEscura }], alignment: "right" },
+      ]; }),
+    },
+    layout: { ...tabelaSuave, hLineWidth: (i, node) => (i === node.table.body.length ? 0 : i === 0 ? (linhaTopo ? 0.6 : 0) : 0.6),
+      paddingTop: () => 7, paddingBottom: () => 7 },
+  });
+
+  const incentivo = {
+    margin: [0, 20, 0, 0],
+    table: { widths: ["*"], body: [[{
+      fillColor: C.marcaClara, margin: [14, 10, 14, 10],
+      stack: [
+        { text: "Constância vale mais do que intensidade.", bold: true, color: C.marcaEscura, fontSize: 11 },
+        { text: "Siga o seu plano no seu ritmo, celebre cada avanço e conte com a gente em cada etapa. A fluência é construída dia após dia, e você não está sozinha nessa jornada.",
+          fontSize: 9.5, margin: [0, 4, 0, 0], lineHeight: 1.25 },
+      ],
+    }]] },
+    layout: { hLineWidth: () => 0, vLineWidth: (i) => (i === 0 ? 3 : 0), vLineColor: () => C.marca },
+  };
+
+  const content = [
+    {
+      table: { widths: ["*"], body: [[{
+        fillColor: C.marca, margin: [22, 16, 22, 16],
+        stack: [
+          { text: "MENTORIA FLUENT MIND · TIA DO INGLÊS", color: "#ffffff", fontSize: 8.5, bold: true, characterSpacing: 1.6 },
+          { text: "Seu Plano de Estudos", color: "#ffffff", fontSize: 24, bold: true, margin: [0, 6, 0, 4] },
+          { text: nome, color: "#ffffff", fontSize: 13, bold: true },
+          dataDiag ? { text: "Diagnóstico de " + dataDiag, color: "#ffe3e7", fontSize: 9.5, margin: [0, 3, 0, 0] } : null,
+        ].filter(Boolean),
+      }]] },
+      layout: "noBorders",
+    },
+
+    titulo("Sua trilha"),
+    {
+      unbreakable: true,
+      table: { widths: ["*"], body: [[{
+        fillColor: C.creme, margin: [14, 10, 14, 10],
+        stack: [
+          { text: "Trilha inicial", fontSize: 8.5, color: C.suave, bold: true, characterSpacing: 0.8 },
+          { text: v(d.trilha), fontSize: 20, bold: true, color: C.marca, margin: [0, 2, 0, 0] },
+          (d.trilha_obs || "").trim() ? { text: d.trilha_obs.trim(), fontSize: 10, margin: [0, 6, 0, 0] } : null,
+        ].filter(Boolean),
+      }]] },
+      layout: { hLineWidth: () => 0, vLineWidth: (i) => (i === 0 ? 3 : 0), vLineColor: () => C.marca },
+    },
+
+    titulo("Sua rotina"),
+    { table: { widths: [150, 110, "*"], headerRows: 1, dontBreakRows: true, body: corpoRotina }, layout: tabelaSuave },
+
+    titulo("Suas metas"),
+    ...(metas.length > 1 ? [tabelaMetas(metas.slice(0, -1), 0, false)] : []),
+    // A última meta fica junto da mensagem final, para ela nunca ficar sozinha numa página.
+    {
+      unbreakable: true,
+      stack: [
+        metas.length ? tabelaMetas(metas.slice(-1), metas.length - 1, metas.length > 1)
+          : { text: "As suas metas serão definidas junto com a sua mentora.", color: C.suave, italics: true },
+        incentivo,
+      ],
+    },
+  ];
+  return montarDocPlano(content, nome, fonte, C);
+}
+
+function montarDocPlano(content, nome, fonte, C) {
+  return {
+    pageSize: "A4", pageOrientation: "portrait",
+    pageMargins: [48, 40, 48, 52],
+    info: { title: "Plano de Estudos - " + nome, author: "Mentoria Fluent Mind · Tia do Inglês" },
+    defaultStyle: { font: fonte, fontSize: 10, color: C.texto, lineHeight: 1.15 },
+    background: () => ({ canvas: [{ type: "rect", x: 0, y: 0, w: 595.28, h: 6, color: C.marca }] }),
+    footer: (pagina, total) => ({
+      margin: [48, 18, 48, 0],
+      columns: [
+        { text: "Mentoria Fluent Mind · Tia do Inglês", fontSize: 7.5, color: C.suave },
+        { text: total > 1 ? `Página ${pagina} de ${total}` : "", fontSize: 7.5, color: C.suave, alignment: "right" },
+      ],
+    }),
+    // Não deixa título de seção sozinho no pé da página.
+    pageBreakBefore: (no, seguintes) => no.headlineLevel === 1 && seguintes.length < 3,
+    content,
+  };
+}
+async function baixarPlanoAluno(dados) {
+  const { pm, fonte } = await carregarPdfMake();
+  const nome = ((dados && dados.nome) || "").trim() || "Aluna";
+  const base = ("Plano de Estudos - " + nome).replace(/[\x00-\x1f]/g, "").replace(/[\\/:*?"<>|]+/g, " ")
+    .replace(/\s+/g, " ").trim().slice(0, 120).replace(/[.\s]+$/, "");
+  const arquivo = base + ".pdf";
+  // No pdfmake 0.2 um erro na montagem vira rejeição solta: sem timeout o botão giraria para sempre.
+  let timer;
+  await Promise.race([
+    new Promise((ok, falha) => {
+      try { pm.createPdf(montarPlanoAluno(dados, fonte)).download(arquivo, ok); } catch (e) { falha(e); }
+    }),
+    new Promise((_, falha) => { timer = setTimeout(() => falha(new Error("tempo esgotado ao gerar o PDF.")), 20000); }),
+  ]).finally(() => clearTimeout(timer));
+  return arquivo;
 }
 
 function DiagMetas({ metas, onChange, rascunho, setRascunho, disabled }) {
@@ -3088,6 +3297,7 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
   const [concluindo, setConcluindo] = useState(false);
   const [erroConcluir, setErroConcluir] = useState("");
   const [metaRascunho, setMetaRascunho] = useState({ descricao: "", data: "" });
+  const [gerandoPdf, setGerandoPdf] = useState(false);
   const idRef = useRef(id || null);
   const dadosRef = useRef(null);
   const timer = useRef(null);
@@ -3192,6 +3402,20 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
     } finally { setConcluindo(false); }
   }
 
+  async function baixarPdf() {
+    if ((metaRascunho.descricao || "").trim()) {
+      notify("Há uma meta digitada que ainda não foi inserida: clique em INSERIR (ou apague o texto) antes de baixar o PDF.", "err");
+      return;
+    }
+    setGerandoPdf(true);
+    try {
+      if (canEdit && timer.current) await salvarAgora();
+      const arquivo = await baixarPlanoAluno(dadosRef.current || {});
+      notify("PDF baixado: " + arquivo, "ok");
+    } catch (e) { notify("Não foi possível gerar o PDF: " + errMsg(e), "err"); }
+    finally { setGerandoPdf(false); }
+  }
+
   async function excluir() {
     if (!confirm("Excluir este diagnóstico do OS? A planilha no Drive (se houver) não é apagada.")) return;
     clearTimeout(timer.current); timer.current = null;
@@ -3235,7 +3459,13 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
           ${canEdit ? html`
             <${Btn} type="button" loading=${concluindo} onClick=${concluir}>
               ${concluido ? "Atualizar planilha no Drive" : "CONCLUIR DIAGNÓSTICO"}
-            <//>
+            <//>` : null}
+          ${concluido ? html`
+            <${Btn} variant="azul" type="button" loading=${gerandoPdf} onClick=${baixarPdf}
+              class="bg-[#2f5d8a] text-white shadow-sm hover:bg-[#244a6f]" title="PDF com Trilha, Rotina e Metas para entregar à aluna">
+              BAIXAR PARA ALUNO
+            <//>` : null}
+          ${canEdit ? html`
             <${Btn} variant="danger" type="button" class="ml-auto" onClick=${excluir}>Excluir<//>` : null}
         </div>
         <p class="mt-2 text-xs text-muted">Gera a planilha “Nome completo - DD/MM/AAAA” na pasta 0.1 Diagnóstico Inicial [Marcela]. Concluir de novo reconstrói a aba “Diagnóstico” do mesmo arquivo com o conteúdo do OS (edições feitas direto nessa aba no Drive são substituídas).</p>
@@ -3248,7 +3478,20 @@ function DiagnosticoPage({ me, query }) {
   const novo = query && query.novo;
   const [lista, setLista] = useState(null);
   const [busca, setBusca] = useState("");
+  const [baixandoId, setBaixandoId] = useState(null);
   const canEdit = me.role !== "leitor";
+
+  async function baixarDaLista(d) {
+    setBaixandoId(d.id);
+    try {
+      const ficha = await fetchDiagnostico(d.id);
+      if (!ficha) throw new Error("Diagnóstico não encontrado.");
+      const arquivo = await baixarPlanoAluno({ ...diagNormalizar(ficha.dados), nome: ficha.nome || (ficha.dados || {}).nome,
+        data_diagnostico: ficha.data_diagnostico || (ficha.dados || {}).data_diagnostico });
+      notify("PDF baixado: " + arquivo, "ok");
+    } catch (e) { notify("Não foi possível gerar o PDF: " + errMsg(e), "err"); }
+    finally { setBaixandoId(null); }
+  }
 
   async function recarregar() {
     try { setLista(await fetchDiagnosticos()); }
@@ -3287,7 +3530,7 @@ function DiagnosticoPage({ me, query }) {
                 <th class="px-4 py-2.5">Mentorada</th>
                 <th class="px-4 py-2.5">Data do diagnóstico</th>
                 <th class="px-4 py-2.5">Status</th>
-                <th class="px-4 py-2.5">Drive</th>
+                <th class="px-4 py-2.5">Drive / Aluna</th>
               </tr>
             </thead>
             <tbody>
@@ -3304,9 +3547,18 @@ function DiagnosticoPage({ me, query }) {
                       ? html`<${Badge} class=${PILL_OK}>Concluído<//>`
                       : html`<${Badge} class=${PILL_WARN}>Rascunho<//>`}
                       ${diagDesatualizado(d) ? html`<div class="mt-1 text-xs text-[#a44b43]">alterações não enviadas ao Drive</div>` : null}</td>
-                    <td class="px-4 py-2.5 text-xs">${d.drive_url
-                      ? html`<a class="text-brand hover:underline" href=${d.drive_url} target="_blank" rel="noopener">Abrir no Drive ↗</a>`
-                      : html`<span class="text-muted">—</span>`}</td>
+                    <td class="px-4 py-2.5 text-xs">
+                      <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                        ${d.drive_url
+                          ? html`<a class="text-brand hover:underline" href=${d.drive_url} target="_blank" rel="noopener">Abrir no Drive ↗</a>`
+                          : html`<span class="text-muted">—</span>`}
+                        ${d.status === "concluido" ? html`
+                          <button type="button" disabled=${!!baixandoId} onClick=${() => baixarDaLista(d)}
+                            class="inline-flex items-center gap-1.5 rounded-md bg-[#2f5d8a] px-2.5 py-1 text-[11px] font-semibold tracking-wide text-white hover:bg-[#244a6f] disabled:opacity-60">
+                            ${baixandoId === d.id ? html`<span class="spinner"></span>` : null}BAIXAR PARA ALUNO
+                          </button>` : null}
+                      </div>
+                    </td>
                   </tr>`)}
             </tbody>
           </table>
