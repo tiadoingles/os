@@ -91,7 +91,7 @@ const NAV = [
         ["Pesquisa Método/Decole/Memorização", "https://docs.google.com/spreadsheets/d/1NMxKjDJx5j0G3X5mVCBgWTzMWDTbJsQQ-HEvk6yPTL4/edit"],
       ] },
     { slug: "mentorados", nome: "Lista de Mentorados",
-      desc: "Lista puxada da planilha de mentorados, sempre atualizada.",
+      desc: "Lista da planilha Lista de Mentorados [Oficial] (aba Mentoria 2026), com busca, filtros e WhatsApp.",
       links: [["Planilha de Mentorados", "https://docs.google.com/spreadsheets/d/1CZ4qfhjEhrxtnTMBITRjOUy9o_I8LEPRoD6nuSrLdvs/edit?gid=1320664660"]] },
     { slug: "nps", nome: "NPS", desc: "Acompanhamento do NPS das alunas ao longo do tempo." },
     { slug: "presenca", nome: "Presença nas Práticas",
@@ -1732,7 +1732,7 @@ function SyncRow({ row, onDone }) {
   async function sincronizarAgora() {
     setBusy(true);
     try {
-      const fn = row.chave === "metas-planilha" ? "metas-sheet-sync" : "sync";
+      const fn = { "metas-planilha": "metas-sheet-sync", "mentorados-planilha": "mentorados-sheet" }[row.chave] || "sync";
       const { data, error } = await sb.functions.invoke(fn, { body: { op: row.chave, manual: true } });
       if (error) {
         let msg = error.message;
@@ -3894,6 +3894,252 @@ function MetasPage({ me }) {
 
       ${modal ? html`<${MetaManualModal} meta=${modal.meta} diags=${diags} onClose=${() => setModal(null)}
         onSalvo=${() => { setModal(null); mudou(); }} />` : null}
+    </div>`;
+}
+
+
+/* ============================ CS · Lista de Mentorados ============================ */
+// Cache somente leitura (cs_mentorados) da planilha "Lista de Mentorados [Oficial]",
+// aba "Mentoria 2026". A Edge Function "mentorados-sheet" lê a planilha e troca o cache:
+// ao abrir a aba (se o último sync tiver mais de 10 min), pelo botão e por cron diário.
+
+const PLANILHA_MENTORADOS_URL = "https://docs.google.com/spreadsheets/d/1CZ4qfhjEhrxtnTMBITRjOUy9o_I8LEPRoD6nuSrLdvs/edit?gid=1320664660";
+const SEM_GUARDIAO = "__sem__";
+
+async function fetchMentorados() {
+  const { data, error } = await sb.from("cs_mentorados").select("*").order("nome").range(0, 4999);
+  if (error) throw error;
+  return data || [];
+}
+async function fetchStatusPlanilhaMentorados() {
+  const { data } = await sb.from("sync_status").select("*").eq("chave", "mentorados-planilha").maybeSingle();
+  return data || null;
+}
+async function sincronizarMentorados(force) {
+  const { data, error } = await sb.functions.invoke("mentorados-sheet", { body: { force: !!force } });
+  if (error) {
+    let msg = error.message;
+    try { const j = await error.context.json(); if (j && j.error) msg = j.error; } catch (_) { /* ignore */ }
+    return { ok: false, error: msg };
+  }
+  return data || { ok: false, error: "sem resposta" };
+}
+
+const semAcentoMin = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+
+// "(11) 99219-4608 / 11999..." -> links de WhatsApp (55 quando faltar DDI em número brasileiro).
+function linksWhats(tel) {
+  return String(tel || "").split(/[\/;,]| ou /).map((p) => p.trim()).filter(Boolean).map((p) => {
+    let dig = p.replace(/\D/g, "");
+    if (dig.length === 10 || dig.length === 11) dig = "55" + dig;
+    return { texto: p, url: dig.length >= 10 ? "https://wa.me/" + dig : null };
+  });
+}
+
+function pillStatusMentorado(st) {
+  const s = semAcentoMin(st);
+  if (!s) return PILL_NEUTRAL;
+  if (s.includes("expirad") || s.includes("cancel")) return PILL_ERR;
+  if (s.includes("30 dias")) return "bg-[#f7e1cc] text-[#9a5a1c]";
+  if (s.includes("60 dias")) return PILL_WARN;
+  if (s.includes("ativo")) return PILL_OK;
+  return PILL_NEUTRAL;
+}
+
+function MentoradosPage() {
+  const [lista, setLista] = useState(null);
+  const [status, setStatus] = useState(null);
+  const [diagPorEmail, setDiagPorEmail] = useState({});
+  const [busca, setBusca] = useState("");
+  const [fStatus, setFStatus] = useState("");
+  const [fGuardiao, setFGuardiao] = useState("");
+  const [ordem, setOrdem] = useState("nome");
+  const [abertas, setAbertas] = useState({});
+  const [sincronizando, setSincronizando] = useState(false);
+
+  async function carregar() {
+    const [l, s] = await Promise.all([fetchMentorados(), fetchStatusPlanilhaMentorados()]);
+    setLista(l); setStatus(s);
+  }
+  async function atualizar(force) {
+    setSincronizando(true);
+    const r = await sincronizarMentorados(force);
+    try { await carregar(); } catch (e) { notify(errMsg(e), "err"); }
+    setSincronizando(false);
+    if (force) {
+      if (r.ok && r.pulado) notify("A lista acabou de ser atualizada; tente de novo em alguns segundos.", "info");
+      else if (r.ok) notify("Lista atualizada da planilha.", "ok");
+      else notify(r.error || "Não foi possível ler a planilha.", "err");
+    }
+  }
+  useEffect(() => {
+    carregar().catch((e) => { notify(errMsg(e), "err"); setLista([]); })
+      .then(() => atualizar(false)); // o servidor pula se o cache tiver menos de 10 min
+    sb.from("cs_diagnosticos").select("id, email").then(({ data, error }) => {
+      if (error) return; // atalho opcional: sem ele a lista funciona igual
+      const m = {};
+      (data || []).forEach((d) => { const e = (d.email || "").trim().toLowerCase(); if (e) m[e] = d.id; });
+      setDiagPorEmail(m);
+    });
+  }, []);
+
+  const opcoesStatus = useMemo(() => [...new Set((lista || []).map((m) => m.status).filter(Boolean))].sort(), [lista]);
+  const opcoesGuardiao = useMemo(() => [...new Set((lista || []).map((m) => m.guardiao).filter(Boolean))].sort(), [lista]);
+
+  const filtrados = useMemo(() => {
+    const q = semAcentoMin(busca);
+    const qDig = busca.replace(/\D/g, "");
+    let ls = (lista || []).filter((m) => {
+      if (fStatus && m.status !== fStatus) return false;
+      if (fGuardiao === SEM_GUARDIAO ? !!m.guardiao : fGuardiao && m.guardiao !== fGuardiao) return false;
+      if (!q) return true;
+      if (semAcentoMin(m.nome).includes(q) || semAcentoMin(m.email).includes(q)) return true;
+      return qDig.length >= 3 && (m.telefone_digitos || "").includes(qDig);
+    });
+    const porNome = (a, b) => semAcentoMin(a.nome).localeCompare(semAcentoMin(b.nome));
+    const porFinal = (dir) => (a, b) => {
+      if (!a.data_final && !b.data_final) return porNome(a, b);
+      if (!a.data_final) return 1;
+      if (!b.data_final) return -1;
+      return dir * a.data_final.localeCompare(b.data_final) || porNome(a, b);
+    };
+    ls = [...ls].sort(ordem === "final-asc" ? porFinal(1) : ordem === "final-desc" ? porFinal(-1) : ordem === "nome-desc" ? (a, b) => porNome(b, a) : porNome);
+    return ls;
+  }, [lista, busca, fStatus, fGuardiao, ordem]);
+
+  const dataBR = (iso, txt) => (iso ? iso.split("-").reverse().join("/") : txt || "—");
+  const temFiltro = busca || fStatus || fGuardiao;
+  const erro = status && status.ultimo_status === "erro";
+  const atualizadoEm = (() => {
+    if (!status || !status.ultima_execucao_em || status.ultimo_status !== "ok") return null;
+    const d = new Date(status.ultima_execucao_em);
+    const hora = d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+    return isoDia(d) === hojeISO() ? "Atualizado às " + hora
+      : "Atualizado em " + d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" }) + " às " + hora;
+  })();
+
+  function ordenarPor(campo) {
+    if (campo === "nome") setOrdem(ordem === "nome" ? "nome-desc" : "nome");
+    else setOrdem(ordem === "final-asc" ? "final-desc" : "final-asc");
+  }
+  const seta = (campo) => (campo === "nome" ? (ordem === "nome" ? " ↑" : ordem === "nome-desc" ? " ↓" : "")
+    : (ordem === "final-asc" ? " ↑" : ordem === "final-desc" ? " ↓" : ""));
+
+  const telefones = (m) => {
+    const ls = linksWhats(m.telefone);
+    if (!ls.length) return html`<span class="text-muted">—</span>`;
+    return ls.map((t, i) => html`${i ? html`<br />` : null}${t.url
+      ? html`<a class="text-[#3d7a45] hover:underline" href=${t.url} target="_blank" rel="noopener" title="Abrir no WhatsApp">${t.texto}</a>`
+      : t.texto}`);
+  };
+  const obs = (m) => {
+    if (!m.observacoes) return html`<span class="text-muted">—</span>`;
+    const longa = m.observacoes.length > 60;
+    const aberta = abertas[m.linha];
+    return html`<span class=${cx("whitespace-pre-line", !aberta && longa && "line-clamp-2")}>${m.observacoes}</span>
+      ${longa ? html`<button type="button" class="block text-[11px] text-brand hover:underline"
+        onClick=${() => setAbertas((x) => ({ ...x, [m.linha]: !x[m.linha] }))}>${aberta ? "ver menos" : "ver mais"}</button>` : null}`;
+  };
+  const diag = (m) => {
+    const id = diagPorEmail[(m.email || "").toLowerCase()];
+    return id ? html`<a class="text-xs text-brand hover:underline" href=${"#/cs/diagnostico?id=" + id}>Diagnóstico</a>` : null;
+  };
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">🤝 CS / Suporte</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">Lista de Mentorados</h1>
+      <p class="mt-1 text-sm text-muted">Da planilha Lista de Mentorados [Oficial], aba Mentoria 2026 (somente leitura).
+        <a class="text-brand hover:underline" href=${PLANILHA_MENTORADOS_URL} target="_blank" rel="noopener">Abrir planilha ↗</a></p>
+
+      ${erro ? html`
+        <div class="mt-4 rounded-lg border border-[#efe0b5] bg-[#faf5e4] px-3 py-2 text-sm text-[#7c6a2a]">
+          ${String(status.ultimo_detalhe || "Não foi possível ler a planilha.").replace(/\.$/, "")}.
+          ${lista && lista.length ? " Mostrando a última versão salva no OS." : ""}
+        </div>` : null}
+
+      ${lista === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
+        <div class="mt-5 flex flex-wrap items-center gap-2">
+          <input class=${cx(inputCls, "max-w-sm")} placeholder="Buscar por nome, e-mail ou telefone" value=${busca} onInput=${(e) => setBusca(e.target.value)} />
+          <select class=${cx(inputCls, "w-auto")} value=${fStatus} onChange=${(e) => setFStatus(e.target.value)} aria-label="Status">
+            <option value="">Todos os status</option>
+            ${opcoesStatus.map((s) => html`<option value=${s}>${s}</option>`)}
+          </select>
+          <select class=${cx(inputCls, "w-auto")} value=${fGuardiao} onChange=${(e) => setFGuardiao(e.target.value)} aria-label="Guardião">
+            <option value="">Todos os guardiões</option>
+            ${opcoesGuardiao.map((g) => html`<option value=${g}>${g}</option>`)}
+            <option value=${SEM_GUARDIAO}>Sem guardião</option>
+          </select>
+          <select class=${cx(inputCls, "w-auto md:hidden")} value=${ordem} onChange=${(e) => setOrdem(e.target.value)} aria-label="Ordenar">
+            <option value="nome">Nome (A a Z)</option>
+            <option value="nome-desc">Nome (Z a A)</option>
+            <option value="final-asc">Data final (mais próxima)</option>
+            <option value="final-desc">Data final (mais distante)</option>
+          </select>
+          ${temFiltro ? html`<button type="button" class="text-xs text-muted underline" onClick=${() => { setBusca(""); setFStatus(""); setFGuardiao(""); }}>limpar</button>` : null}
+          <div class="ml-auto flex items-center gap-2 text-xs text-muted">
+            <span>${filtrados.length} de ${lista.length}</span>
+            ${atualizadoEm ? html`<span>· ${atualizadoEm}</span>` : null}
+            <${Btn} variant="ghost" type="button" loading=${sincronizando} onClick=${() => atualizar(true)}>Atualizar da planilha<//>
+          </div>
+        </div>
+
+        <div class="mt-3 hidden overflow-x-auto rounded-2xl border border-line bg-card md:block">
+          <table class="w-full min-w-[1100px] text-sm">
+            <thead>
+              <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
+                <th class="px-3 py-2.5"><button type="button" class="uppercase hover:text-ink" onClick=${() => ordenarPor("nome")}>Nome${seta("nome")}</button></th>
+                <th class="px-3 py-2.5">E-mail</th>
+                <th class="px-3 py-2.5">Telefone</th>
+                <th class="px-3 py-2.5">Guardião</th>
+                <th class="px-3 py-2.5">Início</th>
+                <th class="px-3 py-2.5"><button type="button" class="uppercase hover:text-ink" onClick=${() => ordenarPor("final")}>Data final${seta("final")}</button></th>
+                <th class="px-3 py-2.5">Status</th>
+                <th class="px-3 py-2.5">Renovou</th>
+                <th class="px-3 py-2.5">Observações</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filtrados.length === 0 ? html`<tr><td colspan="9" class="px-4 py-8 text-center text-sm text-muted">Nenhum mentorado encontrado.</td></tr>` :
+                filtrados.map((m) => html`
+                  <tr key=${m.linha} class="border-b border-line align-top last:border-0 hover:bg-black/[0.02]">
+                    <td class="min-w-[190px] px-3 py-2.5"><div class="font-medium text-ink">${m.nome || "—"}</div>${diag(m)}</td>
+                    <td class="min-w-[210px] px-3 py-2.5 text-xs text-muted break-words">${m.email || "—"}</td>
+                    <td class="px-3 py-2.5 text-xs whitespace-nowrap">${telefones(m)}</td>
+                    <td class="px-3 py-2.5 text-xs">${m.guardiao || html`<span class="text-muted">—</span>`}</td>
+                    <td class="px-3 py-2.5 text-xs whitespace-nowrap">${dataBR(m.data_inicio, m.data_inicio_txt)}</td>
+                    <td class="px-3 py-2.5 text-xs whitespace-nowrap">${dataBR(m.data_final, m.data_final_txt)}</td>
+                    <td class="px-3 py-2.5">${m.status ? html`<${Badge} class=${cx("whitespace-nowrap", pillStatusMentorado(m.status))}>${m.status}<//>` : html`<span class="text-muted">—</span>`}</td>
+                    <td class="px-3 py-2.5 text-xs">${m.renovou || html`<span class="text-muted">—</span>`}</td>
+                    <td class="max-w-[220px] px-3 py-2.5 text-xs">${obs(m)}</td>
+                  </tr>`)}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="mt-3 space-y-2 md:hidden">
+          ${filtrados.length === 0 ? html`<div class="rounded-xl border border-line bg-card px-4 py-8 text-center text-sm text-muted">Nenhum mentorado encontrado.</div>` :
+            filtrados.map((m) => html`
+              <div key=${m.linha} class="rounded-xl border border-line bg-card p-4">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="min-w-0">
+                    <div class="font-medium text-ink">${m.nome || "—"}</div>
+                    <div class="break-all text-xs text-muted">${m.email || "—"}</div>
+                  </div>
+                  ${m.status ? html`<${Badge} class=${cx("shrink-0", pillStatusMentorado(m.status))}>${m.status}<//>` : null}
+                </div>
+                <div class="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
+                  <div><span class="text-muted">Telefone</span><div>${telefones(m)}</div></div>
+                  <div><span class="text-muted">Guardião</span><div>${m.guardiao || "—"}</div></div>
+                  <div><span class="text-muted">Início</span><div>${dataBR(m.data_inicio, m.data_inicio_txt)}</div></div>
+                  <div><span class="text-muted">Data final</span><div>${dataBR(m.data_final, m.data_final_txt)}</div></div>
+                  <div><span class="text-muted">Renovou</span><div>${m.renovou || "—"}</div></div>
+                  <div>${diag(m)}</div>
+                </div>
+                ${m.observacoes ? html`<div class="mt-2 text-xs"><span class="text-muted">Observações</span><div>${obs(m)}</div></div>` : null}
+              </div>`)}
+        </div>
+      `}
     </div>`;
 }
 
@@ -6521,6 +6767,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "cs" && p1 === "envios-livros") return html`<${EnviosLivrosPage} me=${me} />`;
   if (p0 === "cs" && p1 === "diagnostico") return html`<${DiagnosticoPage} me=${me} query=${route.query} />`;
   if (p0 === "cs" && p1 === "metas") return html`<${MetasPage} me=${me} />`;
+  if (p0 === "cs" && p1 === "mentorados") return html`<${MentoradosPage} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
   if (p0 === "cs" && p1 === "chat-cademi") return html`<${ChatCademiPage} />`;
   if (p0 === "pedagogico" && p1 === "aulas-praticas") return html`<${AulasPraticasPage} />`;
