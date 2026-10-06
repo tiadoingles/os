@@ -1,37 +1,54 @@
 /**
- * Diagnóstico do Mentorado — Apps Script (Web App) da Tia do Inglês
- * ------------------------------------------------------------------
+ * Diagnóstico do Mentorado — Apps Script (Web App) da Tia do Inglês — versão 2
+ * ----------------------------------------------------------------------------
  * Recebe os dados do formulário "Diagnóstico do Mentorado" do Sistema
- * Operacional (via Edge Function `diagnostico-drive` do Supabase), cria a
- * planilha "<Nome completo> - DD/MM/AAAA" na pasta
- * "0.1 Diagnóstico Inicial [Marcela]" a partir do modelo e preenche as células.
- * Se o diagnóstico for concluído de novo, atualiza o MESMO arquivo (fileId).
+ * Operacional (via Edge Function `diagnostico-drive` do Supabase) e monta, do
+ * zero, a planilha "<Nome completo> - DD/MM/AAAA" na pasta
+ * "0.1 Diagnóstico Inicial [Marcela]", num layout próprio (não usa mais modelo).
+ * Se o diagnóstico for concluído de novo, a aba do MESMO arquivo (fileId) é
+ * apagada e reconstruída — inclusive arquivos antigos no layout da aba NOVO.
+ * Abas criadas à mão no arquivo são mantidas; edições feitas na aba "Diagnóstico"
+ * são substituídas pelo conteúdo do OS a cada atualização.
  *
- * Propriedades do script (Configurações do projeto → Propriedades do script):
- *   DIAG_TOKEN  — segredo compartilhado com o Supabase (obrigatório).
- *   MODELO_ID   — ID do Google Sheet modelo. Preenchida sozinha por criarModelo().
+ * Propriedade do script (Configurações do projeto → Propriedades do script):
+ *   DIAG_TOKEN — segredo compartilhado com o Supabase (obrigatório).
+ *   (MODELO_ID, da versão 1, não é mais usada e pode ser apagada.)
  *
- * Funções para rodar à mão (menu "Executar"):
- *   criarModelo() — constrói o modelo do zero (layout fiel ao xlsx original)
- *                   na pasta-mãe e grava o ID em MODELO_ID. Rode uma vez.
- *
- * Implantação: Implantar → Nova implantação → App da Web, "Executar como: eu" e
- * "Quem pode acessar: qualquer pessoa" (a Edge Function não envia credencial
- * Google; a proteção é o DIAG_TOKEN).
+ * Implantação: Implantar → Gerenciar implantações → lápis (editar) →
+ * Versão: "Nova versão" → Implantar. Assim a URL /exec continua a mesma.
+ * Configuração da implantação: App da Web, "Executar como: eu",
+ * "Quem pode acessar: qualquer pessoa" (a proteção é o DIAG_TOKEN).
  *
  * NUNCA coloque o valor do DIAG_TOKEN neste arquivo — o repositório é público.
  */
 
+var VERSAO = 2;
 var PASTA_DIAGNOSTICOS_ID = '1_6Ckmc6aVAdE1rUOuIua3Se5b_DCm2Et'; // 0.1 Diagnóstico Inicial [Marcela]
-var PASTA_MODELO_ID = '1Xe_779iGkAwF_0x8lnxI5OLcc9pq_IDI';      // pasta-mãe (guarda o modelo)
-var NOME_MODELO = 'MODELO Diagnóstico Mentorado [não editar]';
-var ABA = 'NOVO';
+var ABA = 'Diagnóstico';
 var FUSO = 'America/Sao_Paulo';
+
+// Paleta e tipografia
+var COR = {
+  marca: '#ea5167',
+  marcaEscura: '#d13c53',
+  marcaClara: '#fbe7e4',
+  creme: '#f6f3ee',
+  borda: '#e5ded3',
+  texto: '#39352f',
+  rotulo: '#6b6459',
+  vazio: '#b3aca0',
+  branco: '#ffffff',
+};
+var FONTE = 'Montserrat';
+
+// Grade: A e G são margens; B:C rótulo 1, D valor 1, E rótulo 2, F valor 2.
+var LARGURAS = { A: 20, B: 40, C: 170, D: 240, E: 190, F: 240, G: 20 };
+var LARGURA_VALOR_LONGO = 670; // D:F em pixels (para estimar a altura de textos longos)
 
 /* ============================== Web App ============================== */
 
 function doGet() {
-  return json_({ ok: true, servico: 'diagnostico-mentorado', modeloConfigurado: !!modeloValido_() });
+  return json_({ ok: true, servico: 'diagnostico-mentorado', versao: VERSAO });
 }
 
 function doPost(e) {
@@ -41,20 +58,19 @@ function doPost(e) {
   } catch (err) {
     return json_({ ok: false, error: 'JSON inválido' });
   }
-  var props = PropertiesService.getScriptProperties();
-  var token = props.getProperty('DIAG_TOKEN');
+  var token = PropertiesService.getScriptProperties().getProperty('DIAG_TOKEN');
   if (!token) return json_({ ok: false, error: 'DIAG_TOKEN não configurado nas Propriedades do script' });
   if (!body || body.token !== token) return json_({ ok: false, error: 'Token inválido' });
 
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) return json_({ ok: false, error: 'Outra planilha está sendo gerada. Tente de novo em instantes.' });
   try {
-    var dados = body.dados || {};
-    var nome = String(dados.nome || '').trim();
+    var d = body.dados || {};
+    var nome = String(d.nome || '').trim();
     if (!nome) return json_({ ok: false, error: 'Nome completo é obrigatório' });
-    var dataDiag = parseData_(dados.data_diagnostico);
-    if (!dataDiag) return json_({ ok: false, error: 'Data do diagnóstico é obrigatória' });
     if (nome.length > 150) nome = nome.slice(0, 150);
+    var dataDiag = parseData_(d.data_diagnostico);
+    if (!dataDiag) return json_({ ok: false, error: 'Data do diagnóstico é obrigatória' });
     var nomeArquivo = nome + ' - ' + Utilities.formatDate(dataDiag, FUSO, 'dd/MM/yyyy');
 
     var ss = null;
@@ -62,25 +78,29 @@ function doPost(e) {
       var existente = null;
       try { existente = DriveApp.getFileById(String(body.fileId)); } catch (err) { existente = null; }
       if (existente && !existente.isTrashed()) {
-        // Só atualiza planilhas de diagnóstico: Google Sheet, dentro da pasta 0.1, com a aba NOVO.
+        // Só reescreve planilhas da pasta de diagnósticos.
         if (existente.getMimeType() !== MimeType.GOOGLE_SHEETS || !naPastaDiagnosticos_(existente)) {
           return json_({ ok: false, error: 'O arquivo vinculado não é uma planilha da pasta de diagnósticos' });
         }
-        var aberto = SpreadsheetApp.openById(existente.getId());
-        if (!aberto.getSheetByName(ABA)) return json_({ ok: false, error: 'A planilha vinculada não tem a aba ' + ABA });
+        ss = SpreadsheetApp.openById(existente.getId());
         existente.setName(nomeArquivo);
-        ss = aberto;
       } // apagado (lixeira) ou inexistente: cria outro
     }
+    var criadoAgora = false;
     if (!ss) {
-      var modeloId = modeloValido_() || criarModelo();
-      var copia = DriveApp.getFileById(modeloId)
-        .makeCopy(nomeArquivo, DriveApp.getFolderById(PASTA_DIAGNOSTICOS_ID));
-      ss = SpreadsheetApp.openById(copia.getId());
+      ss = SpreadsheetApp.create(nomeArquivo);
+      criadoAgora = true;
+      DriveApp.getFileById(ss.getId()).moveTo(DriveApp.getFolderById(PASTA_DIAGNOSTICOS_ID));
     }
-    preencher_(ss, dados);
+    try {
+      construir_(ss, d, nome, dataDiag, criadoAgora);
+    } catch (errConstrucao) {
+      // Não deixa arquivo pela metade na pasta (a próxima tentativa criaria outro).
+      if (criadoAgora) { try { DriveApp.getFileById(ss.getId()).setTrashed(true); } catch (e2) { /* ignora */ } }
+      throw errConstrucao;
+    }
     SpreadsheetApp.flush();
-    return json_({ ok: true, url: ss.getUrl(), fileId: ss.getId(), nome: nomeArquivo });
+    return json_({ ok: true, url: ss.getUrl(), fileId: ss.getId(), nome: nomeArquivo, versao: VERSAO });
   } catch (err) {
     return json_({ ok: false, error: String((err && err.message) || err) });
   } finally {
@@ -98,94 +118,14 @@ function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 
-function modeloValido_() {
-  var id = PropertiesService.getScriptProperties().getProperty('MODELO_ID');
-  if (!id) return null;
-  try {
-    var f = DriveApp.getFileById(id);
-    return f.isTrashed() ? null : id;
-  } catch (err) {
-    return null;
-  }
+/* ============================== Dados ============================== */
+
+function txt_(v) {
+  if (v === undefined || v === null) return '';
+  return String(v).trim();
 }
 
-/* ============================ Preenchimento ============================ */
-
-// Campo do formulário → célula da aba NOVO (campos mesclados = célula da esquerda).
-// Toda célula mapeada é sempre reescrita (vazia quando o campo está vazio), para
-// que uma segunda conclusão atualize o arquivo sem deixar valor antigo.
-var MAPA = [
-  ['data_inicio', 'B1', 'data'],
-  ['onboarding_data', 'B2', 'data'],
-  ['onboarding_hora', 'D2', 'hora'],
-  ['data_diagnostico', 'B3', 'data'],
-  ['nivelamento', 'B4', 'texto'],
-  ['nome', 'B6', 'texto'],
-  ['idade', 'B7', 'numero'],
-  ['email', 'B8', 'texto'],
-  ['profissao', 'B9', 'texto'],
-  ['horario_pratica', 'B10', 'texto'],
-  ['objetivo', 'B12', 'texto'],
-  ['objetivo_detalhe', 'F12', 'longo', 3, 52],
-  ['dificuldades', 'B15', 'longo', 3, 62],
-  ['nota_speaking', 'B16', 'numero'],
-  ['nota_listening', 'B18', 'numero'],
-  ['vac', 'B20', 'vac', 3, 62],
-  ['o_que_fez', 'B22', 'longo', 3, 62],
-  ['trilha', 'B24', 'texto'],
-  ['trilha_obs', 'B25', 'longo', 3, 62],
-  ['rotina_trilha', 'C26', 'texto'],
-  ['rotina_arena', 'C27', 'texto'],
-  ['arena_nivel', 'F27', 'texto'],
-  ['rotina_labs', 'C28', 'texto'],
-  ['rotina_video', 'C29', 'texto'],
-  ['rotina_pratica', 'C30', 'texto'],
-  ['meta', 'B32', 'longo', 3, 62],
-  ['meta_data', 'G32', 'data'],
-  ['observacoes', 'B35', 'longo', 3, 100],
-];
-
-function preencher_(ss, d) {
-  ss.setSpreadsheetTimeZone(FUSO);
-  var sh = ss.getSheetByName(ABA);
-  if (!sh) throw new Error('Aba ' + ABA + ' não encontrada');
-  var alturas = {};
-  MAPA.forEach(function (m) {
-    var campo = m[0], cel = sh.getRange(m[1]), tipo = m[2];
-    var v = d[campo];
-    if (tipo === 'vac') {
-      v = [d.vac, d.vac_obs].filter(function (x) { return x && String(x).trim(); }).join(' — ');
-      tipo = 'longo';
-    }
-    if (tipo === 'longo') { var r0 = cel.getRow(); alturas[r0] = alturas[r0] || MODELO_ALTURA_LINHA; }
-    if (v === undefined || v === null || String(v).trim() === '') {
-      cel.clearContent();
-      return;
-    }
-    if (tipo === 'data') {
-      var dt = parseData_(v);
-      if (dt) { cel.setNumberFormat('dd/MM/yyyy').setValue(dt); } else { cel.setValue(String(v)); }
-    } else if (tipo === 'hora') {
-      cel.setNumberFormat('@').setValue(String(v).slice(0, 5));
-    } else if (tipo === 'numero') {
-      var n = Number(String(v).replace(',', '.'));
-      cel.setValue(isNaN(n) ? String(v) : n);
-    } else {
-      cel.setValue(String(v));
-      if (tipo === 'longo') {
-        cel.setWrap(true).setVerticalAlignment('top');
-        // Linhas de células mescladas não crescem sozinhas: estima a altura.
-        var porLinha = m[4] || 60, linhas = 0;
-        String(v).split('\n').forEach(function (l) { linhas += Math.max(1, Math.ceil(l.length / porLinha)); });
-        var row = cel.getRow();
-        alturas[row] = Math.max(alturas[row] || MODELO_ALTURA_LINHA, Math.min(400, linhas * 17 + 6));
-      }
-    }
-  });
-  Object.keys(alturas).forEach(function (r) { sh.setRowHeight(Number(r), alturas[r]); });
-}
-
-// "2026-10-06" → Date local (sem deslocar o dia por fuso).
+// "2026-10-06" → Date ao meio-dia (sem deslocar o dia por fuso).
 function parseData_(v) {
   if (!v) return null;
   if (Object.prototype.toString.call(v) === '[object Date]') return v;
@@ -196,228 +136,314 @@ function parseData_(v) {
   return null;
 }
 
-/* ============================ Modelo do zero ============================ */
-// Reprodução do arquivo "❌MODELO PLANILHA MENTORADO❌-2.xlsx" (aba NOVO):
-// rótulos, mesclagens, larguras/alturas, fontes, cores, bordas e os 5 dropdowns.
-// Ajustes em relação ao xlsx (o xlsx tinha uma mesclagem B15:E16 que engolia a
-// célula da Nota Speaking em B16):
-//   - B15:E16 → B15:E15 (caixa de Dificuldades), liberando B16:E16 (mesclada, como a
-//     Nota Listening em B18:E18) para a Nota Speaking;
-//   - B35:H35 mesclada, para as Observações Gerais quebrarem linha.
+function data_(v) {
+  var dt = parseData_(v);
+  return dt ? Utilities.formatDate(dt, FUSO, 'dd/MM/yyyy') : txt_(v);
+}
 
-var MODELO_CELULAS = [
-  {"a": "A1", "v": "Data de início", "f": "Montserrat", "b": 1, "bg": "#FFF2CC", "bd": "tlbr"},
-  {"a": "B1", "f": "Montserrat", "bd": "tlbr", "h": "center", "n": "dd/MM/yyyy"},
-  {"a": "C1", "f": "Montserrat"},
-  {"a": "D1", "f": "Montserrat"},
-  {"a": "E1", "f": "Montserrat"},
-  {"a": "A2", "v": "Data de call de Onboarding", "f": "Montserrat", "b": 1, "bg": "#FFF2CC", "bd": "tlbr"},
-  {"a": "B2", "f": "Montserrat", "bd": "tlbr", "h": "center", "n": "dd/MM/yyyy"},
-  {"a": "C2", "v": "Horário", "f": "Montserrat", "b": 1, "h": "center"},
-  {"a": "D2", "f": "Montserrat"},
-  {"a": "E2", "f": "Montserrat"},
-  {"a": "A3", "v": "Data do Diagnóstico [Marcela]", "f": "Montserrat", "b": 1, "bg": "#FFF2CC", "bd": "tlbr"},
-  {"a": "B3", "f": "Montserrat", "bd": "tlb", "h": "center", "n": "dd/MM/yyyy"},
-  {"a": "C3", "f": "Montserrat", "bd": "tlbr"},
-  {"a": "D3", "f": "Montserrat"},
-  {"a": "E3", "f": "Montserrat"},
-  {"a": "A4", "v": "Resultado do Teste de nivelamento:", "f": "Montserrat", "b": 1, "bg": "#F4CCCC"},
-  {"a": "B4", "f": "Montserrat", "bg": "#F4CCCC"},
-  {"a": "A5", "f": "Montserrat", "b": 1},
-  {"a": "B5", "f": "Montserrat"},
-  {"a": "C5", "f": "Montserrat"},
-  {"a": "D5", "f": "Montserrat"},
-  {"a": "E5", "f": "Montserrat"},
-  {"a": "A6", "v": "Nome", "f": "Montserrat", "b": 1, "bg": "#FFF2CC", "bd": "tlbr"},
-  {"a": "B6", "f": "Montserrat", "bd": "tlbr", "h": "left"},
-  {"a": "C6", "bd": "tb"},
-  {"a": "D6", "bd": "tb"},
-  {"a": "E6", "bd": "tbr"},
-  {"a": "A7", "v": "Idade", "f": "Montserrat", "b": 1, "bg": "#FFF2CC", "bd": "tlbr"},
-  {"a": "B7", "f": "Montserrat", "bd": "tlbr", "h": "left"},
-  {"a": "C7", "bd": "tb"},
-  {"a": "D7", "bd": "tb"},
-  {"a": "E7", "bd": "tbr"},
-  {"a": "A8", "v": "Email", "f": "Montserrat", "b": 1, "bg": "#FFF2CC", "bd": "tlbr"},
-  {"a": "B8", "f": "Montserrat", "s": 11.0, "c": "#232333", "bg": "#FFFFFF", "bd": "br"},
-  {"a": "C8", "bd": "b"},
-  {"a": "D8", "bd": "b"},
-  {"a": "E8", "bd": "br"},
-  {"a": "A9", "v": "Profissão", "f": "Montserrat", "b": 1, "bg": "#CFE2F3", "bd": "tlbr"},
-  {"a": "B9", "f": "Montserrat", "bd": "tlbr", "h": "left"},
-  {"a": "C9", "bd": "tb"},
-  {"a": "D9", "bd": "tb"},
-  {"a": "E9", "bd": "tbr"},
-  {"a": "A10", "v": "Horário Sessão Prática", "f": "Montserrat", "b": 1, "bg": "#CFE2F3", "bd": "tlbr"},
-  {"a": "B10", "f": "Montserrat", "bd": "tlbr", "h": "left"},
-  {"a": "C10", "bd": "tb"},
-  {"a": "D10", "bd": "tb"},
-  {"a": "E10", "bd": "tbr"},
-  {"a": "A11", "f": "Montserrat", "b": 1},
-  {"a": "B11", "f": "Montserrat", "h": "left"},
-  {"a": "C11", "f": "Montserrat", "h": "left"},
-  {"a": "D11", "f": "Montserrat", "h": "left"},
-  {"a": "E11", "f": "Montserrat", "h": "left"},
-  {"a": "A12", "v": "Objetivo", "f": "Montserrat", "b": 1, "bg": "#CFE2F3", "bd": "tlbr"},
-  {"a": "B12", "v": "Profissional"},
-  {"a": "F12", "v": "Descrever em detalhes"},
-  {"a": "A13", "f": "Montserrat", "b": 1},
-  {"a": "B13", "f": "Montserrat", "h": "left", "vt": "top", "w": 1},
-  {"a": "C13", "f": "Montserrat", "h": "left", "vt": "top", "w": 1},
-  {"a": "D13", "f": "Montserrat", "h": "left", "vt": "top", "w": 1},
-  {"a": "E13", "f": "Montserrat", "h": "left", "vt": "top", "w": 1},
-  {"a": "A14", "v": "Dificuldades (O que mais frustrou antes)", "f": "Montserrat", "b": 1, "bg": "#C9DAF8"},
-  {"a": "B14", "f": "Montserrat", "h": "left", "vt": "top", "w": 1},
-  {"a": "B15", "f": "Montserrat", "bd": "tlbr", "h": "left", "vt": "top", "w": 1},
-  {"a": "C15", "bd": "t"},
-  {"a": "D15", "bd": "t"},
-  {"a": "E15", "bd": "tr"},
-  {"a": "A16", "v": "Nota Speaking", "f": "Montserrat", "b": 1, "bg": "#CFE2F3", "bd": "tlbr"},
-  {"a": "B16", "bd": "lb"},
-  {"a": "C16", "bd": "b"},
-  {"a": "D16", "bd": "b"},
-  {"a": "E16", "bd": "br"},
-  {"a": "A17", "f": "Montserrat", "b": 1},
-  {"a": "B17", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "C17", "h": "left", "vt": "top"},
-  {"a": "D17", "h": "left", "vt": "top"},
-  {"a": "E17", "h": "left", "vt": "top"},
-  {"a": "A18", "v": "Nota Listening", "f": "Montserrat", "b": 1, "bg": "#CFE2F3", "bd": "tlbr"},
-  {"a": "B18", "f": "Montserrat", "bd": "tlbr", "h": "left", "vt": "top"},
-  {"a": "C18", "bd": "tb"},
-  {"a": "D18", "bd": "tb"},
-  {"a": "E18", "bd": "tbr"},
-  {"a": "B19", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "C19", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "D19", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "E19", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "A20", "v": "Resultado Teste VAC", "f": "Montserrat", "b": 1, "bg": "#CFE2F3", "bd": "tlbr"},
-  {"a": "B20", "v": "** Ideia: Fazer teste vac com IA e pegar o resultado automático. Ou pedir para preencher no teste de nivelamento", "f": "Montserrat", "bd": "tlbr", "h": "left", "vt": "top"},
-  {"a": "C20", "bd": "tb"},
-  {"a": "D20", "bd": "tb"},
-  {"a": "E20", "bd": "tbr"},
-  {"a": "A21", "f": "Montserrat", "b": 1},
-  {"a": "B21", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "C21", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "D21", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "E21", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "A22", "v": "O que já fez antes (tempo e formato)", "f": "Montserrat", "b": 1, "bg": "#CFE2F3", "bd": "tlbr"},
-  {"a": "B22", "f": "Montserrat", "bd": "tlbr", "h": "left", "vt": "top"},
-  {"a": "C22", "bd": "tb"},
-  {"a": "D22", "bd": "tb"},
-  {"a": "E22", "bd": "tbr"},
-  {"a": "A23", "f": "Montserrat", "b": 1},
-  {"a": "B23", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "C23", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "D23", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "E23", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "A24", "v": "Trilha Inicial", "f": "Montserrat", "b": 1, "bg": "#CFE2F3", "bd": "tlb"},
-  {"a": "B24", "f": "Montserrat", "bd": "tbr", "h": "left", "vt": "top", "w": 1},
-  {"a": "C24", "bd": "tb"},
-  {"a": "D24", "bd": "tb"},
-  {"a": "E24", "bd": "tbr"},
-  {"a": "A25", "f": "Montserrat", "b": 1},
-  {"a": "B25", "f": "Montserrat", "bd": "tlbr", "h": "left", "vt": "top", "w": 1},
-  {"a": "C25", "bd": "tb"},
-  {"a": "D25", "bd": "tb"},
-  {"a": "E25", "bd": "tbr"},
-  {"a": "A26", "v": "Rotina", "f": "Montserrat", "b": 1},
-  {"a": "B26", "v": "Trilha", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "C26", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "B27", "v": "Arena", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "C27", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "F27", "v": "RC, Básico, Inter, Avançado"},
-  {"a": "A28", "f": "Montserrat", "b": 1},
-  {"a": "B28", "v": "Labs", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "C28", "f": "Montserrat", "h": "left", "vt": "top"},
-  {"a": "B29", "v": "Vídeo Semanal"},
-  {"a": "B30", "v": "Sessão Prática"},
-  {"a": "A32", "v": "Meta", "b": 1},
-  {"a": "B32", "v": "Exemplo : Concluir X aulas até data Y"},
-  {"a": "F32", "v": "DATA DA META 1"},
-  {"a": "A35", "v": "Observações Gerais", "f": "Montserrat", "b": 1, "bg": "#CFE2F3", "bd": "tlbr"},
-];
+function lista_(v) {
+  if (Array.isArray(v)) return v.map(txt_).filter(Boolean);
+  var s = txt_(v);
+  return s ? s.split(/\s*(?:,|\be\b)\s*/).filter(Boolean) : [];
+}
 
-var MODELO_MESCLAS = [
-  // [intervalo, borda externa?]
-  ['B4:E4', false], ['B6:E6', true], ['B7:E7', true], ['B8:E8', false], ['B9:E9', true],
-  ['B10:E10', true], ['B12:E12', false], ['F12:H12', false], ['B14:E14', false],
-  ['B15:E15', true], ['B16:E16', true], ['B18:E18', true], ['B20:E20', true], ['B22:E22', true],
-  ['B24:E24', true], ['B25:E25', true], ['C26:E26', false], ['C27:E27', false],
-  ['C28:E28', false], ['C29:E29', false], ['C30:E30', false], ['B32:E32', false],
-  ['B35:H35', false],
-];
+function nota_(v) {
+  var s = txt_(v);
+  if (!s) return '';
+  return s.replace('.', ',') + ' / 10';
+}
 
-var MODELO_DROPDOWNS = [
-  ['B10', ['17h', '19h']],
-  ['B12', ['Profissional', 'Viagem', 'Realização Pessoal', 'Outros']],
-  ['B24', ['TRILHA 1', 'TRILHA 2', 'TRILHA 3', 'TRILHA 4', 'TRILHA 5']],
-  ['C26:C30', ['1x Semana', '2x Semana', '3x Semana', '4x Semana', '5x Semana']],
-  ['F27', ['RC', 'Básico', 'Inter', 'Avançado']],
-];
+// Aceita o formato novo (horario_pratica_lista, vac_predominante, metas[]) e o antigo.
+function normalizar_(d) {
+  var horarios = lista_(d.horario_pratica_lista || d.horario_pratica);
+  var metas = [];
+  if (Array.isArray(d.metas)) {
+    d.metas.forEach(function (m) {
+      if (m && (txt_(m.descricao) || txt_(m.data))) metas.push({ descricao: txt_(m.descricao), data: txt_(m.data) });
+    });
+  } else if (txt_(d.meta) || txt_(d.meta_data)) {
+    metas.push({ descricao: txt_(d.meta), data: txt_(d.meta_data) });
+  }
+  return {
+    horarios: horarios,
+    vacPredominante: txt_(d.vac_predominante || d.vac),
+    vacObservacoes: txt_(d.vac_observacoes || d.vac_obs),
+    metas: metas,
+  };
+}
 
-// Larguras do xlsx (caracteres) convertidas para pixels (~7px por caractere + 5).
-var MODELO_LARGURAS = { A: 258, B: 96, C: 96, D: 96, E: 160, F: 185, G: 96, H: 96 };
-var MODELO_LINHAS = 35;
-var MODELO_ALTURA_LINHA = 21; // 15,75 pt
+/* ============================== Layout ============================== */
 
-function criarModelo() {
-  var ss = SpreadsheetApp.create(NOME_MODELO, MODELO_LINHAS, 8);
+function construir_(ss, d, nome, dataDiag, arquivoNovo) {
   ss.setSpreadsheetTimeZone(FUSO);
   try { ss.setSpreadsheetLocale('pt_BR'); } catch (err) { /* ignora */ }
-  var sh = ss.getSheets()[0];
-  sh.setName(ABA);
 
-  var tudo = sh.getRange(1, 1, MODELO_LINHAS, 8);
-  tudo.setFontFamily('Arial').setFontSize(10).setFontColor('#000000').setVerticalAlignment('bottom');
-  Object.keys(MODELO_LARGURAS).forEach(function (col) {
-    sh.setColumnWidth(sh.getRange(col + '1').getColumn(), MODELO_LARGURAS[col]);
+  // Aba nova e limpa; depois remove só as abas geradas por este script (a "Diagnóstico"
+  // anterior, a "NOVO" do layout antigo e restos "_novo_*"). Abas criadas à mão pela
+  // equipe são mantidas. Num arquivo recém-criado, remove também a aba padrão vazia.
+  var tmp = ss.insertSheet('_novo_' + new Date().getTime(), 0);
+  ss.getSheets().forEach(function (s) {
+    if (s.getSheetId() === tmp.getSheetId()) return;
+    var n = s.getName();
+    if (arquivoNovo || n === ABA || n === 'NOVO' || n.indexOf('_novo_') === 0) ss.deleteSheet(s);
   });
-  sh.setRowHeights(1, MODELO_LINHAS, MODELO_ALTURA_LINHA);
+  tmp.setName(ABA);
+  var sh = tmp;
+  var n = normalizar_(d);
 
-  var HAIR = SpreadsheetApp.BorderStyle.DOTTED; // "hair" do Excel
-  MODELO_CELULAS.forEach(function (c) {
-    var r = sh.getRange(c.a);
-    if (c.f) r.setFontFamily(c.f);
-    if (c.s) r.setFontSize(c.s);
-    if (c.b) r.setFontWeight('bold');
-    if (c.c) r.setFontColor(c.c);
-    if (c.bg) r.setBackground(c.bg);
-    if (c.h) r.setHorizontalAlignment(c.h);
-    if (c.vt) r.setVerticalAlignment(c.vt);
-    if (c.w) r.setWrap(true);
-    if (c.n) r.setNumberFormat(c.n);
-    if (c.bd) {
-      r.setBorder(c.bd.indexOf('t') >= 0, c.bd.indexOf('l') >= 0, c.bd.indexOf('b') >= 0,
-        c.bd.indexOf('r') >= 0, null, null, '#000000', HAIR);
-    }
-    if (c.v !== undefined) r.setValue(c.v);
+  sh.setHiddenGridlines(true);
+  var colunas = ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
+  colunas.forEach(function (c, i) { sh.setColumnWidth(i + 1, LARGURAS[c]); });
+
+  var L = new Layout_(sh);
+
+  // Cabeçalho
+  L.espaco(14);
+  L.titulo('Diagnóstico Inicial — Mentoria Fluent Mind');
+  L.subtitulo(nome, 'Diagnóstico em ' + Utilities.formatDate(dataDiag, FUSO, 'dd/MM/yyyy'));
+  L.espaco(16);
+
+  // Datas
+  var onboarding = data_(d.onboarding_data);
+  if (txt_(d.onboarding_hora)) onboarding = (onboarding ? onboarding + ' às ' : '') + txt_(d.onboarding_hora).slice(0, 5);
+  L.secao('Datas');
+  L.par('Data de início', data_(d.data_inicio), 'Data do diagnóstico', data_(d.data_diagnostico));
+  L.par('Call de onboarding', onboarding, 'Teste de nivelamento', txt_(d.nivelamento));
+  L.espaco(14);
+
+  // Dados pessoais
+  L.secao('Dados pessoais');
+  L.par('Nome completo', nome, 'Idade', txt_(d.idade));
+  L.par('Email', txt_(d.email), 'Profissão', txt_(d.profissao));
+  L.par('Horário Sessão Prática', n.horarios.join(' e '), '', null);
+  L.espaco(14);
+
+  // Objetivo & Dificuldades
+  L.secao('Objetivo & Dificuldades');
+  L.par('Objetivo', txt_(d.objetivo), '', null);
+  L.longo('Objetivo em detalhes', txt_(d.objetivo_detalhe));
+  L.longo('Dificuldades (o que mais frustrou antes)', txt_(d.dificuldades));
+  L.espaco(14);
+
+  // Notas & VAC
+  L.secao('Notas & VAC');
+  L.notas('Nota Speaking', nota_(d.nota_speaking), 'Nota Listening', nota_(d.nota_listening));
+  L.par('VAC predominante', n.vacPredominante, '', null);
+  L.longo('VAC observações', n.vacObservacoes);
+  L.espaco(14);
+
+  // Histórico
+  L.secao('Histórico');
+  L.longo('O que já fez antes (tempo e formato)', txt_(d.o_que_fez));
+  L.espaco(14);
+
+  // Trilha & Rotina
+  L.secao('Trilha & Rotina');
+  L.par('Trilha inicial', txt_(d.trilha), '', null);
+  L.longo('Observação sobre a trilha', txt_(d.trilha_obs));
+  L.espaco(8);
+  L.tabelaCabecalho([['B', 'C', 'Atividade'], ['D', 'D', 'Frequência'], ['E', 'F', 'Detalhe']]);
+  var nivel = txt_(d.arena_nivel);
+  var rotina = [
+    ['Trilha', txt_(d.rotina_trilha), ''],
+    ['Arena de Conversação', txt_(d.rotina_arena), nivel ? 'Nível: ' + nivel : ''],
+    ['Fluent Labs', txt_(d.rotina_labs), ''],
+    ['Vídeo Semanal', txt_(d.rotina_video), ''],
+    ['Sessão Prática', txt_(d.rotina_pratica), n.horarios.length ? 'Horário: ' + n.horarios.join(' e ') : ''],
+  ];
+  rotina.forEach(function (r, i) {
+    L.tabelaLinha([['B', 'C', r[0], true], ['D', 'D', r[1]], ['E', 'F', r[2]]], i % 2 === 1);
   });
-  // B4:E4 tem fundo rosa em toda a faixa; B16 vira caixa própria da Nota Speaking.
-  sh.getRange('B4:E4').setBackground('#F4CCCC');
-  sh.getRange('B16').setBorder(true, true, true, true, null, null, '#000000', HAIR)
-    .setFontFamily('Montserrat').setHorizontalAlignment('left');
-  sh.getRange('B35').setFontFamily('Montserrat').setWrap(true).setVerticalAlignment('top');
-  sh.getRange('B3').setBorder(true, true, true, true, null, null, '#000000', HAIR);
-  sh.getRange('D2').setFontFamily('Montserrat').setHorizontalAlignment('center')
-    .setBorder(true, true, true, true, null, null, '#000000', HAIR);
-  sh.getRange('G32').setNumberFormat('dd/MM/yyyy');
+  L.espaco(14);
 
-  MODELO_MESCLAS.forEach(function (m) {
-    var r = sh.getRange(m[0]);
-    r.merge();
-    if (m[1]) r.setBorder(true, true, true, true, null, null, '#000000', HAIR);
-  });
+  // Metas
+  L.secao('Metas');
+  L.tabelaCabecalho([['B', 'B', '#'], ['C', 'E', 'Meta'], ['F', 'F', 'Data']]);
+  if (!n.metas.length) {
+    L.tabelaLinha([['B', 'F', 'Nenhuma meta registrada.']], false, true);
+  } else {
+    n.metas.forEach(function (m, i) {
+      L.tabelaLinha([['B', 'B', String(i + 1), true, 'center'], ['C', 'E', m.descricao], ['F', 'F', data_(m.data), false, 'center']], i % 2 === 1);
+    });
+  }
+  L.espaco(14);
 
-  MODELO_DROPDOWNS.forEach(function (d) {
-    var regra = SpreadsheetApp.newDataValidation().requireValueInList(d[1], true).setAllowInvalid(false).build();
-    sh.getRange(d[0]).setDataValidation(regra);
-  });
+  // Observações
+  L.secao('Observações');
+  L.textoLivre(txt_(d.observacoes));
+  L.espaco(14);
 
-  SpreadsheetApp.flush();
-  var arquivo = DriveApp.getFileById(ss.getId());
-  arquivo.moveTo(DriveApp.getFolderById(PASTA_MODELO_ID));
-  PropertiesService.getScriptProperties().setProperty('MODELO_ID', ss.getId());
-  Logger.log('Modelo criado: ' + ss.getUrl());
-  return ss.getId();
+  // Rodapé
+  L.rodape('Gerado pelo Sistema Operacional da Tia do Inglês em ' +
+    Utilities.formatDate(new Date(), FUSO, "dd/MM/yyyy 'às' HH:mm") + '.');
+
+  // Remove linhas e colunas sobrando.
+  var usadas = L.linha - 1;
+  if (sh.getMaxRows() > usadas) sh.deleteRows(usadas + 1, sh.getMaxRows() - usadas);
+  if (sh.getMaxColumns() > 7) sh.deleteColumns(8, sh.getMaxColumns() - 7);
+  sh.setActiveSelection('A1');
+}
+
+function Layout_(sh) {
+  this.sh = sh;
+  this.linha = 1;
+}
+
+Layout_.prototype._garante = function () {
+  if (this.sh.getMaxRows() < this.linha) this.sh.insertRowsAfter(this.sh.getMaxRows(), this.linha - this.sh.getMaxRows() + 20);
+};
+
+Layout_.prototype._r = function (c1, c2) {
+  return this.sh.getRange(c1 + this.linha + ':' + c2 + this.linha);
+};
+
+Layout_.prototype._base = function (r) {
+  return r.setFontFamily(FONTE).setFontSize(10).setFontColor(COR.texto).setVerticalAlignment('middle');
+};
+
+Layout_.prototype.espaco = function (px) {
+  this._garante();
+  this.sh.setRowHeight(this.linha, px);
+  this.linha++;
+};
+
+Layout_.prototype.titulo = function (t) {
+  this._garante();
+  var r = this._r('B', 'F').merge();
+  this._base(r).setNumberFormat('@').setValue('   ' + t).setBackground(COR.marca).setFontColor(COR.branco)
+    .setFontSize(16).setFontWeight('bold').setHorizontalAlignment('left');
+  this.sh.setRowHeight(this.linha, 48);
+  this.linha++;
+};
+
+Layout_.prototype.subtitulo = function (nome, data) {
+  this._garante();
+  var a = this._r('B', 'D').merge();
+  this._base(a).setNumberFormat('@').setValue('   ' + nome).setFontSize(13).setFontWeight('bold').setBackground(COR.marcaClara);
+  var b = this._r('E', 'F').merge();
+  this._base(b).setNumberFormat('@').setValue(data + '   ').setFontColor(COR.marcaEscura).setFontWeight('bold')
+    .setHorizontalAlignment('right').setBackground(COR.marcaClara);
+  this.sh.setRowHeight(this.linha, 36);
+  this.linha++;
+};
+
+Layout_.prototype.secao = function (t) {
+  this._garante();
+  var r = this._r('B', 'F').merge();
+  this._base(r).setNumberFormat('@').setValue(t.toUpperCase()).setFontColor(COR.marcaEscura).setFontWeight('bold')
+    .setFontSize(10).setBackground(COR.marcaClara)
+    .setBorder(null, true, null, null, null, null, COR.marca, SpreadsheetApp.BorderStyle.SOLID_THICK)
+    .setBorder(null, null, true, null, null, null, COR.marca, SpreadsheetApp.BorderStyle.SOLID);
+  this.sh.setRowHeight(this.linha, 28);
+  this.linha++;
+};
+
+Layout_.prototype._rotulo = function (r, t) {
+  this._base(r).setNumberFormat('@').setValue(t).setBackground(COR.creme).setFontColor(COR.rotulo).setFontWeight('bold').setWrap(true)
+    .setBorder(true, true, true, true, null, null, COR.borda, SpreadsheetApp.BorderStyle.SOLID);
+};
+
+Layout_.prototype._valor = function (r, v) {
+  var vazio = !v;
+  this._base(r).setNumberFormat('@').setValue(vazio ? '—' : v).setBackground(COR.branco)
+    .setFontColor(vazio ? COR.vazio : COR.texto).setWrap(true)
+    .setBorder(true, true, true, true, null, null, COR.borda, SpreadsheetApp.BorderStyle.SOLID);
+};
+
+// Dois pares rótulo/valor por linha. Passe rótulo2 = '' para deixar a metade direita vazia.
+Layout_.prototype.par = function (r1, v1, r2, v2) {
+  this._garante();
+  this._rotulo(this._r('B', 'C').merge(), r1);
+  this._valor(this._r('D', 'D'), v1);
+  if (r2) {
+    this._rotulo(this._r('E', 'E'), r2);
+    this._valor(this._r('F', 'F'), v2);
+  }
+  var maior = Math.max(String(v1 || '').length / 30, String(v2 || '').length / 30, 1);
+  this.sh.setRowHeight(this.linha, Math.max(30, Math.min(120, Math.ceil(maior) * 16 + 12)));
+  this.linha++;
+};
+
+Layout_.prototype.notas = function (r1, v1, r2, v2) {
+  this._garante();
+  this._rotulo(this._r('B', 'C').merge(), r1);
+  this._valor(this._r('D', 'D'), v1);
+  this._rotulo(this._r('E', 'E'), r2);
+  this._valor(this._r('F', 'F'), v2);
+  [['D', v1], ['F', v2]].forEach(function (p) {
+    var c = this.sh.getRange(p[0] + this.linha);
+    if (p[1]) c.setFontSize(16).setFontWeight('bold').setFontColor(COR.marca);
+    c.setHorizontalAlignment('center');
+  }, this);
+  this.sh.setRowHeight(this.linha, 40);
+  this.linha++;
+};
+
+// Rótulo à esquerda e texto longo ocupando D:F.
+Layout_.prototype.longo = function (rotulo, v) {
+  this._garante();
+  this._rotulo(this._r('B', 'C').merge(), rotulo);
+  this._valor(this._r('D', 'F').merge(), v);
+  this._r('D', 'F').setVerticalAlignment('top');
+  this._r('B', 'C').setVerticalAlignment('top');
+  this.sh.setRowHeight(this.linha, alturaTexto_(v, LARGURA_VALOR_LONGO, 30));
+  this.linha++;
+};
+
+Layout_.prototype.textoLivre = function (v) {
+  this._garante();
+  this._valor(this._r('B', 'F').merge(), v);
+  this._r('B', 'F').setVerticalAlignment('top');
+  this.sh.setRowHeight(this.linha, alturaTexto_(v, LARGURA_VALOR_LONGO + 210, 40));
+  this.linha++;
+};
+
+// celulas: [[colIni, colFim, texto], ...]
+Layout_.prototype.tabelaCabecalho = function (celulas) {
+  this._garante();
+  celulas.forEach(function (c) {
+    var r = this._r(c[0], c[1]);
+    if (c[0] !== c[1]) r.merge();
+    this._base(r).setNumberFormat('@').setValue(c[2]).setBackground(COR.marca).setFontColor(COR.branco).setFontWeight('bold')
+      .setHorizontalAlignment(c[2] === '#' || c[2] === 'Data' ? 'center' : 'left')
+      .setBorder(true, true, true, true, null, null, COR.marca, SpreadsheetApp.BorderStyle.SOLID);
+  }, this);
+  this.sh.setRowHeight(this.linha, 28);
+  this.linha++;
+};
+
+// celulas: [[colIni, colFim, texto, negrito?, alinhamento?], ...]
+Layout_.prototype.tabelaLinha = function (celulas, zebra, discreto) {
+  this._garante();
+  var maior = 1;
+  celulas.forEach(function (c) {
+    var r = this._r(c[0], c[1]);
+    if (c[0] !== c[1]) r.merge();
+    var vazio = !c[2];
+    this._base(r).setNumberFormat('@').setValue(vazio ? '—' : c[2]).setWrap(true)
+      .setBackground(zebra ? COR.creme : COR.branco)
+      .setFontColor(vazio || discreto ? COR.vazio : COR.texto)
+      .setFontWeight(c[3] ? 'bold' : 'normal')
+      .setHorizontalAlignment(c[4] || 'left')
+      .setBorder(true, true, true, true, null, null, COR.borda, SpreadsheetApp.BorderStyle.SOLID);
+    maior = Math.max(maior, Math.ceil(String(c[2] || '').length / 60));
+  }, this);
+  this.sh.setRowHeight(this.linha, Math.max(28, Math.min(200, maior * 16 + 12)));
+  this.linha++;
+};
+
+Layout_.prototype.rodape = function (t) {
+  this._garante();
+  var r = this._r('B', 'F').merge();
+  this._base(r).setNumberFormat('@').setValue(t).setFontSize(8).setFontColor(COR.vazio).setFontStyle('italic');
+  this.sh.setRowHeight(this.linha, 22);
+  this.linha++;
+};
+
+// Estima a altura de uma célula com quebra de texto (merged não cresce sozinha).
+function alturaTexto_(v, larguraPx, minimo) {
+  var porLinha = Math.max(20, Math.floor(larguraPx / 7.2));
+  var linhas = 0;
+  String(v || '—').split('\n').forEach(function (l) { linhas += Math.max(1, Math.ceil(l.length / porLinha)); });
+  return Math.max(minimo, Math.min(600, linhas * 17 + 14));
 }

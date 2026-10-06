@@ -2899,7 +2899,7 @@ function EnviosLivrosPage({ me }) {
 }
 
 /* ============================ CS · Diagnóstico do Mentorado ============================ */
-// Formulário com os campos da planilha modelo de diagnóstico (aba NOVO). O rascunho
+// Formulário do diagnóstico inicial da mentorada. O rascunho
 // é salvo sozinho em cs_diagnosticos; CONCLUIR chama a Edge Function
 // "diagnostico-drive" → Apps Script, que cria "<Nome> - DD/MM/AAAA" no Drive.
 
@@ -2917,7 +2917,7 @@ const DIAG_SECOES = [
     { k: "idade", l: "Idade", t: "number", min: 0, max: 120 },
     { k: "email", l: "Email", t: "email" },
     { k: "profissao", l: "Profissão", t: "text" },
-    { k: "horario_pratica", l: "Horário Sessão Prática", t: "select", op: ["17h", "19h"] },
+    { k: "horario_pratica", l: "Horário Sessão Prática (um ou os dois)", t: "multi", op: ["17h", "19h"] },
   ]},
   { titulo: "Objetivo e dificuldades", campos: [
     { k: "objetivo", l: "Objetivo", t: "select", op: ["Profissional", "Viagem", "Realização Pessoal", "Outros"] },
@@ -2927,8 +2927,8 @@ const DIAG_SECOES = [
   { titulo: "Notas e VAC", campos: [
     { k: "nota_speaking", l: "Nota Speaking (0 a 10)", t: "number", min: 0, max: 10, step: "0.5" },
     { k: "nota_listening", l: "Nota Listening (0 a 10)", t: "number", min: 0, max: 10, step: "0.5" },
-    { k: "vac", l: "Resultado Teste VAC", t: "select", op: ["Visual", "Auditivo", "Cinestésico"] },
-    { k: "vac_obs", l: "VAC: observações", t: "text" },
+    { k: "vac_predominante", l: "VAC Predominante", t: "select", op: ["Visual", "Auditivo", "Cinestésico"] },
+    { k: "vac_observacoes", l: "VAC Observações", t: "textarea", full: true },
   ]},
   { titulo: "Histórico", campos: [
     { k: "o_que_fez", l: "O que já fez antes (tempo e formato)", t: "textarea", full: true },
@@ -2943,10 +2943,7 @@ const DIAG_SECOES = [
     { k: "rotina_video", l: "Rotina: Vídeo Semanal", t: "select", op: DIAG_ROTINA },
     { k: "rotina_pratica", l: "Rotina: Sessão Prática", t: "select", op: DIAG_ROTINA },
   ]},
-  { titulo: "Meta", campos: [
-    { k: "meta", l: "Meta", t: "text", ph: "Ex.: concluir X aulas até a data Y" },
-    { k: "meta_data", l: "Data da meta", t: "date" },
-  ]},
+  { titulo: "Metas", campos: [{ k: "metas", t: "metas", full: true }] },
   { titulo: "Observações gerais", campos: [
     { k: "observacoes", l: "Observações gerais", t: "textarea", full: true },
   ]},
@@ -2963,6 +2960,23 @@ async function fetchDiagnostico(id) {
   const { data, error } = await sb.from("cs_diagnosticos").select("*").eq("id", id).maybeSingle();
   if (error) throw error;
   return data;
+}
+// Converte fichas no formato antigo (horário string, vac/vac_obs, meta única) para o atual.
+function diagArr(v) {
+  if (Array.isArray(v)) return v.filter(Boolean);
+  return v ? [String(v)] : [];
+}
+function diagNormalizar(d0) {
+  const d = { ...(d0 || {}) };
+  if (d.horario_pratica != null && !Array.isArray(d.horario_pratica)) d.horario_pratica = diagArr(d.horario_pratica);
+  if ("vac" in d) { if (!d.vac_predominante && d.vac) d.vac_predominante = d.vac; delete d.vac; }
+  if ("vac_obs" in d) { if (!d.vac_observacoes && d.vac_obs) d.vac_observacoes = d.vac_obs; delete d.vac_obs; }
+  if (!Array.isArray(d.metas)) d.metas = [];
+  if ("meta" in d || "meta_data" in d) {
+    if ((d.meta || "").trim() || d.meta_data) d.metas = [{ descricao: (d.meta || "").trim(), data: d.meta_data || "" }, ...d.metas];
+    delete d.meta; delete d.meta_data;
+  }
+  return d;
 }
 // Colunas de topo (busca/lista) derivadas do jsonb.
 function diagLinha(dados) {
@@ -2989,10 +3003,68 @@ async function concluirDiagnostico(id) {
   return data;
 }
 
+function DiagMetas({ metas, onChange, rascunho, setRascunho, disabled }) {
+  const lista = Array.isArray(metas) ? metas : [];
+  function inserir() {
+    const descricao = (rascunho.descricao || "").trim();
+    if (!descricao) { notify("Escreva a meta antes de inserir.", "err"); return; }
+    onChange("metas", [...lista, { descricao, data: rascunho.data || "" }]);
+    setRascunho({ descricao: "", data: "" });
+  }
+  const editar = (i, campo, v) => onChange("metas", lista.map((m, j) => (j === i ? { ...m, [campo]: v } : m)));
+  const remover = (i) => onChange("metas", lista.filter((_, j) => j !== i));
+  return html`
+    <div class="sm:col-span-2">
+      ${!disabled ? html`
+        <div class="grid gap-3 sm:grid-cols-[1fr_180px_auto] sm:items-end">
+          <${Field} label="Descrição da meta">
+            <input class=${inputCls} placeholder="Ex.: concluir 10 aulas da Trilha 2" value=${rascunho.descricao}
+              onInput=${(e) => setRascunho({ ...rascunho, descricao: e.target.value })}
+              onKeyDown=${(e) => { if (e.key === "Enter") { e.preventDefault(); inserir(); } }} />
+          <//>
+          <${Field} label="Data da meta">
+            <input type="date" class=${inputCls} value=${rascunho.data}
+              onInput=${(e) => setRascunho({ ...rascunho, data: e.target.value })} />
+          <//>
+          <${Btn} type="button" onClick=${inserir}>INSERIR<//>
+        </div>` : null}
+      <div class="mt-4 space-y-2">
+        ${lista.length === 0 ? html`<div class="text-sm text-muted">Nenhuma meta inserida ainda.</div>` :
+          lista.map((m, i) => html`
+            <div key=${i} class="grid items-center gap-2 rounded-xl border border-line bg-bg/60 p-2 sm:grid-cols-[28px_1fr_170px_auto]">
+              <span class="text-center text-sm font-semibold text-brand">${i + 1}</span>
+              <input class=${inputCls} value=${m.descricao || ""} disabled=${disabled} aria-label=${"Meta " + (i + 1)}
+                onInput=${(e) => editar(i, "descricao", e.target.value)} />
+              <input type="date" class=${inputCls} value=${m.data || ""} disabled=${disabled} aria-label=${"Data da meta " + (i + 1)}
+                onInput=${(e) => editar(i, "data", e.target.value)} />
+              ${!disabled ? html`<button type="button" class="px-2 text-sm text-[#a44b43] hover:underline" onClick=${() => remover(i)}>Remover</button>` : html`<span></span>`}
+            </div>`)}
+      </div>
+    </div>`;
+}
+
 function DiagCampo({ c, valor, onChange, disabled }) {
   const v = valor == null ? "" : valor;
   const set = (e) => onChange(c.k, e.target.value);
   let input;
+  if (c.t === "multi") {
+    const sel = diagArr(valor);
+    // Mantém na ordem das opções; valores antigos fora da lista são preservados no fim.
+    const toggle = (o) => {
+      const novo = sel.includes(o) ? sel.filter((x) => x !== o) : [...sel, o];
+      onChange(c.k, [...c.op.filter((x) => novo.includes(x)), ...novo.filter((x) => !c.op.includes(x))]);
+    };
+    input = html`<div class="flex flex-wrap gap-2" role="group">
+      ${c.op.map((o) => html`
+        <button type="button" disabled=${disabled} aria-pressed=${sel.includes(o)} onClick=${() => toggle(o)}
+          class=${cx("rounded-full border px-4 py-1.5 text-sm font-medium transition disabled:opacity-60",
+            sel.includes(o) ? "border-brand bg-brand text-white" : "border-line bg-white text-ink hover:border-brand/50")}>
+          ${o}
+        </button>`)}
+    </div>`;
+    return html`<div class=${c.full ? "sm:col-span-2" : ""}>
+      <span class="mb-1 block text-sm font-medium text-ink">${c.l}</span>${input}</div>`;
+  }
   if (c.t === "textarea")
     input = html`<textarea class=${cx(inputCls, "min-h-[96px]")} rows="4" value=${v} disabled=${disabled} onInput=${set}></textarea>`;
   else if (c.t === "select")
@@ -3013,6 +3085,7 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
   const [salvo, setSalvo] = useState("");
   const [concluindo, setConcluindo] = useState(false);
   const [erroConcluir, setErroConcluir] = useState("");
+  const [metaRascunho, setMetaRascunho] = useState({ descricao: "", data: "" });
   const idRef = useRef(id || null);
   const dadosRef = useRef(null);
   const timer = useRef(null);
@@ -3024,14 +3097,15 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
     if (timer.current) salvarAgora(); // grava o pendente na linha antiga antes de trocar
     idRef.current = id || null;
     if (!id) {
-      const d = { data_diagnostico: hojeISO() };
+      const d = { data_diagnostico: hojeISO(), metas: [] };
       dadosRef.current = d; setDados(d); setRow(null); setSalvo("");
       return;
     }
     setDados(null);
     fetchDiagnostico(id).then((r) => {
       if (!r) { notify("Diagnóstico não encontrado.", "err"); onVoltar(); return; }
-      dadosRef.current = r.dados || {}; setDados(r.dados || {}); setRow(r);
+      const nd = diagNormalizar(r.dados);
+      dadosRef.current = nd; setDados(nd); setRow(r);
       setSalvo(r.updated_at ? "Rascunho salvo em " + fmtDate(r.updated_at, true) : "");
     }).catch((e) => { notify(errMsg(e), "err"); onVoltar(); });
   }, [id]);
@@ -3076,6 +3150,8 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
   }, []);
 
   async function voltar() {
+    if ((metaRascunho.descricao || "").trim() &&
+        !confirm("Há uma meta digitada que ainda não foi inserida. Sair mesmo assim? Ela será descartada.")) return;
     if (timer.current) await salvarAgora();
     else await salvando.current;
     onVoltar();
@@ -3094,6 +3170,10 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
     const d = dadosRef.current || {};
     if (!(d.nome || "").trim() || !d.data_diagnostico) {
       notify("Preencha o Nome completo e a Data do Diagnóstico antes de concluir.", "err");
+      return;
+    }
+    if ((metaRascunho.descricao || "").trim()) {
+      notify("Há uma meta digitada que ainda não foi inserida: clique em INSERIR (ou apague o texto) antes de concluir.", "err");
       return;
     }
     setErroConcluir("");
@@ -3137,7 +3217,10 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
         <section class="mt-4 rounded-2xl border border-line bg-card p-5">
           <h2 class="text-sm font-semibold uppercase tracking-wider text-muted">${s.titulo}</h2>
           <div class="mt-3 grid gap-4 sm:grid-cols-2">
-            ${s.campos.map((c) => html`<${DiagCampo} key=${c.k} c=${c} valor=${dados[c.k]} onChange=${mudar} disabled=${!canEdit} />`)}
+            ${s.campos.map((c) => c.t === "metas"
+              ? html`<${DiagMetas} key=${c.k} metas=${dados.metas} onChange=${mudar} disabled=${!canEdit}
+                  rascunho=${metaRascunho} setRascunho=${setMetaRascunho} />`
+              : html`<${DiagCampo} key=${c.k} c=${c} valor=${dados[c.k]} onChange=${mudar} disabled=${!canEdit} />`)}
           </div>
         </section>`)}
 
@@ -3153,7 +3236,7 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
             <//>
             <${Btn} variant="danger" type="button" class="ml-auto" onClick=${excluir}>Excluir<//>` : null}
         </div>
-        <p class="mt-2 text-xs text-muted">Gera a planilha “Nome completo - DD/MM/AAAA” na pasta 0.1 Diagnóstico Inicial [Marcela]. Concluir de novo atualiza o mesmo arquivo.</p>
+        <p class="mt-2 text-xs text-muted">Gera a planilha “Nome completo - DD/MM/AAAA” na pasta 0.1 Diagnóstico Inicial [Marcela]. Concluir de novo reconstrói a aba “Diagnóstico” do mesmo arquivo com o conteúdo do OS (edições feitas direto nessa aba no Drive são substituídas).</p>
       </div>
     </div>`;
 }
