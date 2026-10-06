@@ -2927,7 +2927,7 @@ const DIAG_SECOES = [
   { titulo: "Notas e VAC", campos: [
     { k: "nota_speaking", l: "Nota Speaking (0 a 10)", t: "number", min: 0, max: 10, step: "0.5" },
     { k: "nota_listening", l: "Nota Listening (0 a 10)", t: "number", min: 0, max: 10, step: "0.5" },
-    { k: "vac_predominante", l: "VAC Predominante", t: "select", op: ["Visual", "Auditivo", "Cinestésico"] },
+    { k: "vac_predominante", l: "VAC Predominante (um ou mais)", t: "multi", op: ["Visual", "Auditivo", "Cinestésico"] },
     { k: "vac_observacoes", l: "VAC Observações", t: "textarea", full: true },
   ]},
   { titulo: "Histórico", campos: [
@@ -2971,6 +2971,7 @@ function diagNormalizar(d0) {
   if (d.horario_pratica != null && !Array.isArray(d.horario_pratica)) d.horario_pratica = diagArr(d.horario_pratica);
   if ("vac" in d) { if (!d.vac_predominante && d.vac) d.vac_predominante = d.vac; delete d.vac; }
   if ("vac_obs" in d) { if (!d.vac_observacoes && d.vac_obs) d.vac_observacoes = d.vac_obs; delete d.vac_obs; }
+  if (d.vac_predominante != null && !Array.isArray(d.vac_predominante)) d.vac_predominante = diagArr(d.vac_predominante);
   if (!Array.isArray(d.metas)) d.metas = [];
   if ("meta" in d || "meta_data" in d) {
     if ((d.meta || "").trim() || d.meta_data) d.metas = [{ descricao: (d.meta || "").trim(), data: d.meta_data || "" }, ...d.metas];
