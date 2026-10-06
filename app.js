@@ -3137,7 +3137,7 @@ function montarPlanoAluno(d0, fonte) {
       table: { widths: ["*"], body: [[{
         fillColor: C.marca, margin: [22, 16, 22, 16],
         stack: [
-          { text: "MENTORIA FLUENT MIND · TIA DO INGLÊS", color: "#ffffff", fontSize: 8.5, bold: true, characterSpacing: 1.6 },
+          { text: "MENTORIA FLUENT MIND", color: "#ffffff", fontSize: 8.5, bold: true, characterSpacing: 1.6 },
           { text: "Seu Plano de Estudos", color: "#ffffff", fontSize: 24, bold: true, margin: [0, 6, 0, 4] },
           { text: nome, color: "#ffffff", fontSize: 13, bold: true },
           dataDiag ? { text: "Diagnóstico de " + dataDiag, color: "#ffe3e7", fontSize: 9.5, margin: [0, 3, 0, 0] } : null,
@@ -3182,13 +3182,13 @@ function montarDocPlano(content, nome, fonte, C) {
   return {
     pageSize: "A4", pageOrientation: "portrait",
     pageMargins: [48, 40, 48, 52],
-    info: { title: "Plano de Estudos - " + nome, author: "Mentoria Fluent Mind · Tia do Inglês" },
+    info: { title: "Plano de Estudos - " + nome, author: "Mentoria Fluent Mind" },
     defaultStyle: { font: fonte, fontSize: 10, color: C.texto, lineHeight: 1.15 },
     background: () => ({ canvas: [{ type: "rect", x: 0, y: 0, w: 595.28, h: 6, color: C.marca }] }),
     footer: (pagina, total) => ({
       margin: [48, 18, 48, 0],
       columns: [
-        { text: "Mentoria Fluent Mind · Tia do Inglês", fontSize: 7.5, color: C.suave },
+        { text: "Mentoria Fluent Mind", fontSize: 7.5, color: C.suave },
         { text: total > 1 ? `Página ${pagina} de ${total}` : "", fontSize: 7.5, color: C.suave, alignment: "right" },
       ],
     }),
