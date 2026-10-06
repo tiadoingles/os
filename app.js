@@ -2938,10 +2938,10 @@ const DIAG_SECOES = [
     { k: "trilha_obs", l: "Observação sobre a trilha", t: "text" },
     { k: "rotina_trilha", l: "Rotina: Trilha", t: "select", op: DIAG_ROTINA },
     { k: "rotina_arena", l: "Rotina: Arena", t: "select", op: DIAG_ROTINA },
-    { k: "arena_nivel", l: "Nível da Arena", t: "select", op: ["RC", "Básico", "Inter", "Avançado"] },
+    { k: "arena_nivel", l: "Nível da Arena (um ou mais)", t: "multi", op: ["RC", "Básico", "Inter", "Avançado"] },
     { k: "rotina_labs", l: "Rotina: Labs", t: "select", op: DIAG_ROTINA },
-    { k: "rotina_video", l: "Rotina: Vídeo Semanal", t: "select", op: DIAG_ROTINA },
-    { k: "rotina_pratica", l: "Rotina: Sessão Prática", t: "select", op: DIAG_ROTINA },
+    { k: "rotina_video", l: "Rotina: Vídeo Semanal", t: "select", op: ["Sim", "Não"] },
+    { k: "rotina_pratica", l: "Rotina: Sessão Prática", t: "select", op: ["Sim", "Não"] },
   ]},
   { titulo: "Metas", campos: [{ k: "metas", t: "metas", full: true }] },
   { titulo: "Observações gerais", campos: [
@@ -2972,6 +2972,7 @@ function diagNormalizar(d0) {
   if ("vac" in d) { if (!d.vac_predominante && d.vac) d.vac_predominante = d.vac; delete d.vac; }
   if ("vac_obs" in d) { if (!d.vac_observacoes && d.vac_obs) d.vac_observacoes = d.vac_obs; delete d.vac_obs; }
   if (d.vac_predominante != null && !Array.isArray(d.vac_predominante)) d.vac_predominante = diagArr(d.vac_predominante);
+  if (d.arena_nivel != null && !Array.isArray(d.arena_nivel)) d.arena_nivel = diagArr(d.arena_nivel);
   if (!Array.isArray(d.metas)) d.metas = [];
   if ("meta" in d || "meta_data" in d) {
     if ((d.meta || "").trim() || d.meta_data) d.metas = [{ descricao: (d.meta || "").trim(), data: d.meta_data || "" }, ...d.metas];
