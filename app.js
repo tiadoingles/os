@@ -76,6 +76,8 @@ const NAV = [
       desc: "Cadastro e acompanhamento dos envios de material didático e do livro Mente Aberta e Língua Solta." },
     { slug: "diagnostico", nome: "Diagnóstico do Mentorado",
       desc: "Formulário do diagnóstico inicial da mentorada; ao concluir, gera a planilha no Drive (pasta 0.1 Diagnóstico Inicial)." },
+    { slug: "metas", nome: "Metas Mentorados",
+      desc: "Metas das mentoradas (do diagnóstico e manuais), ordenadas por vencimento, com FEITO e planilha sincronizada." },
     { slug: "metricas-atendimento", nome: "Métricas de Atendimento",
       desc: "Volume de atendimentos, tempo de primeira resposta, tempo de resolução e satisfação do CS. Base de dados a definir." },
     { slug: "chat-cademi", nome: "Chat da Cademí",
@@ -1730,7 +1732,8 @@ function SyncRow({ row, onDone }) {
   async function sincronizarAgora() {
     setBusy(true);
     try {
-      const { data, error } = await sb.functions.invoke("sync", { body: { op: row.chave, manual: true } });
+      const fn = row.chave === "metas-planilha" ? "metas-sheet-sync" : "sync";
+      const { data, error } = await sb.functions.invoke(fn, { body: { op: row.chave, manual: true } });
       if (error) {
         let msg = error.message;
         try { const j = await error.context.json(); if (j && j.error) msg = j.error; } catch (_) { /* ignore */ }
@@ -2978,6 +2981,8 @@ function diagNormalizar(d0) {
     if ((d.meta || "").trim() || d.meta_data) d.metas = [{ descricao: (d.meta || "").trim(), data: d.meta_data || "" }, ...d.metas];
     delete d.meta; delete d.meta_data;
   }
+  // Cada meta tem um id estável (ligação com cs_metas e o FEITO). O banco também garante isso.
+  d.metas = d.metas.filter((m) => m && typeof m === "object").map((m) => (m.id ? m : { ...m, id: novoIdMeta() }));
   return d;
 }
 // Colunas de topo (busca/lista) derivadas do jsonb.
@@ -3219,7 +3224,7 @@ function DiagMetas({ metas, onChange, rascunho, setRascunho, disabled }) {
   function inserir() {
     const descricao = (rascunho.descricao || "").trim();
     if (!descricao) { notify("Escreva a meta antes de inserir.", "err"); return; }
-    onChange("metas", [...lista, { descricao, data: rascunho.data || "" }]);
+    onChange("metas", [...lista, { id: novoIdMeta(), descricao, data: rascunho.data || "" }]);
     setRascunho({ descricao: "", data: "" });
   }
   const editar = (i, campo, v) => onChange("metas", lista.map((m, j) => (j === i ? { ...m, [campo]: v } : m)));
@@ -3230,12 +3235,12 @@ function DiagMetas({ metas, onChange, rascunho, setRascunho, disabled }) {
         <div class="grid gap-3 sm:grid-cols-[1fr_180px_auto] sm:items-end">
           <${Field} label="Descrição da meta">
             <input class=${inputCls} placeholder="Ex.: concluir 10 aulas da Trilha 2" value=${rascunho.descricao}
-              onInput=${(e) => setRascunho({ ...rascunho, descricao: e.target.value })}
+              onInput=${(e) => { const v = e.target.value; setRascunho((r) => ({ ...r, descricao: v })); }}
               onKeyDown=${(e) => { if (e.key === "Enter") { e.preventDefault(); inserir(); } }} />
           <//>
           <${Field} label="Data da meta">
             <input type="date" class=${inputCls} value=${rascunho.data}
-              onInput=${(e) => setRascunho({ ...rascunho, data: e.target.value })} />
+              onInput=${(e) => { const v = e.target.value; setRascunho((r) => ({ ...r, data: v })); }} />
           <//>
           <${Btn} type="button" onClick=${inserir}>INSERIR<//>
         </div>` : null}
@@ -3303,6 +3308,8 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
   const timer = useRef(null);
   const salvando = useRef(Promise.resolve());
   const montado = useRef(true);
+  const assinaturaMetas = useRef(null); // nome/email/metas do último salvamento
+  const assinar = (l) => JSON.stringify([l.nome, l.email, (l.dados && l.dados.metas) || []]);
 
   useEffect(() => {
     if (id && id === idRef.current && dadosRef.current) return; // acabou de ser criado aqui
@@ -3318,6 +3325,7 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
       if (!r) { notify("Diagnóstico não encontrado.", "err"); onVoltar(); return; }
       const nd = diagNormalizar(r.dados);
       dadosRef.current = nd; setDados(nd); setRow(r);
+      assinaturaMetas.current = assinar(diagLinha(nd));
       setSalvo(r.updated_at ? "Rascunho salvo em " + fmtDate(r.updated_at, true) : "");
     }).catch((e) => { notify(errMsg(e), "err"); onVoltar(); });
   }, [id]);
@@ -3326,6 +3334,7 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
     clearTimeout(timer.current); timer.current = null;
     const alvo = idRef.current;
     const linha = diagLinha(dadosRef.current || {});
+    const assinatura = assinar(linha);
     const run = salvando.current.then(async () => {
       if (alvo && alvo !== idRef.current) { // salvamento de uma linha anterior
         const { error } = await sb.from("cs_diagnosticos").update(linha).eq("id", alvo);
@@ -3344,6 +3353,7 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
         setRow(data);
       }
       setSalvo("Rascunho salvo às " + new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }));
+      if (assinatura !== assinaturaMetas.current) { assinaturaMetas.current = assinatura; agendarSyncPlanilha(); }
     });
     salvando.current = run.catch(() => {});
     try { await run; return true; }
@@ -3417,13 +3427,14 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
   }
 
   async function excluir() {
-    if (!confirm("Excluir este diagnóstico do OS? A planilha no Drive (se houver) não é apagada.")) return;
+    if (!confirm("Excluir este diagnóstico do OS? As metas desta ficha (inclusive as concluídas) saem da aba Metas Mentorados; metas manuais vinculadas são mantidas. A planilha no Drive (se houver) não é apagada.")) return;
     clearTimeout(timer.current); timer.current = null;
     await salvando.current;
     if (!idRef.current) { onVoltar(); return; }
     const { error } = await sb.from("cs_diagnosticos").delete().eq("id", idRef.current);
     if (error) { notify(errMsg(error), "err"); return; }
     notify("Diagnóstico excluído.", "ok");
+    agendarSyncPlanilha(500);
     onVoltar();
   }
 
@@ -3563,6 +3574,326 @@ function DiagnosticoPage({ me, query }) {
             </tbody>
           </table>
         </div>`}
+    </div>`;
+}
+
+
+/* ============================ CS · Metas Mentorados ============================ */
+// Metas das mentoradas: as da ficha de diagnóstico (dados.metas) viram linhas de
+// cs_metas por trigger no banco a cada salvamento da ficha; as manuais são criadas aqui.
+// O FEITO mora em cs_metas. A planilha METAS MENTORADOS é reescrita pela Edge Function
+// "metas-sheet-sync" (chamada com debounce depois de cada mudança e por um cron diário).
+
+const PLANILHA_METAS_URL = "https://docs.google.com/spreadsheets/d/1L6kvk8RnzvEvXnzrKpuw0HwXs1Vzu3uHN4eyBOfhsyM/edit";
+let syncPlanilhaTimer = null;
+
+function novoIdMeta() {
+  return (crypto.randomUUID && crypto.randomUUID()) ||
+    "m-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+}
+async function sincronizarPlanilhaMetas() {
+  const { data, error } = await sb.functions.invoke("metas-sheet-sync", { body: {} });
+  if (error) {
+    let msg = error.message;
+    try { const j = await error.context.json(); if (j && j.error) msg = j.error; } catch (_) { /* ignore */ }
+    return { ok: false, error: msg };
+  }
+  return data || { ok: false, error: "sem resposta" };
+}
+// Sincroniza a planilha alguns segundos depois da última mudança (falha em silêncio:
+// o status fica em sync_status e aparece como aviso discreto na aba Metas Mentorados).
+function agendarSyncPlanilha(ms = 3000) {
+  clearTimeout(syncPlanilhaTimer);
+  syncPlanilhaTimer = setTimeout(() => {
+    sincronizarPlanilhaMetas().then((r) => dispatchEvent(new CustomEvent("metas:planilha", { detail: r })));
+  }, ms);
+}
+
+async function fetchMetas() {
+  const { data, error } = await sb.from("cs_metas").select("*")
+    .order("vencimento", { ascending: true, nullsFirst: false }).order("created_at", { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+async function fetchStatusPlanilhaMetas() {
+  const { data } = await sb.from("sync_status").select("*").eq("chave", "metas-planilha").maybeSingle();
+  return data || null;
+}
+async function fetchDiagnosticosResumo() {
+  const { data, error } = await sb.from("cs_diagnosticos").select("id, nome, email").order("nome");
+  if (error) throw error;
+  return (data || []).filter((d) => (d.nome || "").trim());
+}
+
+function diasAte(iso, hoje) {
+  if (!iso) return null;
+  const [y, m, d] = iso.split("-").map(Number);
+  const [hy, hm, hd] = hoje.split("-").map(Number);
+  return Math.round((Date.UTC(y, m - 1, d) - Date.UTC(hy, hm - 1, hd)) / 86400000);
+}
+function prazoMeta(m, hoje) {
+  const n = diasAte(m.vencimento, hoje);
+  if (n === null) return { cls: PILL_NEUTRAL, label: "Sem data" };
+  if (n < 0) return { cls: PILL_ERR, label: `Vencida há ${-n} ${-n === 1 ? "dia" : "dias"}` };
+  if (n === 0) return { cls: PILL_WARN, label: "Vence hoje" };
+  if (n <= 7) return { cls: PILL_WARN, label: `Vence em ${n} ${n === 1 ? "dia" : "dias"}` };
+  return { cls: PILL_NEUTRAL, label: `Vence em ${n} dias` };
+}
+
+function MetaManualModal({ meta, diags, onClose, onSalvo }) {
+  const novo = !meta;
+  const [vinculo, setVinculo] = useState(meta ? (meta.diagnostico_id || "") : "");
+  const [nome, setNome] = useState(meta ? meta.mentorado_nome : "");
+  const [email, setEmail] = useState(meta ? (meta.mentorado_email || "") : "");
+  const [descricao, setDescricao] = useState(meta ? meta.descricao : "");
+  const [venc, setVenc] = useState(meta ? (meta.vencimento || "") : "");
+  const [busy, setBusy] = useState(false);
+  const diag = diags.find((d) => d.id === vinculo);
+
+  async function salvar(e) {
+    e && e.preventDefault();
+    const n = diag ? diag.nome : nome.trim();
+    if (!n) { notify("Escolha ou digite o nome do mentorado.", "err"); return; }
+    if (!descricao.trim()) { notify("Descreva a meta.", "err"); return; }
+    setBusy(true);
+    try {
+      const payload = {
+        origem: "manual", diagnostico_id: diag ? diag.id : null,
+        mentorado_nome: n, mentorado_email: (diag ? diag.email : email.trim()) || null,
+        descricao: descricao.trim(), vencimento: venc || null,
+      };
+      const q = novo ? sb.from("cs_metas").insert(payload) : sb.from("cs_metas").update(payload).eq("id", meta.id);
+      const { error } = await q;
+      if (error) throw error;
+      notify(novo ? "Meta cadastrada." : "Meta atualizada.", "ok");
+      onSalvo();
+    } catch (err) { notify(errMsg(err), "err"); }
+    finally { setBusy(false); }
+  }
+
+  return html`
+    <${Modal} title=${novo ? "Nova meta" : "Editar meta"} onClose=${onClose}>
+      <form class="space-y-4" onSubmit=${salvar}>
+        <${Field} label="Mentorado" required>
+          <select class=${inputCls} value=${vinculo} onChange=${(e) => setVinculo(e.target.value)}>
+            <option value="">Outro (digitar nome e e-mail)</option>
+            ${diags.map((d) => html`<option value=${d.id}>${d.nome}${d.email ? " · " + d.email : ""}</option>`)}
+          </select>
+        <//>
+        ${!diag ? html`
+          <div class="grid gap-3 sm:grid-cols-2">
+            <${Field} label="Nome" required><input class=${inputCls} value=${nome} onInput=${(e) => setNome(e.target.value)} /><//>
+            <${Field} label="E-mail"><input type="email" class=${inputCls} value=${email} onInput=${(e) => setEmail(e.target.value)} /><//>
+          </div>` : null}
+        <${Field} label="Meta" required>
+          <textarea class=${cx(inputCls, "min-h-[80px]")} value=${descricao} onInput=${(e) => setDescricao(e.target.value)}></textarea>
+        <//>
+        <${Field} label="Vencimento"><input type="date" class=${cx(inputCls, "w-auto")} value=${venc} onInput=${(e) => setVenc(e.target.value)} /><//>
+        <div class="flex justify-end gap-2">
+          <${Btn} variant="ghost" type="button" onClick=${onClose}>Cancelar<//>
+          <${Btn} type="submit" loading=${busy}>${novo ? "Cadastrar meta" : "Salvar"}<//>
+        </div>
+      </form>
+    <//>`;
+}
+
+function MetasPage({ me }) {
+  const canEdit = me.role !== "leitor";
+  const [metas, setMetas] = useState(null);
+  const [diags, setDiags] = useState([]);
+  const [status, setStatus] = useState(null);
+  const [busca, setBusca] = useState("");
+  const [filtro, setFiltro] = useState("todas");
+  const [verConcluidas, setVerConcluidas] = useState(false);
+  const [modal, setModal] = useState(null); // { meta } | { meta: null }
+  const [busyId, setBusyId] = useState(null);
+  const [sincronizando, setSincronizando] = useState(false);
+  const hoje = hojeISO();
+
+  async function recarregar() {
+    try {
+      const [m, d, s] = await Promise.all([fetchMetas(), fetchDiagnosticosResumo(), fetchStatusPlanilhaMetas()]);
+      setMetas(m); setDiags(d); setStatus(s);
+    } catch (e) { notify(errMsg(e), "err"); setMetas((x) => x || []); }
+  }
+  useEffect(() => { recarregar(); }, []);
+  useEffect(() => {
+    const on = () => fetchStatusPlanilhaMetas().then(setStatus).catch(() => {});
+    addEventListener("metas:planilha", on);
+    return () => removeEventListener("metas:planilha", on);
+  }, []);
+
+  function mudou() { recarregar(); if (canEdit) agendarSyncPlanilha(); }
+
+  async function marcar(m, feito) {
+    setBusyId(m.id);
+    try {
+      const { error } = await sb.from("cs_metas").update({ concluida_em: feito ? new Date().toISOString() : null }).eq("id", m.id);
+      if (error) throw error;
+      notify(feito ? "Meta marcada como feita." : "Meta reaberta.", "ok");
+      mudou();
+    } catch (e) { notify(errMsg(e), "err"); }
+    finally { setBusyId(null); }
+  }
+  async function excluir(m) {
+    if (!confirm("Excluir esta meta manual?")) return;
+    const { error } = await sb.from("cs_metas").delete().eq("id", m.id);
+    if (error) { notify(errMsg(error), "err"); return; }
+    notify("Meta excluída.", "ok");
+    mudou();
+  }
+  async function sincronizarAgora() {
+    setSincronizando(true);
+    const r = await sincronizarPlanilhaMetas();
+    setStatus(await fetchStatusPlanilhaMetas().catch(() => status));
+    setSincronizando(false);
+    if (r.ok) notify("Planilha atualizada: " + (r.detalhe || "ok"), "ok");
+    else notify(r.error || "Não foi possível sincronizar a planilha.", "err");
+  }
+
+  const q = busca.trim().toLowerCase();
+  const casaBusca = (m) => !q || (m.mentorado_nome || "").toLowerCase().includes(q) ||
+    (m.mentorado_email || "").toLowerCase().includes(q) || (m.descricao || "").toLowerCase().includes(q);
+  const abertas = useMemo(() => (metas || []).filter((m) => !m.concluida_em && casaBusca(m))
+    .filter((m) => {
+      const n = diasAte(m.vencimento, hoje);
+      if (filtro === "vencidas") return n !== null && n < 0;
+      if (filtro === "7dias") return n !== null && n >= 0 && n <= 7;
+      return true;
+    })
+    .sort((a, b) => (a.vencimento ? 0 : 1) - (b.vencimento ? 0 : 1) ||
+      String(a.vencimento || "").localeCompare(String(b.vencimento || "")) ||
+      (a.mentorado_nome || "").localeCompare(b.mentorado_nome || "")), [metas, q, filtro, hoje]);
+  const concluidas = useMemo(() => (metas || []).filter((m) => m.concluida_em && casaBusca(m))
+    .sort((a, b) => String(b.concluida_em).localeCompare(String(a.concluida_em))), [metas, q]);
+  const nVencidas = (metas || []).filter((m) => !m.concluida_em && m.vencimento && m.vencimento < hoje).length;
+
+  function origem(m) {
+    if (m.origem === "diagnostico") return html`
+      <div class="text-xs text-muted">Diagnóstico${m.removida_da_ficha ? " (retirada da ficha)" : ""}</div>
+      ${!m.removida_da_ficha ? html`<a class="text-xs text-brand hover:underline" href=${"#/cs/diagnostico?id=" + m.diagnostico_id}>editar na ficha</a>` : null}`;
+    return html`
+      <div class="text-xs text-muted">Manual</div>
+      ${m.diagnostico_id ? html`<a class="text-xs text-brand hover:underline" href=${"#/cs/diagnostico?id=" + m.diagnostico_id}>ver ficha</a>` : null}`;
+  }
+
+  const filtros = [["todas", "Todas"], ["vencidas", "Só vencidas"], ["7dias", "Próximos 7 dias"]];
+  const erroPlanilha = status && status.ultimo_status === "erro";
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">🤝 CS / Suporte</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">Metas Mentorados</h1>
+      <p class="mt-1 text-sm text-muted">Metas definidas no diagnóstico e metas cadastradas aqui. Marque FEITO quando a mentorada cumprir.
+        <a class="text-brand hover:underline" href=${PLANILHA_METAS_URL} target="_blank" rel="noopener">Abrir planilha ↗</a></p>
+
+      ${erroPlanilha ? html`
+        <div class="mt-4 rounded-lg border border-[#efe0b5] bg-[#faf5e4] px-3 py-2 text-xs text-[#7c6a2a]">
+          A planilha METAS MENTORADOS não foi atualizada na última tentativa: ${String(status.ultimo_detalhe || "erro").replace(/\.$/, "")}.
+          As metas continuam salvas no OS e a planilha se atualiza sozinha quando o acesso voltar.
+        </div>` : null}
+
+      ${metas === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
+        <div class="mt-5 flex flex-wrap items-center gap-2">
+          ${canEdit ? html`<${Btn} type="button" onClick=${() => setModal({ meta: null })}>＋ Nova meta<//>` : null}
+          <input class=${cx(inputCls, "max-w-xs")} placeholder="Buscar por mentorado ou meta" value=${busca} onInput=${(e) => setBusca(e.target.value)} />
+          <div class="flex gap-1">
+            ${filtros.map(([k, l]) => html`
+              <button type="button" onClick=${() => setFiltro(k)}
+                class=${cx("rounded-full border px-3 py-1 text-xs font-medium", filtro === k ? "border-brand bg-brand text-white" : "border-line bg-white text-ink hover:border-brand/50")}>
+                ${l}${k === "vencidas" && nVencidas ? ` (${nVencidas})` : ""}
+              </button>`)}
+          </div>
+          <div class="ml-auto flex items-center gap-2 text-xs text-muted">
+            ${status && status.ultima_execucao_em ? html`<span>Planilha: ${status.ultimo_status === "ok" ? "atualizada" : "com erro"} ${tempoDesde(status.ultima_execucao_em)}</span>` : null}
+            ${canEdit ? html`<${Btn} variant="ghost" type="button" loading=${sincronizando} onClick=${sincronizarAgora}>Sincronizar planilha agora<//>` : null}
+          </div>
+        </div>
+
+        <div class="mt-3 overflow-x-auto rounded-2xl border border-line bg-card">
+          <table class="w-full min-w-[820px] text-sm">
+            <thead>
+              <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
+                <th class="px-4 py-2.5">Mentorado</th>
+                <th class="px-4 py-2.5">Meta</th>
+                <th class="px-4 py-2.5">Vencimento</th>
+                <th class="px-4 py-2.5">Origem</th>
+                <th class="px-4 py-2.5 text-right">Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${abertas.length === 0 ? html`
+                <tr><td colspan="5" class="px-4 py-8 text-center text-sm text-muted">Nenhuma meta aberta${filtro !== "todas" || q ? " com esse filtro" : ""}.</td></tr>` :
+                abertas.map((m) => {
+                  const p = prazoMeta(m, hoje);
+                  const vencida = p.cls === PILL_ERR;
+                  return html`
+                    <tr key=${m.id} class=${cx("border-b border-line last:border-0", vencida ? "bg-[#fbf0ee]" : "hover:bg-black/[0.02]")}>
+                      <td class="px-4 py-2.5 align-top">
+                        <div class="font-medium text-ink">${m.mentorado_nome || "—"}</div>
+                        ${m.mentorado_email ? html`<div class="text-xs text-muted">${m.mentorado_email}</div>` : null}
+                      </td>
+                      <td class="px-4 py-2.5 align-top text-ink">${m.descricao || "—"}</td>
+                      <td class="px-4 py-2.5 align-top">
+                        <div class="text-xs text-ink">${m.vencimento ? fmtDataISO(m.vencimento) : "—"}</div>
+                        <${Badge} class=${cx("mt-1", p.cls)}>${p.label}<//>
+                      </td>
+                      <td class="px-4 py-2.5 align-top">${origem(m)}</td>
+                      <td class="px-4 py-2.5 align-top text-right">
+                        ${canEdit ? html`
+                          <div class="flex flex-wrap items-center justify-end gap-2">
+                            ${m.origem === "manual" ? html`
+                              <button type="button" class="text-xs text-muted hover:text-ink hover:underline" onClick=${() => setModal({ meta: m })}>Editar</button>
+                              <button type="button" class="text-xs text-[#a44b43] hover:underline" onClick=${() => excluir(m)}>Excluir</button>` : null}
+                            <button type="button" disabled=${busyId === m.id} onClick=${() => marcar(m, true)}
+                              class="inline-flex items-center gap-1.5 rounded-md bg-[#5e7a52] px-3 py-1 text-xs font-semibold tracking-wide text-white hover:bg-[#4c6b3f] disabled:opacity-60">
+                              ${busyId === m.id ? html`<span class="spinner"></span>` : null}FEITO
+                            </button>
+                          </div>` : null}
+                      </td>
+                    </tr>`;
+                })}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="mt-6">
+          <button type="button" class="text-sm font-semibold uppercase tracking-wider text-muted hover:text-ink" onClick=${() => setVerConcluidas((v) => !v)}>
+            ${verConcluidas ? "▾" : "▸"} Concluídas (${concluidas.length})
+          </button>
+          ${verConcluidas ? html`
+            <div class="mt-3 overflow-x-auto rounded-2xl border border-line bg-card">
+              <table class="w-full min-w-[820px] text-sm">
+                <tbody>
+                  ${concluidas.length === 0 ? html`<tr><td class="px-4 py-6 text-center text-sm text-muted">Nenhuma meta concluída ainda.</td></tr>` :
+                    concluidas.map((m) => html`
+                      <tr key=${m.id} class="border-b border-line last:border-0">
+                        <td class="px-4 py-2.5 align-top">
+                          <div class="font-medium text-ink">${m.mentorado_nome || "—"}</div>
+                          ${m.mentorado_email ? html`<div class="text-xs text-muted">${m.mentorado_email}</div>` : null}
+                        </td>
+                        <td class="px-4 py-2.5 align-top text-muted line-through decoration-black/20">${m.descricao || "—"}</td>
+                        <td class="px-4 py-2.5 align-top text-xs text-muted">
+                          <${Badge} class=${PILL_OK}>Concluída<//>
+                          <div class="mt-1">${fmtDate(m.concluida_em, true)}${m.concluida_por_nome ? " · " + m.concluida_por_nome : ""}</div>
+                          ${m.vencimento ? html`<div>Vencimento: ${fmtDataISO(m.vencimento)}</div>` : null}
+                        </td>
+                        <td class="px-4 py-2.5 align-top">${origem(m)}</td>
+                        <td class="px-4 py-2.5 align-top text-right">
+                          ${canEdit && !m.removida_da_ficha ? html`
+                            <button type="button" disabled=${busyId === m.id} class="text-xs text-muted hover:text-ink hover:underline disabled:opacity-50"
+                              onClick=${() => marcar(m, false)}>Desfazer</button>` : null}
+                          ${m.removida_da_ficha ? html`<span class="text-[11px] text-muted">retirada da ficha</span>` : null}
+                        </td>
+                      </tr>`)}
+                </tbody>
+              </table>
+            </div>` : null}
+        </div>
+      `}
+
+      ${modal ? html`<${MetaManualModal} meta=${modal.meta} diags=${diags} onClose=${() => setModal(null)}
+        onSalvo=${() => { setModal(null); mudou(); }} />` : null}
     </div>`;
 }
 
@@ -6189,6 +6520,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "cs" && p1 === "faq") return html`<${FaqPage} me=${me} />`;
   if (p0 === "cs" && p1 === "envios-livros") return html`<${EnviosLivrosPage} me=${me} />`;
   if (p0 === "cs" && p1 === "diagnostico") return html`<${DiagnosticoPage} me=${me} query=${route.query} />`;
+  if (p0 === "cs" && p1 === "metas") return html`<${MetasPage} me=${me} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
   if (p0 === "cs" && p1 === "chat-cademi") return html`<${ChatCademiPage} />`;
   if (p0 === "pedagogico" && p1 === "aulas-praticas") return html`<${AulasPraticasPage} />`;
