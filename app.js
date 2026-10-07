@@ -537,6 +537,188 @@ async function aiCall(action, extra = {}) {
   return data;
 }
 
+/* ============================ Desfazer (pilha por aba) ============================ */
+// Mecanismo comum de DESFAZER. Cada tela registra, depois de gravar, uma função que
+// volta a alteração (registrarDesfazer). Aparece o aviso "Alteração salva · DESFAZER"
+// por 10 s e o botão DESFAZER no topo da aba (BotaoDesfazer, renderizado pelo Shell)
+// volta a última alteração da pilha daquela aba (até 20). A pilha vive só na memória:
+// some ao recarregar a página. Depois de desfazer, dispara "app:desfeito" para a tela
+// recarregar seus dados (useAoDesfazer).
+const DESFAZER_MAX = 20;
+const pilhasDesfazer = {}; // escopo -> [{ id, rotulo, desfazer }]
+let desfazendoAgora = false;
+
+// Rota -> escopo (aba) da pilha. Telas sem escrita desfazível retornam null.
+function escopoDesfazer(route) {
+  const [p0, p1] = route.parts;
+  if (p0 === "cs" && ["metas", "diagnostico", "envios-livros"].includes(p1)) return "cs/" + p1;
+  if (p0 === "agenda") return "agenda";
+  if (p0 === "farol") return "farol";
+  if (p0 === "ferramentas") return "ferramentas";
+  if (p0 === "base" || p0 === "secao" || p0 === "doc") return "base";
+  return null;
+}
+
+function avisarPilha(escopo) { dispatchEvent(new CustomEvent("app:desfazer-pilha", { detail: { escopo } })); }
+
+function registrarDesfazer(escopo, rotulo, desfazer, opts = {}) {
+  const pilha = (pilhasDesfazer[escopo] = pilhasDesfazer[escopo] || []);
+  const item = { id: Math.random().toString(36).slice(2), rotulo, desfazer };
+  pilha.push(item);
+  if (pilha.length > DESFAZER_MAX) pilha.shift();
+  avisarPilha(escopo);
+  if (opts.toast !== false) {
+    dispatchEvent(new CustomEvent("app:toast", { detail: {
+      message: opts.mensagem || "Alteração salva", kind: "ok", duracao: 10000,
+      acao: { rotulo: "DESFAZER", onClick: () => desfazerItem(escopo, item.id) },
+    } }));
+  }
+  return item.id;
+}
+
+async function desfazerItem(escopo, itemId) {
+  if (desfazendoAgora) { notify("Aguarde: um desfazer já está em andamento.", "info"); return false; }
+  if (itemId) {
+    const p = pilhasDesfazer[escopo] || [];
+    const i = p.findIndex((x) => x.id === itemId);
+    if (i >= 0 && i !== p.length - 1) {
+      notify("Há alterações mais recentes nesta aba: use o botão DESFAZER no topo para voltar uma de cada vez.", "info");
+      return false;
+    }
+  }
+  desfazendoAgora = true;
+  avisarPilha(escopo);
+  let alvo = null;
+  try {
+    // Telas com edição pendente (ex.: autosave do diagnóstico) gravam antes de desfazer.
+    const pendentes = [];
+    dispatchEvent(new CustomEvent("app:antes-desfazer", { detail: { escopo, pendentes } }));
+    await Promise.all(pendentes);
+    const pilha = pilhasDesfazer[escopo] || [];
+    const idx = itemId ? pilha.findIndex((x) => x.id === itemId) : pilha.length - 1;
+    if (idx < 0) { notify("Essa alteração já foi desfeita.", "info"); return false; }
+    const item = pilha[idx];
+    alvo = item;
+    const r = await item.desfazer();
+    if (r === false) return false; // cancelado pelo usuário (conflito)
+    pilha.splice(pilha.indexOf(item), 1);
+    notify("Desfeito: " + item.rotulo + ".", "ok");
+    dispatchEvent(new CustomEvent("app:desfeito", { detail: { escopo } }));
+    return true;
+  } catch (e) {
+    // Erro definitivo (sem permissão, registro sumiu...): a ação sai da pilha para não travar as anteriores.
+    const pilha = pilhasDesfazer[escopo] || [];
+    if (alvo && pilha.includes(alvo)) {
+      pilha.splice(pilha.indexOf(alvo), 1);
+      notify("Não foi possível desfazer: " + errMsg(e) + ". Essa ação saiu da lista do DESFAZER.", "err");
+    } else notify("Não foi possível desfazer: " + errMsg(e), "err");
+    return false;
+  } finally {
+    desfazendoAgora = false;
+    avisarPilha(escopo);
+  }
+}
+
+function useAoDesfazer(escopo, fn) {
+  const ref = useRef(fn);
+  ref.current = fn;
+  useEffect(() => {
+    const on = (e) => { if (e.detail && e.detail.escopo === escopo) ref.current(); };
+    addEventListener("app:desfeito", on);
+    return () => removeEventListener("app:desfeito", on);
+  }, [escopo]);
+}
+
+function BotaoDesfazer({ escopo }) {
+  const [, setN] = useState(0);
+  useEffect(() => {
+    const on = (e) => { if (!e.detail || e.detail.escopo === escopo) setN((n) => n + 1); };
+    addEventListener("app:desfazer-pilha", on);
+    return () => removeEventListener("app:desfazer-pilha", on);
+  }, [escopo]);
+  const pilha = pilhasDesfazer[escopo] || [];
+  const topo = pilha[pilha.length - 1];
+  const dica = topo
+    ? `Desfazer: ${topo.rotulo}` + (pilha.length > 1 ? ` (${pilha.length} alterações nesta sessão)` : "") +
+      ". O histórico vale só enquanto a página estiver aberta."
+    : "Nada para desfazer. O histórico vale só enquanto a página estiver aberta (some ao recarregar).";
+  return html`
+    <button type="button" title=${dica} aria-label=${dica} disabled=${!topo || desfazendoAgora}
+      onClick=${() => desfazerItem(escopo)}
+      class="inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-xs font-semibold tracking-wide text-ink ring-1 ring-line transition hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-40">
+      <svg viewBox="0 0 20 20" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M7 5 3 9l4 4"/><path d="M3 9h9a5 5 0 0 1 0 10h-2"/></svg>
+      DESFAZER${pilha.length > 1 ? html`<span class="font-normal text-muted">(${pilha.length})</span>` : null}
+    </button>`;
+}
+
+// ---- Ajudantes para tabelas simples (snapshot da linha antes/depois) ----
+const DESFAZER_IGNORAR = new Set(["updated_at", "atualizado_em"]);
+// Snapshots vêm sempre de select("*") (sem joins); só o carimbo de atualização sai.
+function semCamposAuto(row) {
+  const o = { ...row };
+  for (const k of DESFAZER_IGNORAR) delete o[k];
+  return o;
+}
+function mesmaVersao(atual, esperado) {
+  if (!atual || !esperado) return false;
+  if (atual.updated_at && esperado.updated_at && atual.updated_at === esperado.updated_at) return true;
+  const limpa = (r) => JSON.stringify(Object.keys(r).filter((k) => !DESFAZER_IGNORAR.has(k)).sort().map((k) => [k, r[k]]));
+  return limpa(atual) === limpa(esperado);
+}
+function confirmarConflito(rotulo) {
+  return confirm(`Desfazer "${rotulo}": este registro foi alterado depois dessa ação (por outra pessoa ou em outra tela). ` +
+    "Desfazer mesmo assim vai sobrescrever essas mudanças. Continuar?");
+}
+async function linhaAtual(tabela, id, chave = "id") {
+  const { data, error } = await sb.from(tabela).select("*").eq(chave, id).maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+// criar -> desfazer exclui o registro criado.
+function desfazerCriacao(tabela, depois, rotulo, { chave = "id" } = {}) {
+  return async () => {
+    const atual = await linhaAtual(tabela, depois[chave], chave);
+    if (!atual) return true;
+    if (!mesmaVersao(atual, depois) && !confirmarConflito(rotulo)) return false;
+    const { data, error } = await sb.from(tabela).delete().eq(chave, depois[chave]).select(chave);
+    if (error) throw error;
+    if (!data || !data.length) throw new Error("sem permissão para excluir este registro (a exclusão pode ser restrita a administradores)");
+    return true;
+  };
+}
+// editar -> desfazer regrava o snapshot anterior completo.
+function desfazerEdicao(tabela, antes, depois, rotulo, { chave = "id", restaurar } = {}) {
+  return async () => {
+    const atual = await linhaAtual(tabela, antes[chave], chave);
+    if (!atual) throw new Error("o registro não existe mais");
+    if (depois && !mesmaVersao(atual, depois) && !confirmarConflito(rotulo)) return false;
+    if (restaurar) { await restaurar([antes]); return true; }
+    const { data, error } = await sb.from(tabela).update(semCamposAuto(antes)).eq(chave, antes[chave]).select(chave);
+    if (error) throw error;
+    if (!data || !data.length) throw new Error("sem permissão para alterar este registro");
+    return true;
+  };
+}
+// excluir -> desfazer reinsere com o MESMO id e todos os campos.
+function desfazerExclusao(tabela, antes, rotulo, { chave = "id", restaurar } = {}) {
+  return async () => {
+    const atual = await linhaAtual(tabela, antes[chave], chave);
+    if (atual) throw new Error("o registro já existe de novo");
+    if (restaurar) { await restaurar([antes]); return true; }
+    const { error } = await sb.from(tabela).insert(semCamposAuto(antes));
+    if (error) throw error;
+    return true;
+  };
+}
+// cs_metas tem campos protegidos por trigger: a restauração é feita no servidor a partir da
+// versão que o próprio banco guardou (os_desfazer_snapshots); o cliente só diz qual versão.
+async function restaurarMetas(linhas) {
+  const { error } = await sb.rpc("os_restaurar_cs_metas", { p_versoes: linhas.map((r) => ({ id: r.id, updated_at: r.updated_at })) });
+  if (error) throw error;
+}
+
+
 /* ============================ UI primitives ============================ */
 
 function Btn({ variant = "primary", as = "button", href, loading, disabled, children, class: cls, ...rest }) {
@@ -594,13 +776,18 @@ function Toaster() {
     const on = (e) => {
       const id = Math.random().toString(36).slice(2);
       setItems((x) => [...x, { id, ...e.detail }]);
-      setTimeout(() => setItems((x) => x.filter((i) => i.id !== id)), 4500);
+      setTimeout(() => setItems((x) => x.filter((i) => i.id !== id)), e.detail.duracao || 4500);
     };
     addEventListener("app:toast", on);
     return () => removeEventListener("app:toast", on);
   }, []);
   return html`<div class="toaster">
-    ${items.map((i) => html`<div key=${i.id} class=${cx("toast", i.kind === "ok" ? "toast-ok" : i.kind === "err" ? "toast-err" : "toast-info")}>${i.message}</div>`)}
+    ${items.map((i) => html`<div key=${i.id} class=${cx("toast", i.kind === "ok" ? "toast-ok" : i.kind === "err" ? "toast-err" : "toast-info", i.acao && "toast-acao")}>
+      <span>${i.message}</span>
+      ${i.acao ? html`<button type="button" class="toast-btn" onClick=${() => {
+        setItems((x) => x.filter((t) => t.id !== i.id)); i.acao.onClick();
+      }}>${i.acao.rotulo}</button>` : null}
+    </div>`)}
   </div>`;
 }
 
@@ -700,6 +887,7 @@ function Shell({ me, route, children }) {
   const bcActive = p0 === "base" || p0 === "secao" || p0 === "doc" || p0 === "novo";
   const homeActive = p0 === "";
   const fullBleed = EMBED_ROUTES.has(route.path);
+  const escopoDesf = escopoDesfazer(route);
   const [openGroups, setOpenGroups] = useState(() => new Set([p0]));
   useEffect(() => { setOpenGroups((s) => new Set([...s, p0])); }, [p0]);
   const toggle = (id) => setOpenGroups((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -796,7 +984,10 @@ function Shell({ me, route, children }) {
       <main class="min-w-0 flex-1">
         ${fullBleed
           ? children
-          : html`<div class="mx-auto max-w-5xl px-4 py-7 sm:px-6 lg:px-10 lg:py-10">${children}</div>`}
+          : html`<div class="mx-auto max-w-5xl px-4 py-7 sm:px-6 lg:px-10 lg:py-10">
+              ${escopoDesf && me.role !== "leitor" ? html`<div class="mb-3 flex justify-end"><${BotaoDesfazer} key=${escopoDesf} escopo=${escopoDesf} /></div>` : null}
+              ${children}
+            </div>`}
       </main>
     </div>`;
 }
@@ -889,6 +1080,7 @@ function SectionPage({ slug, me, sections, onSectionsChanged }) {
   }, [section && section.id]);
 
   useEffect(() => { setDocs(null); load(); }, [load]);
+  useAoDesfazer("base", () => { onSectionsChanged && onSectionsChanged(); load(); });
 
   if (!section) return html`<${Empty} title="Seção não encontrada" icon="❓"><a class="text-brand" href="#/base">Voltar à Base de Conhecimento</a><//>`;
 
@@ -958,9 +1150,11 @@ function SectionEditModal({ section, onClose, onSaved }) {
   async function save() {
     setBusy(true);
     try {
-      const { error } = await sb.from("kb_sections").update({ nome: nome.trim(), descricao }).eq("id", section.id);
+      const antes = await linhaAtual("kb_sections", section.id);
+      const { data: depois, error } = await sb.from("kb_sections").update({ nome: nome.trim(), descricao }).eq("id", section.id).select().single();
       if (error) throw error;
-      notify("Seção atualizada.", "ok");
+      const rotulo = "editar a seção " + nome.trim();
+      registrarDesfazer("base", rotulo, desfazerEdicao("kb_sections", antes, depois, rotulo), { mensagem: "Seção atualizada" });
       await onSaved();
     } catch (e) { notify(errMsg(e), "err"); }
     finally { setBusy(false); }
@@ -1181,6 +1375,7 @@ function DocDetail({ id, me, sections }) {
       else notify(errMsg(e), "err");
     }
   }, [id]);
+  useAoDesfazer("base", () => load());
 
   useEffect(() => { setDoc(null); setNotFound(false); load(); }, [load]);
 
@@ -1380,6 +1575,7 @@ function DocEditModal({ doc, sections, me, onClose, onSaved }) {
   async function save() {
     setBusy(true);
     try {
+      const antes = await linhaAtual("kb_documents", doc.id);
       await updateDocumentMeta(doc.id, {
         titulo: f.titulo.trim(),
         descricao: f.descricao.trim(),
@@ -1390,6 +1586,14 @@ function DocEditModal({ doc, sections, me, onClose, onSaved }) {
         responsavel_id: f.responsavel_id || null,
       });
       await logActivity(doc.id, me.id, "editou", {});
+      const depois = await linhaAtual("kb_documents", doc.id);
+      const rotulo = "editar os dados do documento " + f.titulo.trim();
+      const desfazerDoc = desfazerEdicao("kb_documents", antes, depois, rotulo);
+      registrarDesfazer("base", rotulo, async () => {
+        const r = await desfazerDoc();
+        if (r !== false) await logActivity(doc.id, me.id, "desfez edição", {});
+        return r;
+      }, { mensagem: "Documento atualizado" });
       await onSaved();
     } catch (e) { notify(errMsg(e), "err"); }
     finally { setBusy(false); }
@@ -1854,6 +2058,7 @@ function FerramentasPage({ me }) {
     catch (e) { notify(errMsg(e), "err"); setTools([]); }
   }, []);
   useEffect(() => { load(); }, [load]);
+  useAoDesfazer("ferramentas", () => load());
 
   const runChecks = useCallback(async (list) => {
     const autos = (list || []).filter((f) => f.check_type === "auto" && f.check_url);
@@ -1986,13 +2191,17 @@ function FerramentaModal({ ferramenta, me, onClose, onSaved }) {
         row.slug = f.nome.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
           .replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") + "-" + Math.random().toString(36).slice(2, 6);
         row.ordem = 100;
-        const { error } = await sb.from("os_ferramentas").insert(row);
+        const { data: depois, error } = await sb.from("os_ferramentas").insert(row).select().single();
         if (error) throw error;
+        const rotulo = "adicionar a ferramenta " + row.nome;
+        registrarDesfazer("ferramentas", rotulo, desfazerCriacao("os_ferramentas", depois, rotulo), { mensagem: "Ferramenta adicionada" });
       } else {
-        const { error } = await sb.from("os_ferramentas").update(row).eq("id", ferramenta.id);
+        const antes = await linhaAtual("os_ferramentas", ferramenta.id);
+        const { data: depois, error } = await sb.from("os_ferramentas").update(row).eq("id", ferramenta.id).select().single();
         if (error) throw error;
+        const rotulo = "editar a ferramenta " + row.nome;
+        registrarDesfazer("ferramentas", rotulo, desfazerEdicao("os_ferramentas", antes, depois, rotulo), { mensagem: "Ferramenta atualizada" });
       }
-      notify(novo ? "Ferramenta adicionada." : "Ferramenta atualizada.", "ok");
       await onSaved();
     } catch (e) { notify(errMsg(e), "err"); }
     finally { setBusy(false); }
@@ -2002,9 +2211,11 @@ function FerramentaModal({ ferramenta, me, onClose, onSaved }) {
     if (!confirm(`Remover "${ferramenta.nome}" da lista?`)) return;
     setBusy(true);
     try {
+      const antes = await linhaAtual("os_ferramentas", ferramenta.id);
       const { error } = await sb.from("os_ferramentas").delete().eq("id", ferramenta.id);
       if (error) throw error;
-      notify("Ferramenta removida.", "ok");
+      const rotulo = "remover a ferramenta " + ferramenta.nome;
+      if (antes) registrarDesfazer("ferramentas", rotulo, desfazerExclusao("os_ferramentas", antes, rotulo), { mensagem: "Ferramenta removida" });
       await onSaved();
     } catch (e) { notify(errMsg(e), "err"); }
     finally { setBusy(false); }
@@ -2636,12 +2847,15 @@ function EnvioForm({ me, onSalvo, onCancelar }) {
         bairro.trim(), cidade.trim(), estado,
       ];
       const r = await appendPlanilha(PLANILHA_ENVIOS_ID, [linha]);
-      if (r.ok) {
-        if (novo && novo.id) await sb.from("livros_envios").update({ sincronizado_planilha: true }).eq("id", novo.id);
-        notify("Envio cadastrado e adicionado à planilha.", "ok");
-      } else {
-        notify("Envio salvo no OS, mas não consegui escrever na planilha agora (" + r.error + "). Confira depois.", "err");
+      if (r.ok && novo && novo.id) await sb.from("livros_envios").update({ sincronizado_planilha: true }).eq("id", novo.id);
+      if (novo && novo.id) {
+        const depois = await linhaAtual("livros_envios", novo.id);
+        const rotulo = "cadastrar o envio de " + nome.trim();
+        // A linha já escrita na planilha Bônus Livros não é apagada pelo DESFAZER.
+        if (depois) registrarDesfazer("cs/envios-livros", rotulo, desfazerCriacao("livros_envios", depois, rotulo),
+          { mensagem: r.ok ? "Envio cadastrado e adicionado à planilha" : "Envio salvo no OS" });
       }
+      if (!r.ok) notify("Envio salvo no OS, mas não consegui escrever na planilha agora (" + r.error + "). Confira depois.", "err");
       onSalvo();
     } catch (e2) { notify(errMsg(e2), "err"); }
     finally { setBusy(false); }
@@ -2719,9 +2933,12 @@ function EnvioDetalheModal({ envio, onClose, onAtualizado }) {
     try {
       const novoStatus = envio.status === "enviado" ? "pendente" : "enviado";
       const payload = { status: novoStatus, enviado_em: novoStatus === "enviado" ? new Date().toISOString() : null };
+      const antes = await linhaAtual("livros_envios", envio.id);
       const { data, error } = await sb.from("livros_envios").update(payload).eq("id", envio.id).select().maybeSingle();
       if (error) throw error;
-      notify(novoStatus === "enviado" ? "Marcado como enviado." : "Marcado como pendente novamente.", "ok");
+      const rotulo = (novoStatus === "enviado" ? "marcar como enviado" : "voltar para pendente") + " (" + envio.nome + ")";
+      registrarDesfazer("cs/envios-livros", rotulo, desfazerEdicao("livros_envios", antes, data, rotulo),
+        { mensagem: novoStatus === "enviado" ? "Marcado como enviado" : "Marcado como pendente novamente" });
       onAtualizado(data || { ...envio, ...payload });
     } catch (e) { notify(errMsg(e), "err"); }
     finally { setBusy(false); }
@@ -2790,6 +3007,7 @@ function EnviosLivrosPage({ me }) {
     catch (e) { notify(errMsg(e), "err"); setLista([]); }
   }
   useEffect(() => { recarregar(); }, []);
+  useAoDesfazer("cs/envios-livros", () => { setSelecionado(null); recarregar(); });
 
   const resumo = useMemo(() => resumoEnvios(lista || [], hoje), [lista, hoje]);
   const filtrados = useMemo(
@@ -3224,11 +3442,11 @@ function DiagMetas({ metas, onChange, rascunho, setRascunho, disabled }) {
   function inserir() {
     const descricao = (rascunho.descricao || "").trim();
     if (!descricao) { notify("Escreva a meta antes de inserir.", "err"); return; }
-    onChange("metas", [...lista, { id: novoIdMeta(), descricao, data: rascunho.data || "" }]);
+    onChange("metas", [...lista, { id: novoIdMeta(), descricao, data: rascunho.data || "" }], true);
     setRascunho({ descricao: "", data: "" });
   }
   const editar = (i, campo, v) => onChange("metas", lista.map((m, j) => (j === i ? { ...m, [campo]: v } : m)));
-  const remover = (i) => onChange("metas", lista.filter((_, j) => j !== i));
+  const remover = (i) => onChange("metas", lista.filter((_, j) => j !== i), true);
   return html`
     <div class="sm:col-span-2">
       ${!disabled ? html`
@@ -3294,6 +3512,26 @@ function DiagCampo({ c, valor, onChange, disabled }) {
   return html`<div class=${c.full ? "sm:col-span-2" : ""}><${Field} label=${c.l} required=${c.req}>${input}<//></div>`;
 }
 
+// JSON com chaves ordenadas (o jsonb do banco reordena as chaves).
+function jsonEstavel(v) {
+  if (Array.isArray(v)) return "[" + v.map(jsonEstavel).join(",") + "]";
+  if (v && typeof v === "object") return "{" + Object.keys(v).sort().map((k) => JSON.stringify(k) + ":" + jsonEstavel(v[k])).join(",") + "}";
+  return JSON.stringify(v === undefined ? null : v);
+}
+const DIAG_ROTULOS = Object.fromEntries(DIAG_SECOES.flatMap((s) => s.campos.map((c) => [c.k, c.l || s.titulo])));
+// Descreve o passo de edição da ficha para o DESFAZER ("editar Email", "inserir meta"...).
+function rotuloEdicaoFicha(antes, depois) {
+  const a = antes || {}, d = depois || {};
+  const ma = Array.isArray(a.metas) ? a.metas : [], md = Array.isArray(d.metas) ? d.metas : [];
+  if (md.length > ma.length) return "inserir meta";
+  if (md.length < ma.length) return "remover meta";
+  const campos = [...new Set([...Object.keys(a), ...Object.keys(d)])].filter((k) => jsonEstavel(a[k]) !== jsonEstavel(d[k]));
+  if (!campos.length) return null;
+  const nomes = campos.map((k) => (k === "metas" ? "metas" : DIAG_ROTULOS[k] || k));
+  return "editar " + nomes.slice(0, 2).join(", ") + (nomes.length > 2 ? ` e mais ${nomes.length - 2}` : "");
+}
+const desfazerFichaComMetas = (fn) => async () => { const r = await fn(); if (r !== false) agendarSyncPlanilha(); return r; };
+
 function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
   const canEdit = me.role !== "leitor";
   const [dados, setDados] = useState(null);
@@ -3310,6 +3548,7 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
   const montado = useRef(true);
   const assinaturaMetas = useRef(null); // nome/email/metas do último salvamento
   const assinar = (l) => JSON.stringify([l.nome, l.email, (l.dados && l.dados.metas) || []]);
+  const ultimoSalvo = useRef(null); // linha completa (select *) do último salvamento: o "antes" do DESFAZER
 
   useEffect(() => {
     if (id && id === idRef.current && dadosRef.current) return; // acabou de ser criado aqui
@@ -3323,12 +3562,34 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
     setDados(null);
     fetchDiagnostico(id).then((r) => {
       if (!r) { notify("Diagnóstico não encontrado.", "err"); onVoltar(); return; }
-      const nd = diagNormalizar(r.dados);
-      dadosRef.current = nd; setDados(nd); setRow(r);
-      assinaturaMetas.current = assinar(diagLinha(nd));
+      aplicarLinha(r);
       setSalvo(r.updated_at ? "Rascunho salvo em " + fmtDate(r.updated_at, true) : "");
     }).catch((e) => { notify(errMsg(e), "err"); onVoltar(); });
   }, [id]);
+
+  function aplicarLinha(r) {
+    const nd = diagNormalizar(r.dados);
+    dadosRef.current = nd; setDados(nd); setRow(r);
+    ultimoSalvo.current = r;
+    assinaturaMetas.current = assinar(diagLinha(nd));
+  }
+
+  // DESFAZER: grava o que estiver pendente antes; depois recarrega a ficha do banco.
+  useEffect(() => {
+    const antes = (e) => {
+      if (e.detail.escopo !== "cs/diagnostico") return;
+      if (timer.current) e.detail.pendentes.push(salvarAgora());
+      e.detail.pendentes.push(salvando.current);
+    };
+    addEventListener("app:antes-desfazer", antes);
+    return () => removeEventListener("app:antes-desfazer", antes);
+  }, []);
+  useAoDesfazer("cs/diagnostico", async () => {
+    if (!idRef.current) return;
+    const r = await fetchDiagnostico(idRef.current).catch(() => null);
+    if (!r) { if (montado.current) onVoltar(); return; }
+    if (montado.current) { aplicarLinha(r); setSalvo("Alteração desfeita"); }
+  });
 
   async function salvarAgora() {
     clearTimeout(timer.current); timer.current = null;
@@ -3345,12 +3606,23 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
       if (!idRef.current) {
         const { data, error } = await sb.from("cs_diagnosticos").insert(linha).select().single();
         if (error) throw error;
-        idRef.current = data.id; setRow(data);
+        idRef.current = data.id; setRow(data); ultimoSalvo.current = data;
+        const rotulo = "criar a ficha" + (data.nome ? " de " + data.nome : "");
+        registrarDesfazer("cs/diagnostico", rotulo, desfazerFichaComMetas(desfazerCriacao("cs_diagnosticos", data, rotulo)),
+          { toast: false });
         if (montado.current) onCriado(data.id);
       } else {
+        const antes = ultimoSalvo.current;
         const { data, error } = await sb.from("cs_diagnosticos").update(linha).eq("id", idRef.current).select().single();
         if (error) throw error;
-        setRow(data);
+        setRow(data); ultimoSalvo.current = data;
+        const passo = antes && antes.id === data.id ? rotuloEdicaoFicha(antes.dados, data.dados) : null;
+        if (passo) {
+          const rotulo = passo + (data.nome ? " (" + data.nome + ")" : "");
+          // Um passo por salvamento: o autosave já agrupa a digitação (1,2 s de pausa).
+          registrarDesfazer("cs/diagnostico", rotulo, desfazerFichaComMetas(desfazerEdicao("cs_diagnosticos", antes, data, rotulo)),
+            { toast: passo === "inserir meta" || passo === "remover meta", mensagem: passo === "inserir meta" ? "Meta inserida" : "Meta removida" });
+        }
       }
       setSalvo("Rascunho salvo às " + new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }));
       if (assinatura !== assinaturaMetas.current) { assinaturaMetas.current = assinatura; agendarSyncPlanilha(); }
@@ -3379,10 +3651,15 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
     onVoltar();
   }
 
-  function mudar(k, v) {
+  function mudar(k, v, imediato) {
+    if (desfazendoAgora) { notify("Aguarde o DESFAZER terminar para continuar editando.", "info"); return; }
+    // INSERIR/remover meta é um passo próprio do DESFAZER: grava o que estava pendente
+    // e depois grava a lista de metas na hora.
+    if (imediato && canEdit && timer.current) salvarAgora();
     const novo = { ...dadosRef.current, [k]: v };
     dadosRef.current = novo; setDados(novo);
     if (!canEdit) return;
+    if (imediato) { salvarAgora(); return; }
     setSalvo("Alterações não salvas…");
     clearTimeout(timer.current);
     timer.current = setTimeout(salvarAgora, 1200);
@@ -3431,9 +3708,17 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
     clearTimeout(timer.current); timer.current = null;
     await salvando.current;
     if (!idRef.current) { onVoltar(); return; }
-    const { error } = await sb.from("cs_diagnosticos").delete().eq("id", idRef.current);
+    const fichaId = idRef.current;
+    const ficha = { nome: (dadosRef.current && dadosRef.current.nome) || "" };
+    const { error } = await sb.from("cs_diagnosticos").delete().eq("id", fichaId);
     if (error) { notify(errMsg(error), "err"); return; }
-    notify("Diagnóstico excluído.", "ok");
+    const rotulo = "excluir a ficha" + (ficha && ficha.nome ? " de " + ficha.nome : "");
+    registrarDesfazer("cs/diagnostico", rotulo, desfazerFichaComMetas(async () => {
+      if (await linhaAtual("cs_diagnosticos", fichaId)) throw new Error("a ficha já existe de novo");
+      // O banco guardou a ficha e as metas no momento da exclusão (os_desfazer_snapshots).
+      const { error: e2 } = await sb.rpc("os_restaurar_diagnostico", { p_id: fichaId });
+      if (e2) throw e2;
+    }), { mensagem: "Diagnóstico excluído" });
     agendarSyncPlanilha(500);
     onVoltar();
   }
@@ -3491,6 +3776,7 @@ function DiagnosticoPage({ me, query }) {
   const [busca, setBusca] = useState("");
   const [baixandoId, setBaixandoId] = useState(null);
   const canEdit = me.role !== "leitor";
+  useAoDesfazer("cs/diagnostico", () => { if (!id && !novo) recarregar(); });
 
   async function baixarDaLista(d) {
     setBaixandoId(d.id);
@@ -3662,10 +3948,15 @@ function MetaManualModal({ meta, diags, onClose, onSalvo }) {
         mentorado_nome: n, mentorado_email: (diag ? diag.email : email.trim()) || null,
         descricao: descricao.trim(), vencimento: venc || null,
       };
+      const antes = novo ? null : await linhaAtual("cs_metas", meta.id);
       const q = novo ? sb.from("cs_metas").insert(payload) : sb.from("cs_metas").update(payload).eq("id", meta.id);
-      const { error } = await q;
+      const { data: depois, error } = await q.select().single();
       if (error) throw error;
-      notify(novo ? "Meta cadastrada." : "Meta atualizada.", "ok");
+      const rotulo = (novo ? "cadastrar meta" : "editar meta") + " de " + payload.mentorado_nome;
+      registrarDesfazer("cs/metas", rotulo, novo
+        ? desfazerCriacao("cs_metas", depois, rotulo)
+        : desfazerEdicao("cs_metas", antes, depois, rotulo, { restaurar: restaurarMetas }),
+        { mensagem: novo ? "Meta cadastrada" : "Meta atualizada" });
       onSalvo();
     } catch (err) { notify(errMsg(err), "err"); }
     finally { setBusy(false); }
@@ -3724,23 +4015,32 @@ function MetasPage({ me }) {
   }, []);
 
   function mudou() { recarregar(); if (canEdit) agendarSyncPlanilha(); }
+  useAoDesfazer("cs/metas", mudou);
 
   async function marcar(m, feito) {
     setBusyId(m.id);
     try {
-      const { error } = await sb.from("cs_metas").update({ concluida_em: feito ? new Date().toISOString() : null }).eq("id", m.id);
+      const antes = await linhaAtual("cs_metas", m.id);
+      const { data: depois, error } = await sb.from("cs_metas")
+        .update({ concluida_em: feito ? new Date().toISOString() : null }).eq("id", m.id).select().single();
       if (error) throw error;
-      notify(feito ? "Meta marcada como feita." : "Meta reaberta.", "ok");
+      const rotulo = (feito ? "marcar meta como FEITO" : "reabrir meta") + " (" + (m.mentorado_nome || "mentorado") + ")";
+      registrarDesfazer("cs/metas", rotulo, desfazerEdicao("cs_metas", antes, depois, rotulo, { restaurar: restaurarMetas }),
+        { mensagem: feito ? "Meta marcada como feita" : "Meta reaberta" });
       mudou();
     } catch (e) { notify(errMsg(e), "err"); }
     finally { setBusyId(null); }
   }
   async function excluir(m) {
-    if (!confirm("Excluir esta meta manual?")) return;
-    const { error } = await sb.from("cs_metas").delete().eq("id", m.id);
-    if (error) { notify(errMsg(error), "err"); return; }
-    notify("Meta excluída.", "ok");
-    mudou();
+    try {
+      const antes = await linhaAtual("cs_metas", m.id);
+      const { error } = await sb.from("cs_metas").delete().eq("id", m.id);
+      if (error) throw error;
+      const rotulo = "excluir meta de " + (m.mentorado_nome || "mentorado");
+      registrarDesfazer("cs/metas", rotulo, desfazerExclusao("cs_metas", antes, rotulo, { restaurar: restaurarMetas }),
+        { mensagem: "Meta excluída" });
+      mudou();
+    } catch (e) { notify(errMsg(e), "err"); }
   }
   async function sincronizarAgora() {
     setSincronizando(true);
@@ -5187,6 +5487,22 @@ function FarolPage({ me }) {
   const commitRows = (next) => { const arr = typeof next === "function" ? next(rowsRef.current) : next; rowsRef.current = arr; setRows(arr); };
   const podeEditar = !me || me.role === "editor" || me.role === "admin";
   const blocosVisiveis = FAROL_BLOCOS;
+  const antesGrupo = useRef({}); // linha antes da 1ª edição de cada grupo de digitação (DESFAZER)
+  const flushes = useRef({});    // gravações pendentes (debounce), para o DESFAZER gravar antes de voltar
+  const emVoo = useRef(new Set()); // gravações já disparadas e ainda sem resposta
+  useEffect(() => {
+    const on = (e) => {
+      if (e.detail.escopo !== "farol") return;
+      for (const [id, fn] of Object.entries(flushes.current)) {
+        clearTimeout(timers.current[id]); delete flushes.current[id]; e.detail.pendentes.push(fn());
+      }
+      for (const p of emVoo.current) e.detail.pendentes.push(p.catch(() => {}));
+    };
+    addEventListener("app:antes-desfazer", on);
+    return () => removeEventListener("app:antes-desfazer", on);
+  }, []);
+  const mesRef = useRef(mes);
+  mesRef.current = mes;
 
   const carregarMes = useCallback(async (m) => {
     const { data, error } = await sb.from("farol_indicadores").select("*").eq("setor", setor).eq("mes", m).order("ordem", { ascending: true });
@@ -5194,6 +5510,8 @@ function FarolPage({ me }) {
     rowsRef.current = data || [];
     setRows(data || []);
   }, [setor]);
+
+  useAoDesfazer("farol", () => { carregarMes(mesRef.current); carregarMeses(); });
 
   const carregarMeses = useCallback(async () => {
     const { data } = await sb.from("farol_indicadores").select("mes").eq("setor", setor);
@@ -5244,19 +5562,30 @@ function FarolPage({ me }) {
     let merged = null;
     commitRows((rs) => rs.map((r) => {
       if (r.id !== id) return r;
+      if (!antesGrupo.current[id]) antesGrupo.current[id] = r;
       merged = { ...r, ...(typeof patch === "function" ? patch(r) : patch) };
       return merged;
     }));
     if (!merged) return;
     clearTimeout(timers.current[id]);
     const flush = async () => {
-      const { error } = await sb.from("farol_indicadores").update({
+      const antes = antesGrupo.current[id];
+      delete antesGrupo.current[id];
+      const { data: depois, error } = await sb.from("farol_indicadores").update({
         nome: merged.nome, tipo: merged.tipo, direcao: merged.direcao, consolidacao: merged.consolidacao, unidade: merged.unidade,
         meta: merged.meta, responsavel: merged.responsavel, fonte: merged.fonte, obs: merged.obs, julgamento: merged.julgamento, valores: merged.valores,
-      }).eq("id", id);
-      if (error) notify(errMsg(error), "err");
+      }).eq("id", id).select().single();
+      if (error) { notify(errMsg(error), "err"); return; }
+      if (antes && !mesmaVersao(antes, depois)) {
+        const rotulo = "editar o indicador " + (depois.nome || "");
+        // Edições do farol não mostram aviso a cada pausa; ficam no botão DESFAZER do topo.
+        registrarDesfazer("farol", rotulo, desfazerEdicao("farol_indicadores", antes, depois, rotulo), { toast: false });
+      }
     };
-    if (imediato) flush(); else timers.current[id] = setTimeout(flush, 700);
+    const rodar = () => { const p = flush(); emVoo.current.add(p); p.finally(() => emVoo.current.delete(p)); return p; };
+    delete flushes.current[id];
+    if (imediato) rodar();
+    else { flushes.current[id] = rodar; timers.current[id] = setTimeout(() => { delete flushes.current[id]; rodar(); }, 700); }
   }
 
   async function mudarMes(m) {
@@ -5267,9 +5596,28 @@ function FarolPage({ me }) {
   async function mudarSemanas(n) {
     setSemanas(n);
     if (podeEditar) await sb.from("farol_config").update({ semanas: n, atualizado_em: new Date().toISOString() }).eq("setor", setor);
+    const antesSemanas = semanas;
+    const antesRows = rowsRef.current.map((r) => ({ id: r.id, valores: r.valores }));
     const novas = rowsRef.current.map((r) => ({ ...r, valores: Array.from({ length: n }, (_, i) => (r.valores && r.valores[i] != null ? r.valores[i] : null)) }));
     commitRows(novas);
-    for (const r of novas) sb.from("farol_indicadores").update({ valores: r.valores }).eq("id", r.id);
+    const gravadas = await Promise.all(novas.map((r) => sb.from("farol_indicadores").update({ valores: r.valores }).eq("id", r.id).select("id, valores").maybeSingle()));
+    const depoisValores = Object.fromEntries(gravadas.filter((x) => x.data).map((x) => [x.data.id, jsonEstavel(x.data.valores)]));
+    if (podeEditar && antesSemanas !== n) {
+      const setorAlvo = setor;
+      const rotulo = `mudar para ${n} semanas`;
+      registrarDesfazer("farol", rotulo, async () => {
+        const { data: atuais, error: e0 } = await sb.from("farol_indicadores").select("id, valores").in("id", antesRows.map((r) => r.id));
+        if (e0) throw e0;
+        const mudou = (atuais || []).some((a) => depoisValores[a.id] !== undefined && depoisValores[a.id] !== jsonEstavel(a.valores));
+        if (mudou && !confirmarConflito(rotulo)) return false;
+        const { error: e1 } = await sb.from("farol_config").update({ semanas: antesSemanas, atualizado_em: new Date().toISOString() }).eq("setor", setorAlvo);
+        if (e1) throw e1;
+        const rs = await Promise.all(antesRows.map((r) => sb.from("farol_indicadores").update({ valores: r.valores }).eq("id", r.id)));
+        const erro = rs.find((x) => x.error);
+        if (erro) throw erro.error;
+        setSemanas(antesSemanas);
+      }, { mensagem: `Mês com ${n} semanas` });
+    }
   }
 
   async function addInd(bloco, nome) {
@@ -5286,14 +5634,20 @@ function FarolPage({ me }) {
     const { data, error } = await sb.from("farol_indicadores").insert(novo).select().single();
     if (error) { notify(errMsg(error), "err"); return; }
     commitRows((rs) => [...rs, data]);
+    registrarDesfazer("farol", "adicionar o indicador " + data.nome, desfazerCriacao("farol_indicadores", data, "adicionar o indicador " + data.nome),
+      { mensagem: "Indicador adicionado" });
     setLivre(null);
     carregarMeses();
   }
   async function delInd(id) {
     if (!confirm("Remover este indicador do farol?")) return;
+    clearTimeout(timers.current[id]); delete flushes.current[id]; delete antesGrupo.current[id];
+    const antes = await linhaAtual("farol_indicadores", id).catch(() => null);
     const { error } = await sb.from("farol_indicadores").delete().eq("id", id);
     if (error) { notify(errMsg(error), "err"); return; }
     commitRows((rs) => rs.filter((r) => r.id !== id));
+    if (antes) registrarDesfazer("farol", "remover o indicador " + antes.nome,
+      desfazerExclusao("farol_indicadores", antes, "remover o indicador " + antes.nome), { mensagem: "Indicador removido" });
   }
   async function duplicarAnterior() {
     const prev = farolMesAntes(mes);
@@ -5308,7 +5662,16 @@ function FarolPage({ me }) {
     if (error) { notify(errMsg(error), "err"); return; }
     commitRows((rs) => [...rs, ...ins]);
     carregarMeses();
-    notify(`${ins.length} indicadores copiados de ${farolMesLabel(prev)}.`, "ok");
+    const ids = ins.map((r) => r.id);
+    const rotuloCopia = `copiar ${ins.length} indicadores de ${farolMesLabel(prev)}`;
+    registrarDesfazer("farol", rotuloCopia, async () => {
+      const { data: atuais, error: e0 } = await sb.from("farol_indicadores").select("*").in("id", ids);
+      if (e0) throw e0;
+      const mudou = (atuais || []).some((a) => { const o = ins.find((x) => x.id === a.id); return !mesmaVersao(a, o); });
+      if (mudou && !confirmarConflito(rotuloCopia)) return false;
+      const { error: e2 } = await sb.from("farol_indicadores").delete().in("id", ids);
+      if (e2) throw e2;
+    }, { mensagem: `${ins.length} indicadores copiados de ${farolMesLabel(prev)}` });
   }
 
   // Multi-seleção de meses: sempre fica ao menos 1 (não dá pra desmarcar o último).
@@ -6532,13 +6895,16 @@ function EventoModal({ dataISO, evento, me, onClose, onSaved }) {
     try {
       const payload = { data: d, titulo: titulo.trim(), hora: hora.trim() || null, tipo, descricao: descricao.trim() || null };
       if (evento) {
-        const { error } = await sb.from("agenda_eventos").update(payload).eq("id", evento.id);
+        const antes = await linhaAtual("agenda_eventos", evento.id);
+        const { data: depois, error } = await sb.from("agenda_eventos").update(payload).eq("id", evento.id).select().single();
         if (error) throw error;
-        notify("Evento atualizado.", "ok");
+        const rotulo = "editar o evento " + payload.titulo;
+        registrarDesfazer("agenda", rotulo, desfazerEdicao("agenda_eventos", antes, depois, rotulo), { mensagem: "Evento atualizado" });
       } else {
-        const { error } = await sb.from("agenda_eventos").insert({ ...payload, criado_por: me ? me.id : null });
+        const { data: depois, error } = await sb.from("agenda_eventos").insert({ ...payload, criado_por: me ? me.id : null }).select().single();
         if (error) throw error;
-        notify("Evento adicionado.", "ok");
+        const rotulo = "criar o evento " + payload.titulo;
+        registrarDesfazer("agenda", rotulo, desfazerCriacao("agenda_eventos", depois, rotulo), { mensagem: "Evento adicionado" });
       }
       onSaved();
     } catch (e2) { notify(errMsg(e2), "err"); }
@@ -6546,12 +6912,14 @@ function EventoModal({ dataISO, evento, me, onClose, onSaved }) {
   }
 
   async function excluir() {
-    if (!evento || !confirm("Excluir este evento?")) return;
+    if (!evento) return;
     setBusy(true);
     try {
+      const antes = await linhaAtual("agenda_eventos", evento.id);
       const { error } = await sb.from("agenda_eventos").delete().eq("id", evento.id);
       if (error) throw error;
-      notify("Evento excluído.", "ok");
+      const rotulo = "excluir o evento " + evento.titulo;
+      if (antes) registrarDesfazer("agenda", rotulo, desfazerExclusao("agenda_eventos", antes, rotulo), { mensagem: "Evento excluído" });
       onSaved();
     } catch (e2) { notify(errMsg(e2), "err"); }
     finally { setBusy(false); }
@@ -6615,6 +6983,7 @@ function AgendaPage({ me, view }) {
       .finally(() => setLoading(false));
   }, [deISO, ateISO]);
   useEffect(() => { carregar(); }, [carregar]);
+  useAoDesfazer("agenda", () => carregar());
 
   const feriados = feriadosNoIntervalo(deISO, ateISO);
   const ferPorDia = {};

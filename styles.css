@@ -20,6 +20,12 @@ body { margin: 0; }
 .toast-ok { background: #16a34a; }
 .toast-info { background: #334155; }
 .toast-err { background: #dc2626; }
+.toast-acao { display: flex; align-items: center; gap: 14px; justify-content: space-between; }
+.toast-btn {
+  flex-shrink: 0; border: 0; border-radius: 6px; padding: 4px 10px; background: rgba(255,255,255,.18);
+  color: #fff; font-size: 12px; font-weight: 700; letter-spacing: .04em; cursor: pointer;
+}
+.toast-btn:hover { background: rgba(255,255,255,.3); }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
 /* Texto de descrição (quebra de linha preservada) */

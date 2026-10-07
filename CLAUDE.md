@@ -16,7 +16,8 @@ como backend.
 - **`config.js`** — `window.__CONFIG__` (URL + anon key do Supabase, pública,
   protegida por RLS). Gerado localmente, não versionado como segredo.
 - **Backend** — Supabase projeto `hmvlkltyvyhlxfyaovpe` (região `sa-east-1`).
-  Edge Functions (`ai`, `public-chat`, `sync`, `planilha`, `admin-users`)
+  Edge Functions (`ai`, `public-chat`, `sync`, `planilha`, `admin-users`,
+  `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet`, entre outras)
   vivem no Supabase, não neste repo — leia/edite via MCP do Supabase
   (`get_edge_function`/`deploy_edge_function`).
 
@@ -35,6 +36,20 @@ como backend.
   Base de Conhecimento) usam `#/<grupo>` direto. Links de topo/rodapé (Início,
   Squad, Farol do Lucro, Pedir a IA, Ferramentas, Administração, Meu perfil)
   não passam por `NAV`, são hardcoded no `Shell`.
+- **DESFAZER** (padrão de UI de toda tela com escrita): depois de gravar, chame
+  `registrarDesfazer(escopo, "rótulo da ação", desfazerX(...))` — usa
+  `desfazerCriacao` (exclui o criado), `desfazerEdicao` (regrava o snapshot
+  `select("*")` tirado antes) ou `desfazerExclusao` (reinsere com o mesmo id).
+  Aparece o aviso "Alteração salva · DESFAZER" (10 s) e o botão DESFAZER no topo
+  da aba (renderizado pelo `Shell` via `escopoDesfazer(route)`; pilha de até 20
+  por aba, só na memória da sessão, escondido para leitor). A tela recarrega com
+  `useAoDesfazer(escopo, fn)`. Conflito (registro mudou depois) pede confirmação.
+  Tabela com campos protegidos por trigger (ex. `cs_metas`, `cs_diagnosticos`)
+  restaura por RPC `security definer` restrita a editor (`os_restaurar_cs_metas`,
+  `os_restaurar_diagnostico`) que usam a versão guardada pelo próprio banco
+  (`os_desfazer_snapshots`, limpa após 3 dias), nunca afrouxando RLS nem
+  confiando no JSON do cliente. Tela nova com escrita:
+  inclua o escopo em `escopoDesfazer`.
 - **Regras de marca** (qualquer material gerado pro OS produzir): zero
   emoji, nunca diminutivo/linguagem infantil, tom adulto e acolhedor, nunca
   religião/política/tema polêmico.
