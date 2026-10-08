@@ -215,7 +215,7 @@ function construir_(ss, d, nome, dataDiag, arquivoNovo) {
   L.secao('Dados pessoais');
   L.par('Nome completo', nome, 'Idade', txt_(d.idade));
   L.par('Email', txt_(d.email), 'Profissão', txt_(d.profissao));
-  L.par('Horário Sessão Prática', n.horarios.join(' e '), '', null);
+  L.par('Telefone', txt_(d.telefone), 'Horário Sessão Prática', n.horarios.join(' e '));
   L.espaco(14);
 
   // Objetivo & Dificuldades

@@ -3137,6 +3137,7 @@ const DIAG_SECOES = [
     { k: "nome", l: "Nome completo", t: "text", req: true, full: true },
     { k: "idade", l: "Idade", t: "number", min: 0, max: 120 },
     { k: "email", l: "Email", t: "email" },
+    { k: "telefone", l: "Telefone", t: "tel", ph: "(11) 99999-9999" },
     { k: "profissao", l: "Profissão", t: "text" },
     { k: "horario_pratica", l: "Horário Sessão Prática (um ou os dois)", t: "multi", op: ["17h", "19h"] },
   ]},
