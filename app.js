@@ -42,7 +42,6 @@ const STATUS_STYLE = {
   rascunho: PILL_WARN,
   arquivado: PILL_NEUTRAL,
 };
-const ROLE_LABEL = { leitor: "Leitor", editor: "Editor", admin: "Admin" };
 
 // Estrutura do menu lateral. O grupo "bc" é a Base de Conhecimento (já funcional).
 // Cada `item` de grupo abre em #/<grupo>/<slug>; os que ainda não têm tela mostram
@@ -123,6 +122,68 @@ const NAV = [
       desc: "Gera ideias e conteúdos a partir dos insights das pesquisas de alunos." },
   ]},
 ];
+
+// <permissoes>
+// ---------------------------------------------------------------------------
+// Papéis e permissões de rota. FONTE ÚNICA: o menu (Shell), os links de topo/rodapé e a
+// guarda do Router passam todos por rotaPermitida(). Este bloco é puro (sem DOM nem
+// imports) para poder ser testado fora do navegador: scripts/teste-permissoes.js.
+//   admin  (ADM)  : acesso a tudo, inclusive Administração.
+//   cs     (CS)   : somente #/cs/<item do grupo CS / Suporte> e #/perfil.
+//   editor / leitor: tudo, menos Administração (leitor sem escrita).
+//   papel desconhecido/ausente: nenhum privilégio (só #/perfil).
+// A RLS do banco é a barreira real; isto é a camada de interface.
+// ---------------------------------------------------------------------------
+const ROLE_LABEL = { leitor: "Leitor", editor: "Editor", admin: "ADM", cs: "CS" };
+const ROLES_CONHECIDOS = ["leitor", "editor", "admin", "cs"];
+const SLUGS_CS = new Set(((NAV.find((g) => g.id === "cs") || {}).itens || []).map((i) => i.slug));
+
+function roleValido(role) { return ROLES_CONHECIDOS.includes(role) ? role : null; }
+function rotuloRole(role) { const r = roleValido(role); return r ? ROLE_LABEL[r] : "Sem papel"; }
+// Quem cria/edita Base de Conhecimento, Agenda, Farol, Ferramentas etc.
+function ehEditor(role) { return role === "editor" || role === "admin"; }
+// Quem grava nas telas de CS / Suporte (FAQ, Envios, Diagnóstico, Metas...).
+function podeEscreverCS(role) { return role === "cs" || ehEditor(role); }
+
+function partesRota(path) { return String(path || "").split("?")[0].split("/").filter(Boolean); }
+
+function rotaPermitida(role, path) {
+  const r = roleValido(role);
+  const partes = partesRota(path);
+  const p0 = partes[0] || "";
+  if (!r) return p0 === "perfil" && partes.length === 1;
+  if (r === "admin") return true;
+  if (r === "cs") {
+    if (p0 === "perfil") return partes.length === 1;
+    return p0 === "cs" && partes.length === 2 && SLUGS_CS.has(partes[1]);
+  }
+  return p0 !== "admin"; // editor e leitor
+}
+// Para onde mandar quem entra (ou cai numa rota que não pode ver).
+function rotaEntrada(role) {
+  const r = roleValido(role);
+  if (r === "cs") return "/cs/faq";
+  return r ? "/" : "/perfil";
+}
+// Grupos do menu lateral que o papel enxerga.
+function navParaRole(role) {
+  const r = roleValido(role);
+  if (!r) return [];
+  if (r === "cs") return NAV.filter((g) => g.id === "cs");
+  return NAV;
+}
+// Mensagem de erro do login em português claro (sem vazar detalhe técnico).
+function mensagemErroLogin(e) {
+  const m = String((e && (e.message || e.error_description || e.error)) || "").toLowerCase();
+  const status = e && e.status;
+  if (m.includes("invalid login credentials") || m.includes("invalid credentials")) return "E-mail ou senha incorretos. Confira os dados e tente de novo.";
+  if (m.includes("email not confirmed")) return "Esta conta ainda não foi ativada. Fale com o ADM.";
+  if (status === 429 || m.includes("rate limit") || m.includes("too many")) return "Muitas tentativas seguidas. Aguarde alguns minutos e tente de novo.";
+  if (m.includes("banned") || m.includes("user is banned")) return "Esta conta está desativada. Fale com o ADM.";
+  if (m.includes("failed to fetch") || m.includes("network") || m.includes("load failed")) return "Não foi possível conectar. Verifique sua internet e tente de novo.";
+  return "Não foi possível entrar agora. Tente de novo em instantes.";
+}
+// </permissoes>
 
 const FERRAMENTA_STATUS = {
   conectada: { label: "Conectada", cls: PILL_OK, dot: "bg-[#7d9b6e]" },
@@ -817,26 +878,25 @@ function Modal({ title, onClose, children, wide }) {
 function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [verSenha, setVerSenha] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [mode, setMode] = useState("login"); // login | reset
+  const [erro, setErro] = useState("");
+  const emailRef = useRef(null);
+  useEffect(() => { emailRef.current && emailRef.current.focus(); }, []);
 
   async function submit(e) {
     e.preventDefault();
+    if (busy) return;
+    setErro("");
+    if (!email.trim() || !password) { setErro("Informe o e-mail e a senha."); return; }
     setBusy(true);
     try {
-      if (mode === "login") {
-        const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password });
-        if (error) throw error;
-      } else {
-        const { error } = await sb.auth.resetPasswordForEmail(email.trim(), {
-          redirectTo: location.origin + location.pathname,
-        });
-        if (error) throw error;
-        notify("Se este e-mail existir, você receberá um link para redefinir a senha.", "ok");
-        setMode("login");
-      }
+      const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password });
+      if (error) throw error;
+      // Entrou: o App recebe a sessão (onAuthStateChange) e leva cada papel para a sua tela inicial.
     } catch (e2) {
-      notify(errMsg(e2), "err");
+      setErro(mensagemErroLogin(e2));
+      setPassword("");
     } finally {
       setBusy(false);
     }
@@ -845,29 +905,33 @@ function Login() {
   return html`
     <div class="flex min-h-screen items-center justify-center bg-gradient-to-b from-card to-bg px-4">
       <div class="w-full max-w-sm">
-        <div class="mb-6 text-center">
-          <div class="text-4xl">📚</div>
-          <h1 class="mt-2 text-lg font-semibold text-ink">Sistema Operacional</h1>
-          <p class="text-sm text-muted">Tia do Inglês — Base de Conhecimento</p>
+        <div class="mb-7 text-center">
+          <h1 class="text-2xl font-semibold tracking-tight text-brand">Tia do Inglês</h1>
+          <p class="mt-1 text-sm text-muted">Sistema Operacional</p>
         </div>
         <form onSubmit=${submit} class="space-y-4 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-line">
+          <h2 class="text-base font-semibold text-ink">Entrar</h2>
           <${Field} label="E-mail" required>
-            <input class=${inputCls} type="email" autocomplete="username" required
+            <input ref=${emailRef} class=${inputCls} type="email" name="email" autocomplete="username" required
               value=${email} onInput=${(e) => setEmail(e.target.value)} />
           <//>
-          ${mode === "login" && html`
-            <${Field} label="Senha" required>
-              <input class=${inputCls} type="password" autocomplete="current-password" required
+          <${Field} label="Senha" required>
+            <div class="relative">
+              <input class=${cx(inputCls, "pr-20")} type=${verSenha ? "text" : "password"} name="password" autocomplete="current-password" required
                 value=${password} onInput=${(e) => setPassword(e.target.value)} />
-            <//>`}
-          <${Btn} type="submit" loading=${busy} class="w-full">
-            ${mode === "login" ? "Entrar" : "Enviar link de redefinição"}
+              <button type="button" tabindex="-1" onClick=${() => setVerSenha((v) => !v)}
+                class="absolute inset-y-0 right-0 px-3 text-xs font-medium text-muted hover:text-ink">
+                ${verSenha ? "Ocultar" : "Mostrar"}
+              </button>
+            </div>
           <//>
-          <button type="button" class="w-full text-center text-xs text-muted hover:text-ink/75"
-            onClick=${() => setMode(mode === "login" ? "reset" : "login")}>
-            ${mode === "login" ? "Esqueci minha senha" : "← Voltar ao login"}
-          </button>
+          ${erro ? html`<div role="alert" class="rounded-lg bg-[#f4e0db] px-3 py-2 text-sm text-[#a44b43]">${erro}</div>` : null}
+          <${Btn} type="submit" loading=${busy} class="w-full">Entrar<//>
         </form>
+        <p class="mt-4 text-center text-xs text-muted">
+          O acesso é feito por conta criada pelo ADM. Se você ainda não tem conta ou esqueceu a senha,
+          peça ao ADM uma nova senha temporária.
+        </p>
       </div>
     </div>`;
 }
@@ -888,7 +952,9 @@ function Shell({ me, route, children }) {
   const homeActive = p0 === "";
   const fullBleed = EMBED_ROUTES.has(route.path);
   const escopoDesf = escopoDesfazer(route);
-  const [openGroups, setOpenGroups] = useState(() => new Set([p0]));
+  const nav = navParaRole(me.role);
+  const ok = (path) => rotaPermitida(me.role, path); // mesma regra da guarda do Router
+  const [openGroups, setOpenGroups] = useState(() => new Set([p0, ...(nav.length === 1 ? [nav[0].id] : [])]));
   useEffect(() => { setOpenGroups((s) => new Set([...s, p0])); }, [p0]);
   const toggle = (id) => setOpenGroups((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
@@ -939,23 +1005,23 @@ function Shell({ me, route, children }) {
         </div>
         <div class="min-w-0">
           <div class="truncate text-sm font-semibold text-ink">${me.nome || me.email}</div>
-          <div class="text-xs text-muted">${ROLE_LABEL[me.role]}</div>
+          <div class="text-xs text-muted">${rotuloRole(me.role)}</div>
         </div>
       </div>
 
       <nav class="flex-1 space-y-0.5 overflow-y-auto px-2 py-3">
-        ${linkItem("Squad de Agentes", "🤖", "/squad", route.path === "/squad")}
-        ${linkItem("Início", "🏠", "/", homeActive)}
-        ${linkItem("Farol do Lucro", "🚦", "/farol", p0 === "farol")}
-        ${linkItem("Pedir a IA", "✨", "/pedir-ia", route.path === "/pedir-ia")}
-        <div class="my-1 border-t border-line"></div>
-        ${NAV.map(grupo)}
+        ${ok("/squad") ? linkItem("Squad de Agentes", "🤖", "/squad", route.path === "/squad") : null}
+        ${ok("/") ? linkItem("Início", "🏠", "/", homeActive) : null}
+        ${ok("/farol") ? linkItem("Farol do Lucro", "🚦", "/farol", p0 === "farol") : null}
+        ${ok("/pedir-ia") ? linkItem("Pedir a IA", "✨", "/pedir-ia", route.path === "/pedir-ia") : null}
+        ${ok("/squad") ? html`<div class="my-1 border-t border-line"></div>` : null}
+        ${nav.map(grupo)}
       </nav>
 
       <div class="space-y-0.5 border-t border-line px-2 py-2">
-        ${linkItem("Ferramentas", "🧰", "/ferramentas", route.path === "/ferramentas")}
-        ${me.role === "admin" ? linkItem("Administração", "⚙️", "/admin", route.path === "/admin") : null}
-        ${linkItem("Meu perfil", "👤", "/perfil", route.path === "/perfil")}
+        ${ok("/ferramentas") ? linkItem("Ferramentas", "🧰", "/ferramentas", route.path === "/ferramentas") : null}
+        ${ok("/admin") && me.role === "admin" ? linkItem("Administração", "⚙️", "/admin", route.path === "/admin") : null}
+        ${ok("/perfil") ? linkItem("Meu perfil", "👤", "/perfil", route.path === "/perfil") : null}
         ${cfg.AUTH_MODE === "open" ? null : html`
           <button
             class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-ink/70 hover:bg-black/[0.04]"
@@ -985,7 +1051,7 @@ function Shell({ me, route, children }) {
         ${fullBleed
           ? children
           : html`<div class="mx-auto max-w-5xl px-4 py-7 sm:px-6 lg:px-10 lg:py-10">
-              ${escopoDesf && me.role !== "leitor" ? html`<div class="mb-3 flex justify-end"><${BotaoDesfazer} key=${escopoDesf} escopo=${escopoDesf} /></div>` : null}
+              ${escopoDesf && podeEscreverCS(me.role) ? html`<div class="mb-3 flex justify-end"><${BotaoDesfazer} key=${escopoDesf} escopo=${escopoDesf} /></div>` : null}
               ${children}
             </div>`}
       </main>
@@ -1059,7 +1125,7 @@ function Dashboard({ me, sections }) {
             ${recent === null
               ? html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
               : recent.length === 0
-              ? html`<${Empty} title="Nenhum documento ainda" icon="📭">${me.role !== "leitor" ? "Abra uma seção e clique em “Novo documento”." : "Peça a um editor para publicar os primeiros materiais."}<//>`
+              ? html`<${Empty} title="Nenhum documento ainda" icon="📭">${ehEditor(me.role) ? "Abra uma seção e clique em “Novo documento”." : "Peça a um editor para publicar os primeiros materiais."}<//>`
               : html`<${DocTable} docs=${recent} showSection />`}
           </div>`}
     </div>`;
@@ -1097,7 +1163,7 @@ function SectionPage({ slug, me, sections, onSectionsChanged }) {
       (!tagFilter || (d.tags || []).includes(tagFilter))
   );
 
-  const canEdit = me.role !== "leitor";
+  const canEdit = ehEditor(me.role);
 
   return html`
     <div>
@@ -1369,7 +1435,7 @@ function DocDetail({ id, me, sections }) {
       const v = await fetchVersions(id);
       setVersions(v);
       setSelVersion(d.current ? d.current.id : v[0] && v[0].id);
-      if (me.role !== "leitor") setActivity(await fetchActivity(id));
+      if (ehEditor(me.role)) setActivity(await fetchActivity(id));
     } catch (e) {
       if (e && e.code === "PGRST116") setNotFound(true);
       else notify(errMsg(e), "err");
@@ -1382,7 +1448,7 @@ function DocDetail({ id, me, sections }) {
   if (notFound) return html`<${Empty} title="Documento não encontrado" icon="🔍"><a class="text-brand" href="#/base">Voltar à Base de Conhecimento</a><//>`;
   if (!doc) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
 
-  const canEdit = me.role !== "leitor";
+  const canEdit = ehEditor(me.role);
   const canDelete = me.role === "admin";
   const shown = versions.find((v) => v.id === selVersion) || doc.current || versions[0];
 
@@ -1458,7 +1524,7 @@ function DocDetail({ id, me, sections }) {
         </div>
       </div>
 
-      ${me.role !== "leitor" && activity.length > 0 && html`
+      ${ehEditor(me.role) && activity.length > 0 && html`
         <div class="mt-10">
           <h2 class="mb-2 text-sm font-semibold uppercase tracking-wider text-muted">Atividade</h2>
           <ul class="space-y-1 text-sm text-muted">
@@ -1697,7 +1763,7 @@ function NewDocPage({ me, sections, query }) {
   const [busy, setBusy] = useState(false);
   useEffect(() => { fetchProfiles().then(setProfiles).catch(() => {}); }, []);
 
-  if (me.role === "leitor")
+  if (!ehEditor(me.role))
     return html`<${Empty} title="Sem permissão" icon="🔒">Apenas editores e admins podem criar documentos.<//>`;
 
   async function save(e) {
@@ -1780,7 +1846,7 @@ function ProfilePage({ me, onProfileChanged }) {
         <div class="rounded-xl border border-line bg-white p-5">
           <div class="text-sm text-muted">E-mail</div>
           <div class="font-medium text-ink">${me.email}</div>
-          <div class="mt-1 text-xs text-muted">Papel: ${ROLE_LABEL[me.role]}</div>
+          <div class="mt-1 text-xs text-muted">Papel: ${rotuloRole(me.role)}</div>
         </div>
         <div class="rounded-xl border border-line bg-white p-5">
           <${Field} label="Nome"><input class=${inputCls} value=${nome} onInput=${(e) => setNome(e.target.value)} /><//>
@@ -1864,7 +1930,7 @@ function AdminPage({ me }) {
                     <td class="px-4 py-3">
                       <select class=${cx(inputCls, "w-auto py-1")} value=${u.role} disabled=${u.id === me.id}
                         onChange=${(e) => setRole(u, e.target.value)}>
-                        <option value="leitor">Leitor</option><option value="editor">Editor</option><option value="admin">Admin</option>
+                        <option value="admin">ADM</option><option value="cs">CS</option><option value="editor">Editor</option><option value="leitor">Leitor</option>
                       </select>
                     </td>
                     <td class="px-4 py-3 text-muted">${fmtDate(u.created_at)}</td>
@@ -2001,7 +2067,7 @@ function SyncRow({ row, onDone }) {
 function CreateUserModal({ onClose, onCreated }) {
   const [email, setEmail] = useState("");
   const [nome, setNome] = useState("");
-  const [role, setRole] = useState("leitor");
+  const [role, setRole] = useState("cs");
   const [busy, setBusy] = useState(false);
   async function save() {
     setBusy(true);
@@ -2019,9 +2085,10 @@ function CreateUserModal({ onClose, onCreated }) {
         <${Field} label="Nome"><input class=${inputCls} value=${nome} onInput=${(e) => setNome(e.target.value)} /><//>
         <${Field} label="Papel">
           <select class=${inputCls} value=${role} onChange=${(e) => setRole(e.target.value)}>
-            <option value="leitor">Leitor — só consulta</option>
-            <option value="editor">Editor — cria e edita documentos</option>
-            <option value="admin">Admin — tudo, inclui gestão de usuários</option>
+            <option value="admin">ADM — acesso a tudo, inclui gestão de usuários</option>
+            <option value="cs">CS — somente a aba CS / Suporte</option>
+            <option value="editor">Editor — cria e edita documentos (papel legado)</option>
+            <option value="leitor">Leitor — só consulta (papel legado)</option>
           </select>
         <//>
         <div class="flex justify-end gap-2"><${Btn} variant="subtle" onClick=${onClose}>Cancelar<//><${Btn} loading=${busy} onClick=${save}>Criar<//></div>
@@ -2051,7 +2118,7 @@ function FerramentasPage({ me }) {
   const [statusFilter, setStatusFilter] = useState("");
   const [checking, setChecking] = useState(false);
   const [editing, setEditing] = useState(null); // ferramenta ou {novo:true}
-  const canEdit = me.role !== "leitor";
+  const canEdit = ehEditor(me.role);
 
   const load = useCallback(async () => {
     try { setTools(await fetchFerramentas()); }
@@ -2659,7 +2726,7 @@ function FaqPage({ me }) {
 
       <div class="mt-3 flex items-center justify-between rounded-xl border border-line bg-card px-4 py-2.5 text-xs text-muted">
         <span>Base atual: ${base ? html`<b class="text-ink">${nf(base.total)}</b>` : "…"} documento(s) ${base && base.nome ? `em "${base.nome}"` : ""}</span>
-        <a href="#/secao/cs-suporte" class="font-medium text-brand hover:underline">ver documentos →</a>
+        ${rotaPermitida(me && me.role, "/secao/cs-suporte") ? html`<a href="#/secao/cs-suporte" class="font-medium text-brand hover:underline">ver documentos →</a>` : null}
       </div>
 
       ${configured === false && html`
@@ -3534,7 +3601,7 @@ function rotuloEdicaoFicha(antes, depois) {
 const desfazerFichaComMetas = (fn) => async () => { const r = await fn(); if (r !== false) agendarSyncPlanilha(); return r; };
 
 function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
-  const canEdit = me.role !== "leitor";
+  const canEdit = podeEscreverCS(me.role);
   const [dados, setDados] = useState(null);
   const [row, setRow] = useState(null);
   const [salvo, setSalvo] = useState("");
@@ -3776,7 +3843,7 @@ function DiagnosticoPage({ me, query }) {
   const [lista, setLista] = useState(null);
   const [busca, setBusca] = useState("");
   const [baixandoId, setBaixandoId] = useState(null);
-  const canEdit = me.role !== "leitor";
+  const canEdit = podeEscreverCS(me.role);
   useAoDesfazer("cs/diagnostico", () => { if (!id && !novo) recarregar(); });
 
   async function baixarDaLista(d) {
@@ -3990,7 +4057,7 @@ function MetaManualModal({ meta, diags, onClose, onSalvo }) {
 }
 
 function MetasPage({ me }) {
-  const canEdit = me.role !== "leitor";
+  const canEdit = podeEscreverCS(me.role);
   const [metas, setMetas] = useState(null);
   const [diags, setDiags] = useState([]);
   const [status, setStatus] = useState(null);
@@ -5486,7 +5553,7 @@ function FarolPage({ me }) {
   // rowsRef é a fonte síncrona da verdade: efeitos do Preact rodam tarde demais
   // para o flush imediato (mudança de status/julgamento) enxergar o estado novo.
   const commitRows = (next) => { const arr = typeof next === "function" ? next(rowsRef.current) : next; rowsRef.current = arr; setRows(arr); };
-  const podeEditar = !me || me.role === "editor" || me.role === "admin";
+  const podeEditar = !me || ehEditor(me.role);
   const blocosVisiveis = FAROL_BLOCOS;
   const antesGrupo = useRef({}); // linha antes da 1ª edição de cada grupo de digitação (DESFAZER)
   const flushes = useRef({});    // gravações pendentes (debounce), para o DESFAZER gravar antes de voltar
@@ -6066,7 +6133,7 @@ function GeradorMateriaisPage({ me }) {
   const [niveis, setNiveis] = useState(new Set(["Recém Chegados", "BIA"]));
   const [outroNivel, setOutroNivel] = useState("");
   const [quantidade, setQuantidade] = useState(1);
-  const podeEditar = !me || me.role === "editor" || me.role === "admin";
+  const podeEditar = !me || ehEditor(me.role);
   const toggleNivel = (n) => setNiveis((s) => { const x = new Set(s); x.has(n) ? x.delete(n) : x.add(n); return x; });
 
   useEffect(() => {
@@ -6355,7 +6422,7 @@ function AulasPraticasPage() {
 function GeradorSlidesPage({ me }) {
   const [pedidos, setPedidos] = useState(null);
   const [busy, setBusy] = useState(false);
-  const podeEditar = !me || me.role === "editor" || me.role === "admin";
+  const podeEditar = !me || ehEditor(me.role);
 
   const [f, setF] = useState({
     tema: "", duracao: "60 min", duracaoOutro: "", nivel: "", nivelOutro: "",
@@ -6642,7 +6709,7 @@ async function fetchAutomacaoEstado() {
 }
 
 function UsoIABloco({ me }) {
-  const canEdit = me && me.role !== "leitor";
+  const canEdit = me && ehEditor(me.role);
   const [rows, setRows] = useState(null);
   const [estado, setEstado] = useState(null);
   const [busyPausa, setBusyPausa] = useState(false);
@@ -6967,7 +7034,7 @@ function AgendaPage({ me, view }) {
   const [eventos, setEventos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null); // { dataISO } | { evento }
-  const podeEditar = !me || me.role === "editor" || me.role === "admin";
+  const podeEditar = !me || ehEditor(me.role);
 
   const primeiroDoMes = new Date(ym.y, ym.m, 1);
   const gridInicio = new Date(ym.y, ym.m, 1 - primeiroDoMes.getDay()); // volta ao domingo
@@ -7116,8 +7183,16 @@ function AgendaPage({ me, view }) {
 
 /* ============================ Router / App ============================ */
 
+// Leva o usuário para a tela inicial do papel (sem empilhar a rota proibida no histórico).
+function Redirecionar({ para }) {
+  useEffect(() => { location.replace("#" + para); }, [para]);
+  return html`<${Splash} />`;
+}
+
 function Router({ route, me, sections, reload }) {
   const [p0, p1] = route.parts;
+  // Guarda única: rota fora do papel nunca renderiza conteúdo nem "página não encontrada".
+  if (!rotaPermitida(me.role, route.path)) return html`<${Redirecionar} para=${rotaEntrada(me.role)} />`;
   if (!p0) return html`<${HomePage} me=${me} sections=${sections} />`;
   if (p0 === "base") return html`<${Dashboard} me=${me} sections=${sections} />`;
   if (p0 === "agenda" && (p1 === "calendario" || p1 === "datas-importantes"))

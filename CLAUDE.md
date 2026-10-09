@@ -14,12 +14,51 @@ como backend.
   htm, supabase-js, marked via esm.sh), carrega `styles.css`/`config.js`/
   `app.js` com `?v=N` pra cache-busting.
 - **`config.js`** — `window.__CONFIG__` (URL + anon key do Supabase, pública,
-  protegida por RLS). Gerado localmente, não versionado como segredo.
+  protegida por RLS) e `AUTH_MODE`. É versionado e o repo é público: **nunca**
+  colocar senha ou segredo aqui. `AUTH_MODE: "login"` = tela de e-mail e senha
+  (padrão); `"open"` = entrada automática com conta compartilhada
+  (`GUEST_EMAIL/GUEST_PASSWORD`), só para testes e desligado.
 - **Backend** — Supabase projeto `hmvlkltyvyhlxfyaovpe` (região `sa-east-1`).
   Edge Functions (`ai`, `public-chat`, `sync`, `planilha`, `admin-users`,
   `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet`, entre outras)
   vivem no Supabase, não neste repo — leia/edite via MCP do Supabase
   (`get_edge_function`/`deploy_edge_function`).
+
+## Acesso, papéis e permissões
+
+- **Login**: componente `Login` (`app.js`), sem cadastro público. Contas só são criadas
+  pelo ADM em Administração (Edge Function `admin-users`, que só aceita `admin`).
+  Esqueci a senha = o ADM gera nova senha temporária ("Nova senha"); o usuário troca em
+  Meu perfil. (Ainda é preciso desligar "Allow new users to sign up" no painel do
+  Supabase: Authentication > Sign In / Providers; não dá para fazer por SQL.)
+- **Papéis** (`profiles.role`, enum `user_role`): `admin` (rótulo **ADM**, acesso a tudo),
+  `cs` (rótulo **CS**, só a aba CS / Suporte), e os legados `editor` e `leitor`
+  (editor/leitor veem tudo menos Administração; leitor não grava). `ROLE_LABEL` em `app.js`.
+- **Camada de interface**: bloco `// <permissoes>` em `app.js` (logo após `NAV`):
+  `rotaPermitida(role, path)` é a **fonte única**; o `Shell` (menu e links de topo/rodapé)
+  e o `Router` (guarda: rota proibida => `Redirecionar` para `rotaEntrada(role)`, nunca
+  "página não encontrada" nem conteúdo) passam por ela. Helpers: `ehEditor`,
+  `podeEscreverCS`, `navParaRole`, `rotuloRole`, `mensagemErroLogin`. Papel desconhecido
+  não ganha privilégio (só `#/perfil`). **Não** compare `me.role !== "leitor"`: use
+  `ehEditor(role)` (Base, Agenda, Farol, Ferramentas...) ou `podeEscreverCS(role)` (telas de CS).
+  Item novo no grupo `cs` do `NAV` já fica liberado para o CS; item novo em outro grupo
+  fica bloqueado para ele automaticamente.
+- **Teste dos helpers**: `node scripts/teste-permissoes.js` (extrai o bloco do `app.js`;
+  rode antes de mexer em `NAV`/papéis).
+- **Camada de banco (a barreira real)** — SQL em `scripts/migrations/` (a migration
+  `20261009_papel_cs_helpers_e_rls.sql` só vale depois de aplicada no Supabase; o valor
+  `cs` do enum já foi aplicado; conferir `select * from pg_policies` antes de confiar): o papel `cs` NÃO entra em `app.is_editor()`.
+  Helpers `app.is_cs()`, `app.is_cs_or_editor()` e `app.cs_section_id()`. Tabelas do CS
+  (escrita para cs/editor/admin): `livros_envios`, `faq_interacoes` (só seção `cs-suporte`),
+  `cs_diagnosticos`, `cs_metas`; leitura para cs: também `cs_mentorados`, `pesquisa_avatar`,
+  `chat_widget_logs`, `sync_status` (só `metas-planilha`/`mentorados-planilha`),
+  `automacao_estado` e a seção `cs-suporte` da Base (alimenta o FAQ). As demais tabelas
+  têm `select` `to authenticated using (not app.is_cs())`. Tela/tabela nova do CS: dar
+  escrita via `app.is_cs_or_editor()`; tabela de outra área: `not app.is_cs()` no select.
+- **Edge Functions e papel**: `admin-users` (só admin; aceita leitor/editor/admin/cs),
+  `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet` (force) e `planilha`
+  aceitam editor/admin/cs. `ai` e `sync` só exigem usuário logado (ver lacunas no relatório
+  de segurança da tarefa de login).
 
 ## Convenções
 
@@ -29,9 +68,10 @@ como backend.
 - **Página**: `useState(null)` = carregando, `useEffect` chama o fetch,
   `notify(errMsg(e), "err")` no catch. Veja `FerramentasPage`/
   `fetchFerramentas` como referência de estilo.
-- **RLS**: padrão do OS é `select=true` / `write=app.is_editor()` — desvie
+- **RLS**: padrão do OS é `select` para `authenticated` (nunca para o role público/anon)
+  excluindo o papel cs (`not app.is_cs()`) / `write=app.is_editor()` — desvie
   disso só com razão explícita (ex. dado financeiro sensível), nunca por
-  omissão.
+  omissão. Tabelas de CS usam `app.is_cs_or_editor()` na escrita.
 - **Rota**: `#/<grupo>/<slug>` pros itens de `NAV`; grupos sem sub-item (ex.
   Base de Conhecimento) usam `#/<grupo>` direto. Links de topo/rodapé (Início,
   Squad, Farol do Lucro, Pedir a IA, Ferramentas, Administração, Meu perfil)

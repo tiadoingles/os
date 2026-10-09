@@ -20,20 +20,23 @@ no menu como "em breve" e serão adicionados nos próximos módulos.
 - **Segurança**: todo acesso a dados passa por Row Level Security (RLS). A
   `ANON KEY` em `config.js` é pública por design.
 
-### Acesso (período de testes)
+### Acesso
 
-`config.js` está com `AUTH_MODE: "open"`: a tela de login some e o app entra sozinho
-com a conta compartilhada `teste@os.tiadoingles.com.br` (papel **editor**). Para
-voltar a exigir login, troque para `AUTH_MODE: "login"`. As regras de RLS continuam
-valendo — o acesso "aberto" é só a conveniência de não digitar login.
+`config.js` está com `AUTH_MODE: "login"`: o app exige e-mail e senha. Não há cadastro
+público: as contas são criadas pelo ADM em Administração. O modo antigo `"open"` (entrada
+automática com conta compartilhada de testes) está desligado.
 
 ### Papéis
 
-| Papel  | Pode |
-|--------|------|
-| leitor | consultar todas as seções e documentos |
-| editor | + criar/editar documentos e novas versões, editar descrição das seções |
-| admin  | + criar/excluir usuários, definir papéis, gerar senhas temporárias, excluir documentos |
+| Papel (rótulo) | Pode |
+|----------------|------|
+| admin (ADM)    | tudo, inclui criar/excluir usuários, definir papéis e gerar senhas temporárias |
+| cs (CS)        | somente a aba CS / Suporte (leitura e escrita nas telas dela), Meu perfil e sair |
+| editor (legado)| tudo menos Administração: cria e edita documentos, ferramentas, agenda |
+| leitor (legado)| consulta tudo menos Administração, sem gravar |
+
+A interface esconde o que cada papel não pode ver (`rotaPermitida` no `app.js`), mas a
+barreira real é a RLS do banco.
 
 ## Arquivos
 
