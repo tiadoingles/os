@@ -59,6 +59,14 @@ como backend.
   `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet` (force) e `planilha`
   aceitam editor/admin/cs. `ai` e `sync` só exigem usuário logado (ver lacunas no relatório
   de segurança da tarefa de login).
+- **LinkedIn da Tia** (`#/conteudo/linkedin`, `LinkedinPage`/`LinkedinCard`): fila de posts em
+  `public.linkedin_posts` (RLS: select `not app.is_cs()`, escrita `app.is_editor()`; SQL em
+  `scripts/migrations/20261014_linkedin_*.sql`). Ações da Edge Function `ai` (arquivo
+  `linkedin.ts` dentro da função): `linkedin_semana` (gera os rascunhos da grade a partir do
+  guia `kb_documents.chave_externa='linkedin:guia-editorial'` + `conteudo_insights` + últimos
+  posts; só preenche horários vazios) e `linkedin_reescrever` (devolve texto, não grava); as
+  duas exigem editor/admin. Horários em America/Sao_Paulo (UTC-03:00). Fase 3 (publicar pela
+  API do LinkedIn, colunas `linkedin_urn`/`erro`/`publicado_em`) ainda não existe.
 
 ## Convenções
 

@@ -120,6 +120,8 @@ const NAV = [
       desc: "Dashboard do calendário de conteúdo: produção, desempenho orgânico e posts por objetivo." },
     { slug: "gerador-conteudos", nome: "Gerador de conteúdos",
       desc: "Gera ideias e conteúdos a partir dos insights das pesquisas de alunos." },
+    { slug: "linkedin", nome: "LinkedIn",
+      desc: "Fila de posts do LinkedIn pessoal da Tia: gerar a semana com IA, revisar, aprovar e copiar." },
   ]},
 ];
 
@@ -616,6 +618,7 @@ function escopoDesfazer(route) {
   if (p0 === "agenda") return "agenda";
   if (p0 === "farol") return "farol";
   if (p0 === "ferramentas") return "ferramentas";
+  if (p0 === "conteudo" && p1 === "linkedin") return LI_ESCOPO;
   if (p0 === "base" || p0 === "secao" || p0 === "doc") return "base";
   return null;
 }
@@ -5368,6 +5371,353 @@ function GeradorConteudosPage() {
     </div>`;
 }
 
+/* ============================ Conteúdo · LinkedIn ============================ */
+// Fila de posts do LinkedIn pessoal da Tia (tabela linkedin_posts). Fase 2: a Tia aprova
+// aqui e copia o texto para colar no LinkedIn; a publicação pela API (Fase 3) ainda não existe.
+// Horários sempre em America/Sao_Paulo (UTC-03:00 fixo, sem horário de verão desde 2019).
+
+const LI_ESCOPO = "conteudo/linkedin";
+const LI_PILARES = { 1: "Dor", 2: "Trabalho", 3: "Ciência", 4: "Bloqueio", 5: "Prova e autoridade" };
+const LI_STATUS = {
+  rascunho: { label: "Rascunho", cls: PILL_WARN },
+  aprovado: { label: "Aprovado", cls: PILL_OK },
+  publicado: { label: "Publicado", cls: "bg-[#dfe8f3] text-[#3f5f86]" },
+  erro: { label: "Erro", cls: PILL_ERR },
+  descartado: { label: "Descartado", cls: PILL_NEUTRAL },
+};
+const LI_DIAS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+const LI_GANCHO = 200; // o LinkedIn corta o post no "ver mais" por volta daqui
+const LI_TZ = "-03:00";
+
+// timestamptz -> { data: "AAAA-MM-DD", hora: "HH:MM" } no horário de Brasília.
+function liPartesSP(ts) {
+  if (!ts) return null;
+  const d = new Date(new Date(ts).getTime() - 3 * 3600 * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return { data: `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`, hora: `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}` };
+}
+function liISO(data, hora) { return `${data}T${hora || "08:00"}:00${LI_TZ}`; }
+function liDiaSemana(data) { const [y, m, d] = data.split("-").map(Number); return new Date(Date.UTC(y, m - 1, d)).getUTCDay(); }
+function liSegunda(data) { const w = liDiaSemana(data); return somaDias(data, w === 0 ? -6 : 1 - w); }
+function liHojeSP() { return liPartesSP(new Date().toISOString()).data; }
+function liDiaCurto(data) { const [, m, d] = data.split("-"); return `${LI_DIAS[liDiaSemana(data)]} ${d}/${m}`; }
+function liContar(t) { return [...(t || "")].length; }
+
+async function fetchLinkedinPosts() {
+  const { data, error } = await sb.from("linkedin_posts").select("*")
+    .order("agendado_para", { ascending: true, nullsFirst: false }).order("created_at", { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+// Grava um patch num post com snapshot para o DESFAZER.
+async function liSalvar(post, patch, rotulo, mensagem) {
+  const { data: antes, error: e1 } = await sb.from("linkedin_posts").select("*").eq("id", post.id).maybeSingle();
+  if (e1) throw e1;
+  if (!antes) throw new Error("Este post não existe mais. Recarregue a página.");
+  const { data: depois, error } = await sb.from("linkedin_posts").update(patch).eq("id", post.id).select("*").maybeSingle();
+  if (error) throw error;
+  if (!depois) throw new Error("Sem permissão para alterar este post.");
+  registrarDesfazer(LI_ESCOPO, rotulo, desfazerEdicao("linkedin_posts", antes, depois, rotulo), { mensagem: mensagem || "Post atualizado" });
+  return depois;
+}
+
+function LinkedinPage({ me }) {
+  const pode = ehEditor(me && me.role);
+  const [rows, setRows] = useState(null);
+  const [semana, setSemana] = useState(null); // segunda-feira exibida (AAAA-MM-DD)
+  const [verDescartados, setVerDescartados] = useState(false);
+  const [opcionais, setOpcionais] = useState(false);
+  const [gerando, setGerando] = useState(false);
+  const [configured, setConfigured] = useState(null);
+
+  const carregar = useCallback(() =>
+    fetchLinkedinPosts().then(setRows).catch((e) => { notify(errMsg(e), "err"); setRows((r) => r || []); }), []);
+  useEffect(() => {
+    carregar();
+    aiCall("status").then((d) => setConfigured(!!(d && d.configured))).catch(() => setConfigured(false));
+  }, []);
+  useAoDesfazer(LI_ESCOPO, carregar);
+
+  const hoje = liHojeSP();
+  const segAtual = liSegunda(hoje);
+  const proxSeg = somaDias(segAtual, 7);
+
+  // Semana inicial: a atual; se ela estiver vazia e a próxima tiver posts, a próxima.
+  useEffect(() => {
+    if (!rows || semana) return;
+    const naSemana = (seg) => rows.some((r) => {
+      const p = liPartesSP(r.agendado_para);
+      return p && p.data >= seg && p.data < somaDias(seg, 7) && r.status !== "descartado";
+    });
+    setSemana(!naSemana(segAtual) && naSemana(proxSeg) ? proxSeg : segAtual);
+  }, [rows]);
+
+  if (!rows || !semana) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
+
+  const visivel = (r) => verDescartados || r.status !== "descartado";
+  const fimSemana = somaDias(semana, 7);
+  const daSemana = rows.filter((r) => {
+    const p = liPartesSP(r.agendado_para);
+    return p && p.data >= semana && p.data < fimSemana && visivel(r);
+  });
+  const reserva = rows.filter((r) => !r.agendado_para && visivel(r));
+  const dias = [0, 1, 2, 3, 4, 5, 6].map((i) => somaDias(semana, i))
+    .filter((d, i) => i < 5 || daSemana.some((r) => liPartesSP(r.agendado_para).data === d));
+  const contagem = (lista) => {
+    const c = {}; for (const r of lista) c[r.status] = (c[r.status] || 0) + 1; return c;
+  };
+  const cSemana = contagem(daSemana);
+
+  // Gera para a semana exibida se ela for futura (senão a próxima); se essa já estiver com todos
+  // os horários ocupados (mesmo dia e turno, como na Edge Function), pula para a seguinte.
+  const turnosOcupados = new Set(rows.filter((r) => r.agendado_para && r.status !== "descartado").map((r) => {
+    const p = liPartesSP(r.agendado_para); return p.data + (p.hora < "12:00" ? "M" : "T");
+  }));
+  const semanaCheia = (seg) => [0, 1, 2, 3, 4].every((i) => turnosOcupados.has(somaDias(seg, i) + "M")) &&
+    (!opcionais || [1, 2, 3].every((i) => turnosOcupados.has(somaDias(seg, i) + "T")));
+  let alvo = semana > segAtual ? semana : proxSeg;
+  for (let i = 0; i < 12 && semanaCheia(alvo); i++) alvo = somaDias(alvo, 7);
+  const rotuloGerar = alvo === proxSeg ? "Gerar posts da próxima semana" : `Gerar posts da semana de ${liDiaCurto(alvo).slice(4)}`;
+
+  async function gerar() {
+    if (!confirm(`Gerar com IA os rascunhos da semana de ${liDiaCurto(alvo)} a ${liDiaCurto(somaDias(alvo, 4))}` +
+      (opcionais ? " (com os horários opcionais das 17:30)" : "") + "? Só os horários vazios recebem post. Consome créditos da Anthropic.")) return;
+    setGerando(true);
+    try {
+      const d = await aiCall("linkedin_semana", { inicio: alvo, incluir_opcionais: opcionais });
+      if (d && d.configured === false) { setConfigured(false); return; }
+      const criados = (d && d.criados) || [];
+      if (!criados.length) { notify((d && d.mensagem) || "Nenhum post novo: os horários dessa semana já estão ocupados.", "info"); return; }
+      const rotulo = `gerar ${criados.length} post(s) da semana de ${liDiaCurto(alvo)}`;
+      registrarDesfazer(LI_ESCOPO, rotulo, async () => {
+        for (const c of criados) { const r = await desfazerCriacao("linkedin_posts", c, rotulo)(); if (r === false) return false; }
+        return true;
+      }, { mensagem: `${criados.length} rascunho(s) criado(s)` });
+      setSemana(alvo);
+      await carregar();
+    } catch (e) { notify(errMsg(e), "err"); }
+    finally { setGerando(false); }
+  }
+
+  const resumo = (c) => Object.entries(LI_STATUS).filter(([k]) => c[k]).map(([k, s]) => html`<${Badge} class=${s.cls}>${c[k]} ${s.label.toLowerCase()}<//>`);
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">✍️ Conteúdo</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">LinkedIn</h1>
+      <p class="mt-1 max-w-3xl text-sm text-muted">
+        Fila de posts do LinkedIn pessoal da Tia. Aprove aqui e use <b>Copiar</b> para colar no LinkedIn no horário marcado
+        (a publicação automática ainda não existe). Regras no${" "}<a class="text-brand hover:underline" href="#/secao/documentacao-e-processos">Guia Editorial (Documentação e Processos)</a>.
+      </p>
+
+      <div class="mt-5 flex flex-wrap items-center gap-2">
+        <${Btn} variant="ghost" onClick=${() => setSemana(somaDias(semana, -7))} aria-label="Semana anterior">←<//>
+        <div class="min-w-[190px] text-center text-sm font-semibold text-ink">
+          ${liDiaCurto(semana)} a ${liDiaCurto(somaDias(semana, 4))}
+          ${semana === segAtual ? html`<span class="ml-1 font-normal text-muted">(esta semana)</span>` : semana === proxSeg ? html`<span class="ml-1 font-normal text-muted">(próxima)</span>` : null}
+        </div>
+        <${Btn} variant="ghost" onClick=${() => setSemana(somaDias(semana, 7))} aria-label="Próxima semana">→<//>
+        ${semana !== segAtual ? html`<${Btn} variant="subtle" onClick=${() => setSemana(segAtual)}>Hoje<//>` : null}
+        <div class="ml-1 flex flex-wrap gap-1">${resumo(cSemana)}</div>
+        <label class="ml-auto flex items-center gap-2 text-xs text-muted">
+          <input type="checkbox" checked=${verDescartados} onChange=${(e) => setVerDescartados(e.target.checked)} /> Mostrar descartados
+        </label>
+      </div>
+
+      ${pode ? html`
+        <div class="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-line bg-card p-4">
+          <${Btn} onClick=${gerar} loading=${gerando} disabled=${configured === false}>${rotuloGerar}<//>
+          <label class="flex items-center gap-2 text-sm text-ink">
+            <input type="checkbox" checked=${opcionais} onChange=${(e) => setOpcionais(e.target.checked)} /> Incluir opcionais 17:30 (ter a qui)
+          </label>
+          <span class="text-xs text-muted">${configured === false
+            ? "A IA não está conectada (falta o segredo ANTHROPIC_API_KEY)."
+            : `Semana de ${liDiaCurto(alvo)}: 5 fixos às 08:00 (seg a sex)${opcionais ? " + 3 às 17:30" : ""}, como rascunho. Leva cerca de 1 minuto.`}</span>
+        </div>` : null}
+
+      <div class="mt-6 space-y-6">
+        ${dias.map((d) => {
+          const doDia = daSemana.filter((r) => liPartesSP(r.agendado_para).data === d)
+            .sort((a, b) => a.agendado_para.localeCompare(b.agendado_para));
+          const w = liDiaSemana(d);
+          const slots = w === 1 || w === 5 ? ["08:00"] : w >= 2 && w <= 4 ? ["08:00", "17:30"] : [];
+          const vazios = slots.filter((h) => !doDia.some((r) => liPartesSP(r.agendado_para).hora === h));
+          return html`
+            <section key=${d}>
+              <h2 class=${cx("text-sm font-semibold uppercase tracking-wider", d === hoje ? "text-brand" : "text-muted")}>
+                ${liDiaCurto(d)}${d === hoje ? " · hoje" : ""}
+              </h2>
+              <div class="mt-2 grid gap-4 xl:grid-cols-2">
+                ${doDia.map((p) => html`<${LinkedinCard} key=${p.id + ":" + p.updated_at} post=${p} pode=${pode} onSalvo=${carregar} />`)}
+                ${vazios.map((h) => html`
+                  <div key=${h} class="rounded-2xl border border-dashed border-line px-4 py-5 text-sm text-muted">
+                    ${h} · sem post${h === "17:30" ? " (horário opcional)" : ""}
+                  </div>`)}
+              </div>
+            </section>`;
+        })}
+      </div>
+
+      <h2 class="mt-10 text-sm font-semibold uppercase tracking-wider text-muted">Sem data / Reserva (${reserva.length})</h2>
+      <p class="mt-1 text-xs text-muted">Posts prontos para encaixar quando faltar conteúdo. Para agendar, escolha data e hora no card.</p>
+      <div class="mt-3 grid gap-4 xl:grid-cols-2">
+        ${reserva.length
+          ? reserva.map((p) => html`<${LinkedinCard} key=${p.id + ":" + p.updated_at} post=${p} pode=${pode} onSalvo=${carregar} />`)
+          : html`<div class="text-sm text-muted">Nenhum post na reserva.</div>`}
+      </div>
+    </div>`;
+}
+
+// Um card = um post. Componente próprio (como FaqFeedback) para a edição inline manter o
+// foco e o texto digitado mesmo quando a página recarrega a lista.
+function LinkedinCard({ post, pode, onSalvo }) {
+  const [editando, setEditando] = useState(false);
+  const [texto, setTexto] = useState(post.texto || "");
+  const [comentario, setComentario] = useState(post.primeiro_comentario || "");
+  const partes = liPartesSP(post.agendado_para);
+  const [data, setData] = useState(partes ? partes.data : "");
+  const [hora, setHora] = useState(partes ? partes.hora : "08:00");
+  const [aberto, setAberto] = useState(false);
+  const [instrucao, setInstrucao] = useState("");
+  const [sugestao, setSugestao] = useState(null); // { texto, avisos }
+  const [busy, setBusy] = useState(null); // nome da ação em andamento
+
+  const st = LI_STATUS[post.status] || LI_STATUS.rascunho;
+  const corpo = editando ? texto : post.texto || "";
+  const n = liContar(corpo);
+  const gancho = [...(post.texto || "")].slice(0, LI_GANCHO).join("");
+  const resto = [...(post.texto || "")].slice(LI_GANCHO).join("");
+  const nCls = n < 900 || n > 1500 ? "text-[#a44b43]" : "text-[#5e7a52]";
+  const mudouData = partes ? (data !== partes.data || hora !== partes.hora) : !!data;
+
+  async function acao(nome, patch, rotulo, mensagem) {
+    setBusy(nome);
+    try { await liSalvar(post, patch, rotulo, mensagem); onSalvo && onSalvo(); return true; }
+    catch (e) { notify(errMsg(e), "err"); return false; }
+    finally { setBusy(null); }
+  }
+  const rotuloPost = () => (partes ? liDiaCurto(partes.data) + " " + partes.hora : "reserva") + " · pilar " + post.pilar;
+
+  async function salvarTexto() {
+    if (!texto.trim()) { notify("O texto do post não pode ficar vazio.", "err"); return; }
+    const ok = await acao("texto", { texto: texto.trim(), primeiro_comentario: comentario.trim() || null }, "editar texto (" + rotuloPost() + ")", "Texto salvo");
+    if (ok) setEditando(false);
+  }
+  async function salvarData() {
+    if (!data) { notify("Escolha a data.", "err"); return; }
+    await acao("data", { agendado_para: liISO(data, hora) }, "mudar data (" + rotuloPost() + ")", "Data atualizada");
+  }
+  async function aprovar() {
+    if (post.observacao && !confirm(`Este post tem uma observação:\n\n"${post.observacao}"\n\nAprovar mesmo assim?`)) return;
+    await acao("aprovar", { status: "aprovado" }, "aprovar (" + rotuloPost() + ")", "Post aprovado");
+  }
+  async function reescrever() {
+    if (!instrucao.trim()) { notify("Diga o que a IA deve mudar.", "err"); return; }
+    setBusy("ia");
+    try {
+      const d = await aiCall("linkedin_reescrever", { id: post.id, instrucao: instrucao.trim(), texto: editando ? texto : undefined });
+      if (d && d.configured === false) { notify("A IA não está conectada.", "err"); return; }
+      setSugestao({ texto: d.texto || "", avisos: d.avisos || [] });
+    } catch (e) { notify(errMsg(e), "err"); }
+    finally { setBusy(null); }
+  }
+  function usarSugestao() {
+    setTexto(sugestao.texto);
+    setComentario(post.primeiro_comentario || "");
+    setEditando(true);
+    setSugestao(null);
+    notify("Texto da IA colocado no editor. Revise e clique em Salvar texto.", "info");
+  }
+  async function copiar(t, msg) {
+    try { await navigator.clipboard.writeText(t); notify(msg || "Texto copiado. É só colar no LinkedIn.", "ok"); }
+    catch (_) { notify("Não consegui copiar automaticamente. Selecione o texto e copie com Ctrl+C.", "err"); }
+  }
+
+  return html`
+    <article class=${cx("rounded-2xl border bg-card p-4", post.status === "descartado" ? "border-line opacity-60" : "border-line")}>
+      <div class="flex flex-wrap items-center gap-1.5">
+        ${partes ? html`<span class="mr-1 text-sm font-semibold text-ink">${partes.hora}</span>` : null}
+        <${Badge} class="bg-brand-light text-brand-dark">Pilar ${post.pilar} · ${LI_PILARES[post.pilar] || ""}<//>
+        ${post.formato ? html`<${Badge} class=${PILL_NEUTRAL}>${post.formato}<//>` : null}
+        <${Badge} class=${st.cls}>${st.label}<//>
+        <span class=${cx("ml-auto text-xs font-medium", nCls)} title="O guia pede de 900 a 1.500 caracteres">${n.toLocaleString("pt-BR")} caracteres</span>
+      </div>
+
+      ${post.observacao ? html`
+        <div class="mt-3 rounded-lg border border-[#e8dca0] bg-[#fbf5d9] px-3 py-2 text-xs text-[#6f6224]">${post.observacao}</div>` : null}
+      ${post.status === "erro" && post.erro ? html`
+        <div class="mt-3 rounded-lg border border-[#efd9d3] bg-[#faefec] px-3 py-2 text-xs text-[#a44b43]">${post.erro}</div>` : null}
+
+      ${editando ? html`
+        <div class="mt-3">
+          <textarea class=${cx(inputCls, "min-h-[320px] font-[inherit] leading-relaxed")} value=${texto}
+            onInput=${(e) => setTexto(e.target.value)}></textarea>
+          <div class="mt-1 text-xs text-muted">
+            Gancho (antes do "ver mais"): ${liContar((texto.split(/\n\s*\n/)[0] || ""))} caracteres na 1ª parte · máximo ${LI_GANCHO}.
+          </div>
+          <label class="mt-3 block text-xs font-medium text-muted">Primeiro comentário (opcional; link vai aqui, nunca no post)</label>
+          <textarea class=${cx(inputCls, "mt-1 min-h-[60px]")} value=${comentario} onInput=${(e) => setComentario(e.target.value)}></textarea>
+          <div class="mt-2 flex flex-wrap gap-2">
+            <${Btn} onClick=${salvarTexto} loading=${busy === "texto"}>Salvar texto<//>
+            <${Btn} variant="ghost" onClick=${() => { setEditando(false); setTexto(post.texto || ""); setComentario(post.primeiro_comentario || ""); }}>Cancelar<//>
+          </div>
+        </div>` : html`
+        <div class="mt-3 whitespace-pre-wrap break-words text-sm leading-relaxed">
+          <span class="rounded bg-brand-light/60 font-medium text-ink" title=${`Primeiros ${LI_GANCHO} caracteres: o que aparece antes do "ver mais"`}>${gancho}</span>${resto
+            ? (aberto ? html`<span class="text-ink/75">${resto}</span>` : html`<button type="button" class="ml-1 text-xs font-medium text-brand hover:underline" onClick=${() => setAberto(true)}>…ver mais</button>`)
+            : null}
+          ${aberto && resto ? html`<div><button type="button" class="mt-1 text-xs font-medium text-brand hover:underline" onClick=${() => setAberto(false)}>ver menos</button></div>` : null}
+        </div>
+        ${post.primeiro_comentario ? html`
+          <div class="mt-3 rounded-lg bg-black/[0.03] px-3 py-2 text-xs text-ink/80">
+            <span class="font-medium text-muted">Primeiro comentário:</span> ${post.primeiro_comentario}
+            <button type="button" class="ml-2 font-medium text-brand hover:underline" onClick=${() => copiar(post.primeiro_comentario, "Comentário copiado.")}>copiar</button>
+          </div>` : null}`}
+
+      ${sugestao ? html`
+        <div class="mt-3 rounded-xl border border-brand/30 bg-brand-light/30 p-3">
+          <div class="text-xs font-semibold uppercase tracking-wide text-brand-dark">Sugestão da IA · ${liContar(sugestao.texto).toLocaleString("pt-BR")} caracteres</div>
+          ${sugestao.avisos.length ? html`<div class="mt-1 text-xs text-[#6f6224]">Atenção: ${sugestao.avisos.join("; ")}.</div>` : null}
+          <div class="mt-2 max-h-[360px] overflow-auto whitespace-pre-wrap text-sm leading-relaxed text-ink">${sugestao.texto}</div>
+          <div class="mt-2 flex flex-wrap gap-2">
+            <${Btn} onClick=${usarSugestao}>Usar este texto<//>
+            <${Btn} variant="ghost" onClick=${() => setSugestao(null)}>Descartar sugestão<//>
+          </div>
+        </div>` : null}
+
+      <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-line pt-3">
+        <${Btn} variant="ghost" onClick=${() => copiar(post.texto || "")}>Copiar<//>
+        ${pode ? html`
+          ${!editando && post.status !== "publicado" ? html`<${Btn} variant="ghost" onClick=${() => { setTexto(post.texto || ""); setComentario(post.primeiro_comentario || ""); setEditando(true); }}>Editar texto<//>` : null}
+          ${post.status !== "aprovado" && post.status !== "publicado" ? html`<${Btn} onClick=${aprovar} loading=${busy === "aprovar"}>Aprovar<//>` : null}
+          ${post.status === "aprovado" || post.status === "descartado" || post.status === "erro" ? html`
+            <${Btn} variant="subtle" onClick=${() => acao("rascunho", { status: "rascunho" }, "voltar para rascunho (" + rotuloPost() + ")", "Voltou para rascunho")} loading=${busy === "rascunho"}>Voltar p/ rascunho<//>` : null}
+          ${post.status !== "descartado" && post.status !== "publicado" ? html`
+            <${Btn} variant="danger" onClick=${() => acao("descartar", { status: "descartado" }, "descartar (" + rotuloPost() + ")", "Post descartado")} loading=${busy === "descartar"}>Descartar<//>` : null}` : null}
+      </div>
+
+      ${pode && post.status !== "publicado" ? html`
+        <div class="mt-3 flex flex-wrap items-end gap-2">
+          <label class="text-xs text-muted">Data
+            <input type="date" class=${cx(inputCls, "mt-0.5 w-auto py-1.5")} value=${data} onInput=${(e) => setData(e.target.value)} />
+          </label>
+          <label class="text-xs text-muted">Hora
+            <input type="time" class=${cx(inputCls, "mt-0.5 w-auto py-1.5")} value=${hora} onInput=${(e) => setHora(e.target.value)} />
+          </label>
+          <${Btn} variant="subtle" onClick=${salvarData} disabled=${!mudouData} loading=${busy === "data"}>Salvar data<//>
+          ${post.agendado_para ? html`
+            <${Btn} variant="ghost" onClick=${() => acao("semdata", { agendado_para: null }, "mover para a reserva (" + rotuloPost() + ")", "Movido para Sem data / Reserva")} loading=${busy === "semdata"}>Mover p/ reserva<//>` : null}
+        </div>
+        <div class="mt-3 flex flex-wrap gap-2">
+          <input class=${cx(inputCls, "min-w-[220px] flex-1 py-1.5")} placeholder="Reescrever com IA: ex. gancho mais forte, mais curto, outro exemplo…"
+            value=${instrucao} onInput=${(e) => setInstrucao(e.target.value)}
+            onKeyDown=${(e) => { if (e.key === "Enter") { e.preventDefault(); reescrever(); } }} />
+          <${Btn} variant="ghost" onClick=${reescrever} loading=${busy === "ia"}>Reescrever com IA<//>
+        </div>` : null}
+    </article>`;
+}
+
 /* ============================ Farol do Lucro ============================ */
 // Recriação do "Farol do LUCRO" (ref.: craft-sistema-green.lucaspuerto.com.br),
 // um por setor, editável no próprio OS e salvo no Supabase.
@@ -7208,6 +7558,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "farol") return html`<${FarolPage} me=${me} />`;
   if (p0 === "conteudo" && (p1 === "metricas" || p1 === "instagram")) return html`<${ConteudoMetricasPage} />`;
   if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
+  if (p0 === "conteudo" && p1 === "linkedin") return html`<${LinkedinPage} me=${me} />`;
   if (p0 === "cs" && p1 === "faq") return html`<${FaqPage} me=${me} />`;
   if (p0 === "cs" && p1 === "envios-livros") return html`<${EnviosLivrosPage} me=${me} />`;
   if (p0 === "cs" && p1 === "diagnostico") return html`<${DiagnosticoPage} me=${me} query=${route.query} />`;
