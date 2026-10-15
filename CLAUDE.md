@@ -68,8 +68,22 @@ como backend.
   duas exigem editor/admin. Formatos história/case/depoimento (`formato` contendo "história",
   "case" ou "depoimento") seguem a estrutura de roteiro do guia (v2, seção 4.1) e vão de 1.500 a
   2.500 caracteres; os demais, 900 a 1.500 — regra duplicada em `ehFormatoRoteiro`/`faixaTamanho`
-  (`linkedin.ts`) e `liFaixaTamanho` (`app.js`), mantenha as duas iguais. Horários em America/Sao_Paulo (UTC-03:00). Fase 3 (publicar pela
-  API do LinkedIn, colunas `linkedin_urn`/`erro`/`publicado_em`) ainda não existe.
+  (`linkedin.ts`) e `liFaixaTamanho` (`app.js`), mantenha as duas iguais. Horários em America/Sao_Paulo (UTC-03:00).
+- **LinkedIn Fase 3 (publicação automática)** — SQL em `scripts/migrations/20261015_linkedin_publicacao_api.sql`.
+  Post `aprovado` é publicado sozinho no perfil pessoal quando chega o `agendado_para` (até 24 h de atraso;
+  mais que isso fica parado e a aba pede nova data). Edge Function `linkedin` (`verify_jwt=false`, valida
+  por op): `GET /functions/v1/linkedin/callback` (redirect do OAuth, state de uso único 10 min),
+  `auth_url`/`status` (editor/admin), `desconectar` (admin), `publicar_pendentes` (header `x-cron-token`,
+  cron `linkedin-publicar` */5 min; o token fica só em `app.linkedin_config`, nunca no repo). Segredos
+  `LINKEDIN_CLIENT_ID`/`LINKEDIN_CLIENT_SECRET`; sem eles tudo degrada com "LinkedIn não configurado".
+  Token OAuth em `app.linkedin_conexao` (schema não exposto, sem grant, RLS sem política), lido só pelas
+  RPCs `linkedin_svc_*` (execute só service_role); o front usa `linkedin_conexao_status()` (editor/admin,
+  só nome/expires_at). Status `publicando` = trava atômica (`linkedin_svc_reservar`, lote 3); preso há
+  +15 min vira `erro` (nunca republica sozinho). Trigger `app.linkedin_posts_guarda` impede o front de
+  mudar status de post publicando/publicado (inclusive via DESFAZER), gravar `linkedin_urn`/`publicado_em`
+  e aprovar sem data. `commentary` em little text format (`little.ts` na função: escapa reservados e
+  hashtags viram `{hashtag|\#|tag}`); `LinkedIn-Version` na constante `LINKEDIN_VERSION` (renovar antes
+  do sunset, ~1 ano por versão). Aviso na Início quando o token expira em ≤7 dias.
 
 ## Convenções
 

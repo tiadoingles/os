@@ -5372,8 +5372,10 @@ function GeradorConteudosPage() {
 }
 
 /* ============================ Conteúdo · LinkedIn ============================ */
-// Fila de posts do LinkedIn pessoal da Tia (tabela linkedin_posts). Fase 2: a Tia aprova
-// aqui e copia o texto para colar no LinkedIn; a publicação pela API (Fase 3) ainda não existe.
+// Fila de posts do LinkedIn pessoal da Tia (tabela linkedin_posts). Fase 3: post APROVADO é
+// publicado sozinho no LinkedIn quando chega o agendado_para (Edge Function "linkedin", op
+// publicar_pendentes, chamada pelo cron linkedin-publicar a cada 5 min). A conexão OAuth fica
+// no cartão do topo (LinkedinConexao); o token nunca chega ao front.
 // Horários sempre em America/Sao_Paulo (UTC-03:00 fixo, sem horário de verão desde 2019).
 
 const LI_ESCOPO = "conteudo/linkedin";
@@ -5381,6 +5383,7 @@ const LI_PILARES = { 1: "Dor", 2: "Trabalho", 3: "Ciência", 4: "Bloqueio", 5: "
 const LI_STATUS = {
   rascunho: { label: "Rascunho", cls: PILL_WARN },
   aprovado: { label: "Aprovado", cls: PILL_OK },
+  publicando: { label: "Publicando…", cls: "bg-[#dfe8f3] text-[#3f5f86]" },
   publicado: { label: "Publicado", cls: "bg-[#dfe8f3] text-[#3f5f86]" },
   erro: { label: "Erro", cls: PILL_ERR },
   descartado: { label: "Descartado", cls: PILL_NEUTRAL },
@@ -5422,6 +5425,96 @@ async function fetchLinkedinPosts() {
   return data || [];
 }
 
+// Edge Function "linkedin" (conexão OAuth). Devolve o JSON; erro HTTP vira exceção com a mensagem.
+async function linkedinCall(op) {
+  const { data, error } = await sb.functions.invoke("linkedin", { body: { op } });
+  if (error) {
+    let msg = error.message;
+    try { const j = await error.context.json(); if (j && j.error) msg = j.error; } catch (_) { /* ignore */ }
+    throw new Error(msg);
+  }
+  if (data && data.error && data.configurado !== false) throw new Error(data.error);
+  return data;
+}
+// Situação do token para avisos (cartão da aba e Início): null = sem conexão.
+function liSituacaoToken(expires_at) {
+  if (!expires_at) return null;
+  const dias = Math.ceil((new Date(expires_at).getTime() - Date.now()) / 86400000);
+  if (new Date(expires_at).getTime() <= Date.now()) return { nivel: "expirado", dias };
+  return { nivel: dias <= 7 ? "perto" : "ok", dias };
+}
+function liFmtDataHora(ts) {
+  const p = liPartesSP(ts); if (!p) return "";
+  const [y, m, d] = p.data.split("-");
+  return `${LI_DIAS[liDiaSemana(p.data)].toLowerCase()} ${d}/${m}/${y} às ${p.hora}`;
+}
+const LI_MOTIVOS_OAUTH = {
+  nao_configurado: "O LinkedIn ainda não está configurado (faltam as chaves do app no Supabase).",
+  state_invalido: "O retorno do LinkedIn veio sem um código de segurança válido. Tente conectar de novo.",
+  state_expirado: "O pedido de conexão expirou (vale 10 minutos) ou já foi usado. Tente conectar de novo.",
+  user_cancelled_login: "A conexão foi cancelada no LinkedIn.",
+  user_cancelled_authorize: "A autorização foi cancelada no LinkedIn.",
+  sem_permissao: "Só editor ou ADM pode conectar o LinkedIn.",
+  sem_w_member_social: "O LinkedIn não liberou a permissão de publicar (w_member_social). Confira os produtos do app no LinkedIn Developers.",
+  falha_na_troca: "O LinkedIn não confirmou a conexão. Tente de novo em alguns minutos.",
+  sem_codigo: "O LinkedIn não devolveu o código de autorização. Tente de novo.",
+};
+
+// Cartão de conexão no topo da aba LinkedIn (editor/admin).
+function LinkedinConexao({ me, onStatus }) {
+  const [st, setSt] = useState(null); // resposta de op status
+  const [busy, setBusy] = useState(null);
+  const admin = me && me.role === "admin";
+  const carregar = useCallback(() => linkedinCall("status")
+    .then((d) => { setSt(d); onStatus && onStatus(d); })
+    .catch((e) => { setSt({ falhou: errMsg(e) }); onStatus && onStatus(null); }), []);
+  useEffect(() => { carregar(); }, []);
+
+  async function conectar() {
+    setBusy("conectar");
+    try {
+      const d = await linkedinCall("auth_url");
+      if (!d || !d.url) { notify((d && d.error) || "LinkedIn ainda não configurado.", "err"); return; }
+      location.href = d.url;
+    } catch (e) { notify(errMsg(e), "err"); }
+    finally { setBusy(null); }
+  }
+  async function desconectar() {
+    if (!confirm("Desconectar o LinkedIn? Os posts aprovados deixam de ser publicados até alguém conectar de novo.")) return;
+    setBusy("desconectar");
+    try { await linkedinCall("desconectar"); notify("LinkedIn desconectado.", "ok"); await carregar(); }
+    catch (e) { notify(errMsg(e), "err"); }
+    finally { setBusy(null); }
+  }
+
+  const caixa = (cls, conteudo) => html`<div class=${cx("mt-4 flex flex-wrap items-center gap-3 rounded-2xl border p-4", cls)}>${conteudo}</div>`;
+  if (!st) return caixa("border-line bg-card", html`<span class="text-sm text-muted"><span class="spinner mr-2"></span>Verificando a conexão com o LinkedIn…</span>`);
+  if (st.falhou) return caixa("border-line bg-card", html`<span class="text-sm text-muted">Não consegui verificar a conexão com o LinkedIn: ${st.falhou}</span>`);
+  if (!st.configurado) return caixa("border-line bg-card", html`
+    <div class="text-sm">
+      <div class="font-semibold text-ink">LinkedIn não configurado</div>
+      <div class="mt-0.5 text-muted">Falta cadastrar as chaves do app do LinkedIn no Supabase (segredos LINKEDIN_CLIENT_ID e LINKEDIN_CLIENT_SECRET). Enquanto isso, nada é publicado: use Copiar.</div>
+    </div>`);
+  if (!st.conectado) return caixa("border-line bg-card", html`
+    <div class="min-w-[240px] flex-1 text-sm">
+      <div class="font-semibold text-ink">LinkedIn não conectado</div>
+      <div class="mt-0.5 text-muted">Conecte o perfil pessoal da Tia para os posts aprovados saírem sozinhos no horário marcado.</div>
+    </div>
+    <${Btn} onClick=${conectar} loading=${busy === "conectar"}>Conectar LinkedIn<//>`);
+  const sit = liSituacaoToken(st.expires_at);
+  const cls = sit.nivel === "expirado" ? "border-[#e3b7ae] bg-[#faefec]" : sit.nivel === "perto" ? "border-[#e8dca0] bg-[#fbf5d9]" : "border-line bg-card";
+  const txt = sit.nivel === "expirado"
+    ? html`<span class="font-semibold text-[#a44b43]">Conexão expirada</span> · nada será publicado até reconectar`
+    : html`expira em ${sit.dias} dia${sit.dias === 1 ? "" : "s"}${sit.nivel === "perto" ? " · reconecte para não interromper as publicações" : ""}`;
+  return caixa(cls, html`
+    <div class="min-w-[240px] flex-1 text-sm">
+      <div class="font-semibold text-ink">Conectado como ${st.nome || "(sem nome)"}</div>
+      <div class="mt-0.5 text-muted">${txt}.${sit.nivel === "expirado" ? "" : " Posts aprovados saem sozinhos no horário marcado (verificação a cada 5 minutos)."}</div>
+    </div>
+    ${sit.nivel !== "ok" ? html`<${Btn} onClick=${conectar} loading=${busy === "conectar"}>Reconectar<//>` : html`<${Btn} variant="ghost" onClick=${conectar} loading=${busy === "conectar"}>Reconectar<//>`}
+    ${admin ? html`<${Btn} variant="danger" onClick=${desconectar} loading=${busy === "desconectar"}>Desconectar<//>` : null}`);
+}
+
 // Grava um patch num post com snapshot para o DESFAZER.
 async function liSalvar(post, patch, rotulo, mensagem) {
   const { data: antes, error: e1 } = await sb.from("linkedin_posts").select("*").eq("id", post.id).maybeSingle();
@@ -5442,6 +5535,15 @@ function LinkedinPage({ me }) {
   const [opcionais, setOpcionais] = useState(false);
   const [gerando, setGerando] = useState(false);
   const [configured, setConfigured] = useState(null);
+
+  // Volta do OAuth: #/conteudo/linkedin?linkedin=ok|erro&motivo=...
+  useEffect(() => {
+    const q = parseHash().query;
+    if (!q.linkedin) return;
+    if (q.linkedin === "ok") notify("LinkedIn conectado. Os posts aprovados serão publicados no horário marcado.", "ok");
+    else notify("Não foi possível conectar o LinkedIn. " + (LI_MOTIVOS_OAUTH[q.motivo] || `Motivo: ${q.motivo || "desconhecido"}.`), "err");
+    history.replaceState(null, "", location.pathname + location.search + "#/conteudo/linkedin");
+  }, []);
 
   const carregar = useCallback(() =>
     fetchLinkedinPosts().then(setRows).catch((e) => { notify(errMsg(e), "err"); setRows((r) => r || []); }), []);
@@ -5519,9 +5621,11 @@ function LinkedinPage({ me }) {
       <div class="text-sm text-muted">✍️ Conteúdo</div>
       <h1 class="mt-1 text-2xl font-semibold text-ink">LinkedIn</h1>
       <p class="mt-1 max-w-3xl text-sm text-muted">
-        Fila de posts do LinkedIn pessoal da Tia. Aprove aqui e use <b>Copiar</b> para colar no LinkedIn no horário marcado
-        (a publicação automática ainda não existe). Regras no${" "}<a class="text-brand hover:underline" href="#/secao/documentacao-e-processos">Guia Editorial (Documentação e Processos)</a>.
+        Fila de posts do LinkedIn pessoal da Tia. Post <b>aprovado</b> é publicado sozinho no LinkedIn no horário marcado,
+        se o LinkedIn estiver conectado (cartão abaixo). Regras no${" "}<a class="text-brand hover:underline" href="#/secao/documentacao-e-processos">Guia Editorial (Documentação e Processos)</a>.
       </p>
+
+      ${pode ? html`<${LinkedinConexao} me=${me} />` : null}
 
       <div class="mt-5 flex flex-wrap items-center gap-2">
         <${Btn} variant="ghost" onClick=${() => setSemana(somaDias(semana, -7))} aria-label="Semana anterior">←<//>
@@ -5624,9 +5728,27 @@ function LinkedinCard({ post, pode, onSalvo }) {
     if (!data) { notify("Escolha a data.", "err"); return; }
     await acao("data", { agendado_para: liISO(data, hora) }, "mudar data (" + rotuloPost() + ")", "Data atualizada");
   }
+  // Aprovar = autorizar a publicação automática no LinkedIn no agendado_para.
+  function confirmarPublicacao(verbo) {
+    if (!post.agendado_para) { notify("Defina a data e a hora (e clique em Salvar data) antes de aprovar: o post aprovado é publicado sozinho no LinkedIn.", "err"); return false; }
+    if (mudouData) { notify("Você mudou a data/hora e não salvou. Clique em Salvar data antes de aprovar.", "err"); return false; }
+    if (new Date(post.agendado_para).getTime() <= Date.now() - 24 * 3600 * 1000) { notify("A data marcada passou há mais de 24 horas: escolha uma nova data e hora (e clique em Salvar data) antes de aprovar.", "err"); return false; }
+    const passou = new Date(post.agendado_para).getTime() <= Date.now();
+    const quando = passou
+      ? `O horário marcado (${liFmtDataHora(post.agendado_para)}) já passou: este post será publicado no seu LinkedIn em até 5 minutos.`
+      : `Este post será publicado no seu LinkedIn em ${liFmtDataHora(post.agendado_para)}.`;
+    return confirm(`${verbo}?\n\n${quando}\n\n(Só sai se o LinkedIn estiver conectado no cartão do topo da aba.)`);
+  }
   async function aprovar() {
     if (post.observacao && !confirm(`Este post tem uma observação:\n\n"${post.observacao}"\n\nAprovar mesmo assim?`)) return;
+    if (!confirmarPublicacao("Aprovar")) return;
     await acao("aprovar", { status: "aprovado" }, "aprovar (" + rotuloPost() + ")", "Post aprovado");
+  }
+  async function tentarDeNovo() {
+    if (post.erro && /PODE ter sa/.test(post.erro) &&
+      !confirm("Atenção: a tentativa anterior pode ter publicado este post. Confira no seu perfil do LinkedIn antes de continuar, para não sair duplicado.\n\nO post NÃO está no LinkedIn e quer tentar de novo?")) return;
+    if (!confirmarPublicacao("Tentar publicar de novo")) return;
+    await acao("tentar", { status: "aprovado", erro: null }, "tentar publicar de novo (" + rotuloPost() + ")", "Post de volta para aprovado");
   }
   async function reescrever() {
     if (!instrucao.trim()) { notify("Diga o que a IA deve mudar.", "err"); return; }
@@ -5663,8 +5785,16 @@ function LinkedinCard({ post, pode, onSalvo }) {
 
       ${post.observacao ? html`
         <div class="mt-3 rounded-lg border border-[#e8dca0] bg-[#fbf5d9] px-3 py-2 text-xs text-[#6f6224]">${post.observacao}</div>` : null}
-      ${post.status === "erro" && post.erro ? html`
+      ${(post.status === "erro" || post.status === "publicado") && post.erro ? html`
         <div class="mt-3 rounded-lg border border-[#efd9d3] bg-[#faefec] px-3 py-2 text-xs text-[#a44b43]">${post.erro}</div>` : null}
+      ${post.status === "publicado" ? html`
+        <div class="mt-3 rounded-lg bg-[#dfe8f3]/60 px-3 py-2 text-xs text-[#3f5f86]">
+          Publicado${post.publicado_em ? " em " + liFmtDataHora(post.publicado_em) : ""}${post.linkedin_urn ? html` · <a class="font-medium underline" href=${`https://www.linkedin.com/feed/update/${post.linkedin_urn}/`} target="_blank" rel="noopener">ver no LinkedIn</a>` : null}
+        </div>` : null}
+      ${post.status === "aprovado" && post.agendado_para && new Date(post.agendado_para).getTime() <= Date.now() - 24 * 3600 * 1000 ? html`
+        <div class="mt-3 rounded-lg border border-[#e8dca0] bg-[#fbf5d9] px-3 py-2 text-xs text-[#6f6224]">O horário marcado passou há mais de 24 horas: este post não sai sozinho. Escolha uma nova data e hora para ele ser publicado.</div>` : null}
+      ${post.status === "publicando" ? html`
+        <div class="mt-3 rounded-lg bg-[#dfe8f3]/60 px-3 py-2 text-xs text-[#3f5f86]"><span class="spinner mr-2"></span>Publicando no LinkedIn… recarregue a página em alguns instantes.</div>` : null}
 
       ${editando ? html`
         <div class="mt-3">
@@ -5706,16 +5836,17 @@ function LinkedinCard({ post, pode, onSalvo }) {
 
       <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-line pt-3">
         <${Btn} variant="ghost" onClick=${() => copiar(post.texto || "")}>Copiar<//>
-        ${pode ? html`
+        ${pode && post.status !== "publicando" ? html`
           ${!editando && post.status !== "publicado" ? html`<${Btn} variant="ghost" onClick=${() => { setTexto(post.texto || ""); setComentario(post.primeiro_comentario || ""); setEditando(true); }}>Editar texto<//>` : null}
-          ${post.status !== "aprovado" && post.status !== "publicado" ? html`<${Btn} onClick=${aprovar} loading=${busy === "aprovar"}>Aprovar<//>` : null}
+          ${post.status === "erro" ? html`<${Btn} onClick=${tentarDeNovo} loading=${busy === "tentar"}>Tentar de novo<//>` : null}
+          ${post.status !== "aprovado" && post.status !== "publicado" && post.status !== "erro" ? html`<${Btn} onClick=${aprovar} loading=${busy === "aprovar"}>Aprovar<//>` : null}
           ${post.status === "aprovado" || post.status === "descartado" || post.status === "erro" ? html`
             <${Btn} variant="subtle" onClick=${() => acao("rascunho", { status: "rascunho" }, "voltar para rascunho (" + rotuloPost() + ")", "Voltou para rascunho")} loading=${busy === "rascunho"}>Voltar p/ rascunho<//>` : null}
           ${post.status !== "descartado" && post.status !== "publicado" ? html`
             <${Btn} variant="danger" onClick=${() => acao("descartar", { status: "descartado" }, "descartar (" + rotuloPost() + ")", "Post descartado")} loading=${busy === "descartar"}>Descartar<//>` : null}` : null}
       </div>
 
-      ${pode && post.status !== "publicado" ? html`
+      ${pode && post.status !== "publicado" && post.status !== "publicando" ? html`
         <div class="mt-3 flex flex-wrap items-end gap-2">
           <label class="text-xs text-muted">Data
             <input type="date" class=${cx(inputCls, "mt-0.5 w-auto py-1.5")} value=${data} onInput=${(e) => setData(e.target.value)} />
@@ -5725,7 +5856,11 @@ function LinkedinCard({ post, pode, onSalvo }) {
           </label>
           <${Btn} variant="subtle" onClick=${salvarData} disabled=${!mudouData} loading=${busy === "data"}>Salvar data<//>
           ${post.agendado_para ? html`
-            <${Btn} variant="ghost" onClick=${() => acao("semdata", { agendado_para: null }, "mover para a reserva (" + rotuloPost() + ")", "Movido para Sem data / Reserva")} loading=${busy === "semdata"}>Mover p/ reserva<//>` : null}
+            <${Btn} variant="ghost" onClick=${() => {
+              const aprov = post.status === "aprovado";
+              if (aprov && !confirm("Post aprovado sem data não pode ser publicado: ele volta para rascunho na reserva. Continuar?")) return;
+              acao("semdata", aprov ? { agendado_para: null, status: "rascunho" } : { agendado_para: null }, "mover para a reserva (" + rotuloPost() + ")", "Movido para Sem data / Reserva");
+            }} loading=${busy === "semdata"}>Mover p/ reserva<//>` : null}
         </div>
         <div class="mt-3 flex flex-wrap gap-2">
           <input class=${cx(inputCls, "min-w-[220px] flex-1 py-1.5")} placeholder="Reescrever com IA: ex. gancho mais forte, mais curto, outro exemplo…"
@@ -7180,6 +7315,14 @@ function UsoIABloco({ me }) {
 
 function HomePage({ me, sections }) {
   const [data, setData] = useState(null);
+  const [liToken, setLiToken] = useState(null); // conexão do LinkedIn (só editor/ADM)
+  useEffect(() => {
+    if (!ehEditor(me && me.role)) return;
+    sb.rpc("linkedin_conexao_status").then(({ data: d }) => {
+      const r = Array.isArray(d) ? d[0] : d;
+      if (r && r.conectado) setLiToken(liSituacaoToken(r.expires_at));
+    }).catch(() => {});
+  }, []);
   const hoje = hojeISO();
   const fimSemana = somaDias(hoje, 7);
 
@@ -7248,6 +7391,13 @@ function HomePage({ me, sections }) {
       <div class="text-sm text-muted">🏠 Início</div>
       <h1 class="mt-1 text-2xl font-semibold text-ink">Boas-vindas ao OS Tia do Inglês${nome1 ? `, ${nome1}` : ""} 👋</h1>
       <p class="mt-1 text-sm text-muted">${fmtDiaLongo(hoje)}</p>
+      ${liToken && liToken.nivel !== "ok" ? html`
+        <a href="#/conteudo/linkedin" class=${cx("mt-4 block rounded-2xl border p-4 text-sm transition hover:border-brand/40",
+          liToken.nivel === "expirado" ? "border-[#e3b7ae] bg-[#faefec] text-[#a44b43]" : "border-[#e8dca0] bg-[#fbf5d9] text-[#6f6224]")}>
+          <b>LinkedIn:</b> ${liToken.nivel === "expirado"
+            ? "a conexão expirou e os posts aprovados não estão sendo publicados. Clique para reconectar."
+            : `a conexão expira em ${liToken.dias} dia${liToken.dias === 1 ? "" : "s"}. Clique para reconectar e não interromper as publicações.`}
+        </a>` : null}
 
       ${!data ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
         <div class="mt-6 grid gap-4 lg:grid-cols-2">
