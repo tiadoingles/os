@@ -65,7 +65,10 @@ como backend.
   `linkedin.ts` dentro da função): `linkedin_semana` (gera os rascunhos da grade a partir do
   guia `kb_documents.chave_externa='linkedin:guia-editorial'` + `conteudo_insights` + últimos
   posts; só preenche horários vazios) e `linkedin_reescrever` (devolve texto, não grava); as
-  duas exigem editor/admin. Horários em America/Sao_Paulo (UTC-03:00). Fase 3 (publicar pela
+  duas exigem editor/admin. Formatos história/case/depoimento (`formato` contendo "história",
+  "case" ou "depoimento") seguem a estrutura de roteiro do guia (v2, seção 4.1) e vão de 1.500 a
+  2.500 caracteres; os demais, 900 a 1.500 — regra duplicada em `ehFormatoRoteiro`/`faixaTamanho`
+  (`linkedin.ts`) e `liFaixaTamanho` (`app.js`), mantenha as duas iguais. Horários em America/Sao_Paulo (UTC-03:00). Fase 3 (publicar pela
   API do LinkedIn, colunas `linkedin_urn`/`erro`/`publicado_em`) ainda não existe.
 
 ## Convenções

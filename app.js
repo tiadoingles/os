@@ -5402,6 +5402,18 @@ function liSegunda(data) { const w = liDiaSemana(data); return somaDias(data, w 
 function liHojeSP() { return liPartesSP(new Date().toISOString()).data; }
 function liDiaCurto(data) { const [, m, d] = data.split("-"); return `${LI_DIAS[liDiaSemana(data)]} ${d}/${m}`; }
 function liContar(t) { return [...(t || "")].length; }
+// Tamanho por formato (guia editorial v2): história/case/depoimento seguem a estrutura de roteiro e vão
+// de 1.500 a 2.500 caracteres; os demais formatos, de 900 a 1.500. Mesma regra de ehFormatoRoteiro/
+// faixaTamanho no linkedin.ts da Edge Function ai.
+function liFormatoRoteiro(formato) {
+  const f = String(formato || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  return /historia|case|depoimento/.test(f);
+}
+function liFaixaTamanho(formato) {
+  return liFormatoRoteiro(formato)
+    ? { min: 1500, max: 2500, dica: "Formato história/case/depoimento (estrutura de roteiro): o guia pede de 1.500 a 2.500 caracteres" }
+    : { min: 900, max: 1500, dica: "O guia pede de 900 a 1.500 caracteres neste formato (história/case/depoimento: 1.500 a 2.500)" };
+}
 
 async function fetchLinkedinPosts() {
   const { data, error } = await sb.from("linkedin_posts").select("*")
@@ -5580,7 +5592,8 @@ function LinkedinCard({ post, pode, onSalvo }) {
   const [hora, setHora] = useState(partes ? partes.hora : "08:00");
   const [aberto, setAberto] = useState(false);
   const [instrucao, setInstrucao] = useState("");
-  const [sugestao, setSugestao] = useState(null); // { texto, avisos }
+  const [sugestao, setSugestao] = useState(null); // { texto, avisos, observacao }
+  const [obsPendente, setObsPendente] = useState(null); // observação da IA a gravar junto com o texto
   const [busy, setBusy] = useState(null); // nome da ação em andamento
 
   const st = LI_STATUS[post.status] || LI_STATUS.rascunho;
@@ -5588,7 +5601,8 @@ function LinkedinCard({ post, pode, onSalvo }) {
   const n = liContar(corpo);
   const gancho = [...(post.texto || "")].slice(0, LI_GANCHO).join("");
   const resto = [...(post.texto || "")].slice(LI_GANCHO).join("");
-  const nCls = n < 900 || n > 1500 ? "text-[#a44b43]" : "text-[#5e7a52]";
+  const faixa = liFaixaTamanho(post.formato);
+  const nCls = n < faixa.min || n > faixa.max ? "text-[#a44b43]" : "text-[#5e7a52]";
   const mudouData = partes ? (data !== partes.data || hora !== partes.hora) : !!data;
 
   async function acao(nome, patch, rotulo, mensagem) {
@@ -5601,8 +5615,10 @@ function LinkedinCard({ post, pode, onSalvo }) {
 
   async function salvarTexto() {
     if (!texto.trim()) { notify("O texto do post não pode ficar vazio.", "err"); return; }
-    const ok = await acao("texto", { texto: texto.trim(), primeiro_comentario: comentario.trim() || null }, "editar texto (" + rotuloPost() + ")", "Texto salvo");
-    if (ok) setEditando(false);
+    const patch = { texto: texto.trim(), primeiro_comentario: comentario.trim() || null };
+    if (obsPendente) patch.observacao = [post.observacao, obsPendente].filter(Boolean).join(" ");
+    const ok = await acao("texto", patch, "editar texto (" + rotuloPost() + ")", "Texto salvo");
+    if (ok) { setEditando(false); setObsPendente(null); }
   }
   async function salvarData() {
     if (!data) { notify("Escolha a data.", "err"); return; }
@@ -5618,13 +5634,14 @@ function LinkedinCard({ post, pode, onSalvo }) {
     try {
       const d = await aiCall("linkedin_reescrever", { id: post.id, instrucao: instrucao.trim(), texto: editando ? texto : undefined });
       if (d && d.configured === false) { notify("A IA não está conectada.", "err"); return; }
-      setSugestao({ texto: d.texto || "", avisos: d.avisos || [] });
+      setSugestao({ texto: d.texto || "", avisos: d.avisos || [], observacao: d.observacao || null });
     } catch (e) { notify(errMsg(e), "err"); }
     finally { setBusy(null); }
   }
   function usarSugestao() {
     setTexto(sugestao.texto);
     setComentario(post.primeiro_comentario || "");
+    setObsPendente(sugestao.observacao && !(post.observacao || "").includes(sugestao.observacao) ? sugestao.observacao : null);
     setEditando(true);
     setSugestao(null);
     notify("Texto da IA colocado no editor. Revise e clique em Salvar texto.", "info");
@@ -5641,7 +5658,7 @@ function LinkedinCard({ post, pode, onSalvo }) {
         <${Badge} class="bg-brand-light text-brand-dark">Pilar ${post.pilar} · ${LI_PILARES[post.pilar] || ""}<//>
         ${post.formato ? html`<${Badge} class=${PILL_NEUTRAL}>${post.formato}<//>` : null}
         <${Badge} class=${st.cls}>${st.label}<//>
-        <span class=${cx("ml-auto text-xs font-medium", nCls)} title="O guia pede de 900 a 1.500 caracteres">${n.toLocaleString("pt-BR")} caracteres</span>
+        <span class=${cx("ml-auto text-xs font-medium", nCls)} title=${faixa.dica}>${n.toLocaleString("pt-BR")} caracteres</span>
       </div>
 
       ${post.observacao ? html`
@@ -5660,7 +5677,7 @@ function LinkedinCard({ post, pode, onSalvo }) {
           <textarea class=${cx(inputCls, "mt-1 min-h-[60px]")} value=${comentario} onInput=${(e) => setComentario(e.target.value)}></textarea>
           <div class="mt-2 flex flex-wrap gap-2">
             <${Btn} onClick=${salvarTexto} loading=${busy === "texto"}>Salvar texto<//>
-            <${Btn} variant="ghost" onClick=${() => { setEditando(false); setTexto(post.texto || ""); setComentario(post.primeiro_comentario || ""); }}>Cancelar<//>
+            <${Btn} variant="ghost" onClick=${() => { setEditando(false); setTexto(post.texto || ""); setComentario(post.primeiro_comentario || ""); setObsPendente(null); }}>Cancelar<//>
           </div>
         </div>` : html`
         <div class="mt-3 whitespace-pre-wrap break-words text-sm leading-relaxed">
@@ -5679,6 +5696,7 @@ function LinkedinCard({ post, pode, onSalvo }) {
         <div class="mt-3 rounded-xl border border-brand/30 bg-brand-light/30 p-3">
           <div class="text-xs font-semibold uppercase tracking-wide text-brand-dark">Sugestão da IA · ${liContar(sugestao.texto).toLocaleString("pt-BR")} caracteres</div>
           ${sugestao.avisos.length ? html`<div class="mt-1 text-xs text-[#6f6224]">Atenção: ${sugestao.avisos.join("; ")}.</div>` : null}
+          ${sugestao.observacao ? html`<div class="mt-1 text-xs text-[#6f6224]">${sugestao.observacao} (vai para a observação do post ao salvar o texto)</div>` : null}
           <div class="mt-2 max-h-[360px] overflow-auto whitespace-pre-wrap text-sm leading-relaxed text-ink">${sugestao.texto}</div>
           <div class="mt-2 flex flex-wrap gap-2">
             <${Btn} onClick=${usarSugestao}>Usar este texto<//>
