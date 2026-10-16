@@ -7084,13 +7084,14 @@ function FilaPedidos({ pedidos, podeEditar, tabela, tarefa, estimativa, minutosE
     </div>`;
 }
 
-const ARENA_CATEGORIAS = ["Saúde & Bem-estar", "Família & Relacionamentos", "Vida & Carreira", "Viagens & Cultura", "Cotidiano"];
+const ARENA_CATEGORIAS = ["Saúde & Bem-estar", "Família & Relacionamentos", "Vida & Carreira", "Viagens & Cultura", "Cotidiano", "Histórias e Imprevistos"];
 const ARENA_TEMAS = {
   "Saúde & Bem-estar": ["Healthy Habits", "Sleep Routines", "Stress and Relaxation", "Nutrition and Food Choices", "Body and Self-Care", "Mindfulness and Meditation", "Fitness After 40"],
   "Família & Relacionamentos": ["Family Traditions", "Childhood Memories", "Reconnecting with Friends", "Friendships Over the Years", "Raising Children", "Love and Partnership"],
   "Vida & Carreira": ["Changes in Life After 40", "Career and Work-Life Balance", "New Beginnings", "Hobbies and Passions", "Dreams and Goals", "Financial Independence"],
   "Viagens & Cultura": ["Dream Vacations", "Places I Want to Visit", "Brazilian Traditions", "Exploring Other Cultures", "Travel Tips for Women", "Food Around the World"],
   "Cotidiano": ["A Typical Day", "Cooking and Recipes", "Shopping Habits", "Weekend Plans", "Morning Routines", "Technology in Daily Life"],
+  "Histórias e Imprevistos": ["When Plans Go Wrong", "Unexpected Visitors", "A Restaurant Experience", "Things That Drive Me Crazy", "A Day Full of Surprises", "The Art of Making Excuses", "Neighbors and Everyday Problems", "Shopping Gone Wrong", "Are We Too Old for That?", "A Problem at the Hotel", "An Unexpected Phone Call", "A Family Dinner to Remember"],
 };
 
 async function fetchMateriaisPedidos() {
