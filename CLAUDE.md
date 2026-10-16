@@ -134,8 +134,20 @@ como backend.
   só o que falhou) → `previa` (cartões com todo o conteúdo + indicadores `checarMaterial`) → ajustes livres
   (`arena_ajustar`, histórico em `materiais_pedidos.ajustes`, DESFAZER) → "Aprovar e gerar PDFs" (`gerando_pdf`:
   pdfmake no navegador, `montarDocArena`/`gerarPdfArena`, upload em `gerados/arenas/<data>-<tema>-<id8>/` com a
-  sessão de quem aprovou + .zip via JSZip) → `pronto` → modal "ajustes viram regras?" (`arena_regras_sugerir` →
-  `public.arena_regras`, origem `aprendida`, `pendente_skill=true`). `pendente`/`processando` são legado.
+  sessão de quem aprovou + .zip via JSZip) → `pronto`. `pendente`/`processando` são legado.
+  **Formulário (pedido da Tia, 16/10/2026)**: só Tema (digitado ou um dos 30 de `ARENA_TEMAS`, agrupados por categoria;
+  os já usados aparecem marcados), Nível (RC e/ou BIA; 1 material por nível, `quantidade=1`) e Observações extras
+  (opcional, `briefing.observacoes`). Narrador/tom/objetivo etc. saíram: o narrador do RC roda sozinho no `arena.ts`
+  e pedidos antigos com esses campos continuam abrindo. **Prévia**: Aprovar / Reprovar / campo de feedback livre
+  ("Enviar feedback e gerar nova versão" = `arena_ajustar`). Reprovar (`ModalReprovarArena`): "Gerar outra versão do
+  zero" (motivo opcional + variação da versão reprovada vão para `briefing.observacoes`, motivo também em
+  `briefing.reprovacoes` e em `ajustes` com `escopo:"reprovacao"`; DESFAZER só depois da geração) ou "Descartar o
+  pedido". **Aviso de skill**: ao aprovar, se `ajustes.length > briefing.skill_respondido_ate`, abre já no início
+  (PDFs seguem em paralelo) o modal "Atualizar a skill com as novas informações?" (`ModalRegrasArena`): Sim →
+  `arena_regras_sugerir` → a Tia revisa → `public.arena_regras` (origem `aprendida`, `pendente_skill=true`; valem na
+  próxima geração, e entram na skill tia-do-ingles-materials quando pedirem ao Claude); Não → só grava
+  `skill_respondido_ate`. Pendência: `arena_regras_sugerir` ainda lê todos os ajustes do pedido (pode repropor regra
+  já criada numa 2ª aprovação); o modal já mostra só as correções novas.
   Ações `arena_*` (arquivo `arena.ts` da função `ai`): exigem a aba Pedagógico, respeitam a pausa (`automacao_estado`),
   registram custo (`ai:arena_gerar|ajustar|regras`), usam structured outputs (`output_config.format`) + validação
   (`validarMaterial`) e regeram 1 vez se vier fora das regras. Prompt: regras ativas de `arena_regras` (as `base`

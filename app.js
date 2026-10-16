@@ -7172,12 +7172,13 @@ function FilaPedidos({ pedidos, podeEditar, tabela, tarefa, estimativa, minutosE
 }
 
 const ARENA_CATEGORIAS = ["Saúde & Bem-estar", "Família & Relacionamentos", "Vida & Carreira", "Viagens & Cultura", "Cotidiano", "Histórias e Imprevistos"];
+// Os 30 temas pré-selecionados do formulário (a Tia também pode digitar um tema livre). A categoria só vai para o prompt.
 const ARENA_TEMAS = {
-  "Saúde & Bem-estar": ["Healthy Habits", "Sleep Routines", "Stress and Relaxation", "Nutrition and Food Choices", "Body and Self-Care", "Mindfulness and Meditation", "Fitness After 40"],
-  "Família & Relacionamentos": ["Family Traditions", "Childhood Memories", "Reconnecting with Friends", "Friendships Over the Years", "Raising Children", "Love and Partnership"],
-  "Vida & Carreira": ["Changes in Life After 40", "Career and Work-Life Balance", "New Beginnings", "Hobbies and Passions", "Dreams and Goals", "Financial Independence"],
-  "Viagens & Cultura": ["Dream Vacations", "Places I Want to Visit", "Brazilian Traditions", "Exploring Other Cultures", "Travel Tips for Women", "Food Around the World"],
-  "Cotidiano": ["A Typical Day", "Cooking and Recipes", "Shopping Habits", "Weekend Plans", "Morning Routines", "Technology in Daily Life"],
+  "Saúde & Bem-estar": ["Healthy Habits", "Sleep Routines", "Stress and Relaxation", "Fitness After 40"],
+  "Família & Relacionamentos": ["Family Traditions", "Childhood Memories", "Reconnecting with Friends"],
+  "Vida & Carreira": ["Changes in Life After 40", "Career and Work-Life Balance", "Hobbies and Passions", "Dreams and Goals"],
+  "Viagens & Cultura": ["Dream Vacations", "Brazilian Traditions", "Food Around the World"],
+  "Cotidiano": ["A Typical Day", "Cooking and Recipes", "Weekend Plans", "Technology in Daily Life"],
   "Histórias e Imprevistos": ["When Plans Go Wrong", "Unexpected Visitors", "A Restaurant Experience", "Things That Drive Me Crazy", "A Day Full of Surprises", "The Art of Making Excuses", "Neighbors and Everyday Problems", "Shopping Gone Wrong", "Are We Too Old for That?", "A Problem at the Hotel", "An Unexpected Phone Call", "A Family Dinner to Remember"],
 };
 
@@ -7199,8 +7200,6 @@ const ARENA_NIVEIS = [
   ["Recém Chegados", "Recém Chegados"],
   ["BIA", "BIA (Básico, Intermediários e Avançados)"],
 ];
-const ARENA_TONS = ["Leve, com humor", "Prático", "Reflexivo", "Misto"];
-const ARENA_NARRADORES = ["Automático (varia sozinho)", "I", "we", "he", "she", "they"];
 // Textos fixos da capa (skill tia-do-ingles-materials, references/arenas-de-conversacao.md).
 const ARENA_INSTR_RC = "Aqui abaixo está o seu Material para participar da Arena de Conversação nível Recém Chegados. Para ter um melhor aproveitamento, estude esse material antes da sua arena. Lembre de usar os áudios disponíveis na plataforma para treinar seu listening e sempre repita em voz alta para ativar seu hipocampo e treinar sua pronúncia.";
 const ARENA_INSTR_BIA = "Aqui abaixo o Material está separado em GLOSSARY, MYPA e PERGUNTAS que serão feitas na Arena. Lembre de usar os áudios disponíveis na plataforma para treinar seu listening e sempre repita em voz alta para ativar seu hipocampo e treinar sua pronúncia.";
@@ -7492,9 +7491,9 @@ function GeradorMateriaisPage({ me, query }) {
       <div class="text-sm text-muted">🎓 Pedagógico</div>
       <h1 class="mt-1 text-2xl font-semibold text-ink">Gerador de Materiais</h1>
       <p class="mt-1 text-sm text-muted">
-        Materiais das <b>Arenas de Conversação</b>, gerados na hora pela IA do OS. Você preenche o pedido, vê a <b>prévia completa</b>,
-        pede ajustes por texto e, quando aprovar, o OS monta os PDFs no layout do Método (<b>Recém Chegados</b>: 4 páginas com
-        Reading Practice; <b>BIA</b>: 3 páginas). Nada é gerado sozinho.
+        Materiais das <b>Arenas de Conversação</b>, gerados na hora pela IA do OS. Escolha o tema e o nível, veja a <b>prévia</b> e
+        decida: <b>aprovar</b>, <b>reprovar</b> ou escrever seu <b>feedback</b> para sair uma nova versão. Ao aprovar, o OS monta os PDFs
+        no layout do Método (<b>RC</b>: 4 páginas com Reading Practice; <b>BIA</b>: 3 páginas).
       </p>
       ${podeEditar ? html`<${FormArena} me=${me} usados=${usados} onCriado=${(id) => setAberto(id)} />` : html`
         <div class="mt-5 rounded-xl border border-line bg-card px-4 py-3 text-sm text-muted">Seu acesso é só de leitura: você vê os pedidos e baixa os materiais prontos.</div>`}
@@ -7503,45 +7502,28 @@ function GeradorMateriaisPage({ me, query }) {
     </div>`;
 }
 
+// Formulário enxuto (pedido da Tia, 16/10/2026): só Tema, Nível e Observações. Narrador, tom etc. ficam por conta
+// das regras (o narrador do RC roda sozinho na Edge Function). 1 material por nível marcado.
 function FormArena({ me, usados, onCriado }) {
   const [busy, setBusy] = useState(false);
-  const [sugestoes, setSugestoes] = useState(null);
-  const [f, setF] = useState({
-    tema: "", categoria: "Sem preferência", niveis: ["Recém Chegados", "BIA"], outroNivel: "", quantidade: 1,
-    objetivo: "", situacao: "", vocabulario: "", foco_gramatical: "", tom: "", narrador: ARENA_NARRADORES[0], personagens: "",
-    perguntas: "", referencia: "", observacoes: "", data_arena: "", turma: "",
-  });
+  const [f, setF] = useState({ tema: "", niveis: ["Recém Chegados", "BIA"], observacoes: "" });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const toggleNivel = (n) => setF((s) => ({ ...s, niveis: s.niveis.includes(n) ? s.niveis.filter((x) => x !== n) : [...s.niveis, n] }));
-  const niveisFinal = () => [...f.niveis.filter((n) => ARENA_NIVEIS.some(([v]) => v === n)), ...(f.outroNivel.trim() ? ["Outro: " + f.outroNivel.trim()] : [])];
-  const temRC = f.niveis.includes("Recém Chegados");
-  const total = niveisFinal().length * f.quantidade;
-
-  function sugerirTemas() {
-    const cats = ARENA_TEMAS[f.categoria] ? [f.categoria] : ARENA_CATEGORIAS;
-    const pool = cats.flatMap((c) => ARENA_TEMAS[c] || []).filter((t) => !usados.has(t.toLowerCase()));
-    const base = pool.length >= 3 ? pool : cats.flatMap((c) => ARENA_TEMAS[c] || []);
-    setSugestoes([...base].sort(() => Math.random() - 0.5).slice(0, 3));
-  }
+  const temaAtual = f.tema.trim().toLowerCase();
 
   async function gerar(e) {
     e && e.preventDefault();
     const tema = f.tema.trim();
-    if (!tema) return notify("Escreva o tema (ou use “Sugerir 3 temas”).", "err");
-    const nvs = niveisFinal();
-    if (!nvs.length) return notify("Escolha ao menos um nível.", "err");
+    if (!tema) return notify("Escreva o tema ou escolha um da lista.", "err");
+    const nvs = ARENA_NIVEIS.map(([v]) => v).filter((n) => f.niveis.includes(n));
+    if (!nvs.length) return notify("Escolha ao menos um nível: RC, BIA ou os dois.", "err");
     setBusy(true);
     try {
-      const categoria = ARENA_TEMAS[f.categoria] ? f.categoria : (Object.keys(ARENA_TEMAS).find((c) => ARENA_TEMAS[c].some((t) => t.toLowerCase() === tema.toLowerCase())) || null);
-      const plano = arenaPlano(tema, categoria, nvs, f.quantidade, usados);
-      const briefing = {
-        tema, categoria, niveis: nvs, quantidade: f.quantidade, temas: plano.temas,
-        objetivo: f.objetivo.trim(), situacao: f.situacao.trim(), vocabulario: f.vocabulario.trim(), foco_gramatical: f.foco_gramatical.trim(),
-        tom: f.tom, narrador: temRC ? f.narrador : "", personagens: temRC ? f.personagens.trim() : "", perguntas: f.perguntas.trim(),
-        referencia: f.referencia.trim(), observacoes: f.observacoes.trim(), data_arena: f.data_arena, turma: f.turma.trim(),
-      };
+      const categoria = Object.keys(ARENA_TEMAS).find((c) => ARENA_TEMAS[c].some((t) => t.toLowerCase() === tema.toLowerCase())) || null;
+      const plano = arenaPlano(tema, categoria, nvs, 1, usados);
+      const briefing = { tema, categoria, niveis: nvs, quantidade: 1, temas: plano.temas, observacoes: f.observacoes.trim() };
       const { data, error } = await sb.from("materiais_pedidos").insert({
-        criado_por: me ? me.id : null, tema, categoria, niveis: nvs, quantidade: f.quantidade,
+        criado_por: me ? me.id : null, tema, categoria, niveis: nvs, quantidade: 1,
         status: "gerando_previa", briefing, conteudo: plano.conteudo, ajustes: [],
       }).select("*").single();
       if (error) throw error;
@@ -7551,72 +7533,33 @@ function FormArena({ me, usados, onCriado }) {
     finally { setBusy(false); }
   }
 
-  const area = (k, ph, rows = 2) => html`<textarea class=${cx(inputCls, "min-h-[56px]")} rows=${rows} placeholder=${ph}
-    value=${f[k]} onInput=${(e) => set(k, e.target.value)}></textarea>`;
-  const linha = (k, ph) => html`<input class=${inputCls} placeholder=${ph} value=${f[k]} onInput=${(e) => set(k, e.target.value)} />`;
-
   return html`
     <form onSubmit=${gerar} class="mt-6 rounded-2xl border border-line bg-card p-4 sm:p-5">
-      <div class="text-xs font-semibold uppercase tracking-wider text-brand-dark">Imprescindíveis</div>
-      <div class="mt-3">
-        <div class="text-sm font-medium text-ink">1. Tema <span class="text-brand">*</span></div>
+      <div>
+        <div class="text-sm font-medium text-ink">Tema <span class="text-brand">*</span></div>
+        <div class="mt-0.5 text-xs text-muted">Digite um tema ou escolha um dos 30 da lista. Os já usados aparecem marcados.</div>
         <input class=${cx(inputCls, "mt-2")} placeholder="Ex.: A Problem at the Hotel" value=${f.tema} onInput=${(e) => set("tema", e.target.value)} />
-        <div class="mt-3 text-xs text-muted">Sem ideia? Escolha uma categoria e peça sugestões:</div>
-        <div class="mt-1.5">
-          ${[...ARENA_CATEGORIAS, "Sem preferência"].map((c) => html`<${SlidesOpc} on=${f.categoria === c} click=${() => { set("categoria", c); setSugestoes(null); }}>${c}<//>`)}
+        <div class="mt-3 space-y-2">
+          ${ARENA_CATEGORIAS.map((c) => html`
+            <div key=${c}>
+              <div class="text-[11px] font-semibold uppercase tracking-wider text-muted">${c}</div>
+              <div class="mt-1">${ARENA_TEMAS[c].map((t) => html`<${SlidesOpc} on=${temaAtual === t.toLowerCase()} click=${() => set("tema", t)}>${t}${usados.has(t.toLowerCase()) ? html`<span class="ml-1 text-[10px] text-muted">· já usado</span>` : null}<//>`)}</div>
+            </div>`)}
         </div>
-        <${Btn} variant="ghost" type="button" class="mt-1" onClick=${sugerirTemas}>Sugerir 3 temas<//>
-        ${sugestoes ? html`
-          <div class="mt-2 flex flex-wrap gap-2">
-            ${sugestoes.map((s) => html`<button type="button" onClick=${() => set("tema", s)}
-              class="rounded-lg border border-brand/50 bg-brand-light px-3 py-1.5 text-sm font-medium text-brand-dark hover:bg-brand-light/70">${s}</button>`)}
-          </div>` : null}
       </div>
 
-      <${SlidesGrupo} label="2. Nível(eis)" obrig hint="Pode marcar mais de um.">
-        ${ARENA_NIVEIS.map(([v, l]) => html`<${SlidesOpc} on=${f.niveis.includes(v)} click=${() => toggleNivel(v)}>${l}<//>`)}
-        <input class=${cx(inputCls, "mt-1 max-w-sm")} placeholder="Outro nível: descreva (ex.: “A2/B1 específico”)" value=${f.outroNivel}
-          onInput=${(e) => set("outroNivel", e.target.value)} />
+      <${SlidesGrupo} label="Nível" obrig hint="Marque um ou os dois. Sai 1 material por nível, com o mesmo tema.">
+        ${ARENA_NIVEIS.map(([v, l]) => html`<${SlidesOpc} on=${f.niveis.includes(v)} click=${() => toggleNivel(v)}>${v === "Recém Chegados" ? "RC (Recém Chegados)" : l}<//>`)}
       <//>
 
-      <${SlidesGrupo} label="3. Quantidade por nível" obrig hint="Ex.: 2 com Recém Chegados e BIA marcados = 4 materiais. Do 2º em diante, o OS escolhe temas parecidos que ainda não foram usados.">
-        <div class="flex flex-wrap gap-1.5">
-          ${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => html`<${SlidesOpc} on=${f.quantidade === n} click=${() => set("quantidade", n)}>${n}<//>`)}
-        </div>
-        <div class="mt-1 text-[11px] text-muted">Total: <b>${total}</b> material(is).</div>
+      <${SlidesGrupo} label="Observações extras (opcional)" hint="Qualquer orientação para estas Arenas: vocabulário que precisa entrar, ângulo das perguntas, o que evitar, turma, data.">
+        <textarea class=${cx(inputCls, "min-h-[72px]")} rows="3" placeholder="Ex.: incluir “check in” e “front desk”; perguntas com mais humor"
+          value=${f.observacoes} onInput=${(e) => set("observacoes", e.target.value)}></textarea>
       <//>
-
-      <div class="mt-6 border-t border-line pt-4 text-xs font-semibold uppercase tracking-wider text-brand-dark">Recomendados <span class="font-normal normal-case tracking-normal text-muted">(opcionais, fazem o material ficar de primeira linha)</span></div>
-      <div class="mt-3 grid gap-4 sm:grid-cols-2">
-        <${Field} label="Objetivo da Arena" hint="O que a aluna deve conseguir falar ao final.">${area("objetivo", "Ex.: contar um imprevisto de viagem e como resolveu")}<//>
-        <${Field} label="Situação real de uso" hint="Onde ela vai usar.">${area("situacao", "Ex.: hotel, restaurante, família, trabalho")}<//>
-        <${Field} label="Vocabulário/expressões obrigatórios" hint="Vão para o Glossary (e para a leitura do RC).">${area("vocabulario", "Ex.: check in, front desk, make a complaint")}<//>
-        <${Field} label="Foco gramatical">${linha("foco_gramatical", "Ex.: Simple Past, would")}<//>
-      </div>
-      <div class="mt-4">
-        <div class="text-sm font-medium text-ink">Tom</div>
-        <div class="mt-1.5">${ARENA_TONS.map((t) => html`<${SlidesOpc} on=${f.tom === t} click=${() => set("tom", f.tom === t ? "" : t)}>${t}<//>`)}</div>
-      </div>
-      ${temRC ? html`
-        <div class="mt-3 rounded-xl bg-black/[0.025] p-3">
-          <div class="text-sm font-medium text-ink">História do Recém Chegados</div>
-          <div class="mt-1.5 text-xs text-muted">Narrador</div>
-          <div class="mt-1">${ARENA_NARRADORES.map((n) => html`<${SlidesOpc} on=${f.narrador === n} click=${() => set("narrador", n)}>${n}<//>`)}</div>
-          <div class="mt-2">${linha("personagens", "Personagens e cenário (opcional). Ex.: dois amigos num hotel na praia")}</div>
-        </div>` : null}
-      <div class="mt-4 grid gap-4 sm:grid-cols-2">
-        <${Field} label="Perguntas" hint="Ângulos desejados ou o que evitar.">${area("perguntas", "Ex.: mais dilemas e humor; evitar perguntas sobre dinheiro")}<//>
-        <${Field} label="Material de referência" hint="Link ou texto colado (vídeo, música, notícia, aula da semana).">${area("referencia", "Cole aqui")}<//>
-        <${Field} label="Observações livres">${area("observacoes", "Qualquer outra orientação")}<//>
-        <div class="grid grid-cols-2 gap-3">
-          <${Field} label="Data da Arena"><input type="date" class=${inputCls} value=${f.data_arena} onInput=${(e) => set("data_arena", e.target.value)} /><//>
-          <${Field} label="Turma">${linha("turma", "Ex.: Quinta 19h")}<//>
-        </div>
-      </div>
 
       <div class="mt-5 flex flex-wrap items-center gap-3">
-        <${Btn} type="submit" loading=${busy}>Gerar prévia${total > 1 ? ` (${total} materiais)` : ""}<//>
-        <span class="text-xs text-muted">Leva cerca de 30 a 60 s por material. Zero emojis e tom adulto, sempre.</span>
+        <${Btn} type="submit" loading=${busy}>Gerar prévia${f.niveis.length > 1 ? ` (${f.niveis.length} materiais)` : ""}<//>
+        <span class="text-xs text-muted">Leva cerca de 30 a 60 s por material. Você vê a prévia antes de baixar.</span>
       </div>
     </form>`;
 }
@@ -7732,6 +7675,7 @@ function PedidoArena({ id, me, podeEditar, onVoltar }) {
   const [comparar, setComparar] = useState({}); // indice -> versão anterior
   const [pdf, setPdf] = useState(null); // { fase, feito, total, zipUrl, blobUrl, notas }
   const [modalRegras, setModalRegras] = useState(false);
+  const [modalReprovar, setModalReprovar] = useState(false);
   const pRef = useRef(null);
   const fila = useRef(Promise.resolve());
   const iniciou = useRef(false);
@@ -7807,8 +7751,9 @@ function PedidoArena({ id, me, podeEditar, onVoltar }) {
       const feitos = Object.keys(novos).map(Number);
       if (feitos.length) {
         const conteudo = conteudo0.map((m, i) => novos[i] || m);
+        const em = new Date().toISOString();
         const ajustes = [...(pRef.current.ajustes || []), ...feitos.map((i) => ({
-          em: new Date().toISOString(), por: me ? me.id : null, escopo: alvo === "todos" ? "todos" : "um", indice: i, instrucao: texto, antes: conteudo0[i],
+          em, por: me ? me.id : null, escopo: alvo === "todos" ? "todos" : "um", indice: i, instrucao: texto, antes: conteudo0[i],
         }))];
         const depois = await salvar({ conteudo, ajustes, status: pRef.current.status === "pronto" ? "previa" : pRef.current.status });
         if (depois) registrarDesfazer(ARENA_ESCOPO, "Ajuste no material", desfazerEdicao("materiais_pedidos", antesLinha, depois, "Ajuste no material"),
@@ -7824,6 +7769,8 @@ function PedidoArena({ id, me, podeEditar, onVoltar }) {
     const lista = (pRef.current.conteudo || []);
     if (!lista.every(arenaPronto)) return notify("Ainda há material sem conteúdo. Gere de novo o que falhou antes de aprovar.", "err");
     const antesStatus = pRef.current.status;
+    // Houve correção desde a última resposta? Pergunta já na aprovação se vira regra (skill); os PDFs seguem em paralelo.
+    if ((pRef.current.ajustes || []).length > Number((pRef.current.briefing || {}).skill_respondido_ate || 0)) setModalRegras(true);
     setPdf({ fase: "Montando os PDFs", feito: 0, total: lista.length });
     await salvar({ status: "gerando_pdf" });
     try {
@@ -7857,12 +7804,55 @@ function PedidoArena({ id, me, podeEditar, onVoltar }) {
       await salvar({ status: "pronto", entregaveis, zip_url: zipUrl, pdf_recem_url: primeiro(true), pdf_bia_url: primeiro(false), log, processado_em: new Date().toISOString() });
       const blobUrl = URL.createObjectURL(zipBlob);
       setPdf({ fase: "Pronto", feito: lista.length, total: lista.length, zipUrl, blobUrl, notas });
-      if ((pRef.current.ajustes || []).length) setModalRegras(true);
     } catch (e) {
       notify("Não foi possível gerar os PDFs: " + errMsg(e), "err");
       await salvar({ status: antesStatus === "pronto" ? "previa" : antesStatus || "previa" });
       setPdf(null);
     }
+  }
+
+  // Reprovar = descarta a versão atual e gera outra do zero (o motivo, se houver, entra nas observações do
+  // briefing para a IA evitar o mesmo erro e no histórico de correções, para poder virar regra) ou exclui o pedido.
+  async function reprovar(motivo, acao) {
+    setModalReprovar(false);
+    if (acao === "excluir") {
+      const linha = pRef.current;
+      try {
+        const { data, error } = await sb.from("materiais_pedidos").delete().eq("id", id).select("id");
+        if (error) throw error;
+        if (!data || !data.length) throw new Error("sem permissão para excluir");
+        registrarDesfazer(ARENA_ESCOPO, `Excluir “${linha.tema}”`, desfazerExclusao("materiais_pedidos", linha, `Excluir “${linha.tema}”`));
+        onVoltar();
+      } catch (e) { notify(errMsg(e), "err"); }
+      return;
+    }
+    const antes = { ...pRef.current };
+    const b = antes.briefing || {};
+    const txt = String(motivo || "").trim();
+    // A versão reprovada não chega à IA de outro jeito (placeholders sem `variacao`): descreve o que não repetir.
+    const naoRepetir = (antes.conteudo || []).filter((m) => m && m.variacao).map((m) => {
+      const v = m.variacao;
+      return `${arenaRotulo(m)}: narrador ${v.narrador || "-"}, personagens ${v.personagens || "-"}, situação ${v.situacao || "-"}, final ${v.final || "-"}, ângulos ${v.angulos || "-"}`;
+    });
+    const nota = [`Versão anterior reprovada pela Tia${txt ? `: ${txt}` : ""}.`, naoRepetir.length ? `Faça diferente dela (não repita): ${naoRepetir.join("; ")}.` : ""].filter(Boolean).join(" ");
+    const briefing = {
+      ...b,
+      observacoes: [b.observacoes, nota].filter(Boolean).join("\n"),
+      reprovacoes: [...(b.reprovacoes || []), { em: new Date().toISOString(), por: me ? me.id : null, motivo: txt }],
+    };
+    const ajustes = txt ? [...(antes.ajustes || []), { em: new Date().toISOString(), por: me ? me.id : null, escopo: "reprovacao", indice: null, instrucao: `Reprovado: ${txt}`, antes: null }] : (antes.ajustes || []);
+    const conteudo = (antes.conteudo || []).map((m) => ({ nivel: m.nivel, n: m.n, tema: m.tema }));
+    const depois = await salvar({ conteudo, ajustes, briefing, status: "gerando_previa" });
+    if (!depois) return;
+    setComparar({});
+    await gerar(conteudo.map((_, i) => i));
+    // DESFAZER só depois da geração: senão respostas atrasadas gravariam por cima da versão restaurada.
+    registrarDesfazer(ARENA_ESCOPO, "Reprovar versão", desfazerEdicao("materiais_pedidos", antes, pRef.current, "Reprovar versão"), { mensagem: "Nova versão gerada (a reprovada pode voltar pelo DESFAZER)" });
+  }
+
+  // Grava até qual correção a Tia já respondeu o aviso "atualizar skill?", para não perguntar de novo.
+  function skillRespondido() {
+    salvar((a) => ({ briefing: { ...(a.briefing || {}), skill_respondido_ate: (a.ajustes || []).length } }));
   }
 
   if (!p) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando o pedido…</div>`;
@@ -7909,7 +7899,7 @@ function PedidoArena({ id, me, podeEditar, onVoltar }) {
                 </div>
                 <div class="flex flex-wrap gap-2">
                   ${ant ? html`<${Btn} variant="ghost" class="!px-3 !py-1.5 !text-xs" onClick=${() => setComparar((c) => ({ ...c, [i]: c[i] && c[i].__mostrar ? { ...c[i], __mostrar: false } : { ...c[i], __mostrar: true } }))}>${ant.__mostrar ? "Esconder antes" : "Ver antes → depois"}<//>` : null}
-                  ${podeEditar && prontos === conteudo.length && p.status !== "gerando_pdf" ? html`<${Btn} variant="ghost" class="!px-3 !py-1.5 !text-xs" onClick=${() => { setAlvo(String(i)); document.getElementById("arena-ajuste")?.scrollIntoView({ behavior: "smooth", block: "center" }); }}>Ajustar este<//>` : null}
+                  ${podeEditar && prontos === conteudo.length && p.status !== "gerando_pdf" ? html`<${Btn} variant="ghost" class="!px-3 !py-1.5 !text-xs" onClick=${() => { setAlvo(String(i)); document.getElementById("arena-ajuste")?.scrollIntoView({ behavior: "smooth", block: "center" }); }}>Feedback só deste<//>` : null}
                   ${podeEditar && arenaPronto(m) && !ocupado && p.status !== "pronto" ? html`<${Btn} variant="subtle" class="!px-3 !py-1.5 !text-xs" onClick=${() => gerar([i])}>Gerar de novo<//>` : null}
                 </div>
               </div>
@@ -7930,21 +7920,23 @@ function PedidoArena({ id, me, podeEditar, onVoltar }) {
 
       ${podeEditar && prontos === conteudo.length && conteudo.length ? html`
         <div id="arena-ajuste" class="mt-5 rounded-2xl border border-line bg-card p-4 sm:p-5">
-          <div class="text-sm font-semibold text-ink">O que você quer ajustar?</div>
-          <div class="mt-1 text-xs text-muted">Escreva livremente, como falaria com a equipe. Ex.: “troque o narrador para they e deixe o final engraçado”, “perguntas mais curtas”.</div>
-          <textarea class=${cx(inputCls, "mt-2 min-h-[72px]")} value=${instrucao} onInput=${(e) => setInstrucao(e.target.value)} disabled=${ocupado}></textarea>
-          <div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
-            <span class="text-xs text-muted">Aplicar em:</span>
-            <${SlidesOpc} on=${alvo === "todos"} click=${() => setAlvo("todos")}>Todos os materiais<//>
-            ${conteudo.map((m, i) => html`<${SlidesOpc} on=${alvo === String(i)} click=${() => setAlvo(String(i))}>Só ${arenaRotulo(m)}<//>`)}
-          </div>
+          <div class="text-sm font-semibold text-ink">Seu feedback: o que deve mudar?</div>
+          <div class="mt-1 text-xs text-muted">Escreva livremente, como falaria com a equipe. O OS gera uma nova versão com as mudanças e destaca o que mudou. Ex.: “troque o narrador para they e deixe o final engraçado”, “perguntas mais curtas”.</div>
+          <textarea class=${cx(inputCls, "mt-2 min-h-[88px]")} value=${instrucao} onInput=${(e) => setInstrucao(e.target.value)} disabled=${ocupado}
+            placeholder="Escreva aqui o que precisa mudar"></textarea>
+          ${conteudo.length > 1 ? html`
+            <div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
+              <span class="text-xs text-muted">Vale para:</span>
+              <${SlidesOpc} on=${alvo === "todos"} click=${() => setAlvo("todos")}>Todos os materiais<//>
+              ${conteudo.map((m, i) => html`<${SlidesOpc} on=${alvo === String(i)} click=${() => setAlvo(String(i))}>Só ${arenaRotulo(m)}<//>`)}
+            </div>` : null}
           <div class="mt-3 flex flex-wrap items-center gap-3">
-            <${Btn} variant="ghost" loading=${ajustando} disabled=${ocupado && !ajustando} onClick=${ajustar}>Aplicar ajuste<//>
-            ${(p.ajustes || []).length ? html`<span class="text-xs text-muted">${(p.ajustes || []).length} ajuste(s) neste pedido.</span>` : null}
+            <${Btn} variant="ghost" loading=${ajustando} disabled=${(ocupado && !ajustando) || !instrucao.trim()} onClick=${ajustar}>Enviar feedback e gerar nova versão<//>
+            ${(p.ajustes || []).length ? html`<span class="text-xs text-muted">${new Set((p.ajustes || []).map((a) => a.em + a.instrucao)).size} correção(ões) neste pedido.</span>` : null}
           </div>
           ${(p.ajustes || []).length ? html`
-            <details class="mt-3 text-xs text-muted"><summary class="cursor-pointer">Histórico de ajustes</summary>
-              <ul class="mt-2 space-y-1">${(p.ajustes || []).map((a) => html`<li>${fmtDate(a.em, true)} · ${a.indice != null && conteudo[a.indice] ? arenaRotulo(conteudo[a.indice]) : "todos"} · “${a.instrucao}”</li>`)}</ul>
+            <details class="mt-3 text-xs text-muted"><summary class="cursor-pointer">Histórico de correções</summary>
+              <ul class="mt-2 space-y-1">${(p.ajustes || []).map((a) => html`<li>${fmtDate(a.em, true)} · ${a.escopo === "reprovacao" ? "reprovação" : a.indice != null && conteudo[a.indice] ? arenaRotulo(conteudo[a.indice]) : "todos"} · “${a.instrucao}”</li>`)}</ul>
             </details>` : null}
         </div>
 
@@ -7963,16 +7955,38 @@ function PedidoArena({ id, me, podeEditar, onVoltar }) {
               <${Btn} variant="ghost" onClick=${aprovar} disabled=${ocupado}>Gerar os PDFs de novo<//>
             </div>` : html`
             <div class="flex flex-wrap items-center justify-between gap-3">
-              <div class="text-sm text-ink">Tudo certo? Os PDFs saem no layout do Método, com o papel timbrado.</div>
-              <${Btn} onClick=${aprovar} disabled=${ocupado}>Aprovar e gerar PDFs<//>
+              <div class="text-sm text-ink">Gostou da prévia? Ao aprovar, os PDFs saem no layout do Método, com o papel timbrado, prontos para baixar.</div>
+              <div class="flex flex-wrap gap-2">
+                <${Btn} variant="danger" onClick=${() => setModalReprovar(true)} disabled=${ocupado}>Reprovar<//>
+                <${Btn} onClick=${aprovar} disabled=${ocupado}>Aprovar e gerar PDFs<//>
+              </div>
             </div>`}
         </div>` : null}
 
-      ${modalRegras ? html`<${ModalRegrasArena} pedido=${p} onClose=${() => setModalRegras(false)} />` : null}
+      ${modalRegras ? html`<${ModalRegrasArena} pedido=${p} onRespondido=${skillRespondido} onClose=${() => setModalRegras(false)} />` : null}
+      ${modalReprovar ? html`<${ModalReprovarArena} onConfirmar=${reprovar} onClose=${() => setModalReprovar(false)} />` : null}
     </div>`;
 }
 
-function ModalRegrasArena({ pedido, onClose }) {
+function ModalReprovarArena({ onConfirmar, onClose }) {
+  const [motivo, setMotivo] = useState("");
+  return html`
+    <${Modal} title="Reprovar esta versão" onClose=${onClose}>
+      <p class="text-sm text-ink">O que não ficou bom? <span class="text-muted">(opcional, mas ajuda a IA a não repetir o erro)</span></p>
+      <textarea class=${cx(inputCls, "mt-2 min-h-[72px]")} value=${motivo} onInput=${(e) => setMotivo(e.target.value)}
+        placeholder="Ex.: a história ficou infantil; as perguntas estão muito parecidas com as da semana passada"></textarea>
+      <div class="mt-4 flex flex-wrap justify-end gap-2">
+        <${Btn} variant="ghost" onClick=${onClose}>Cancelar<//>
+        <${Btn} variant="danger" onClick=${() => onConfirmar(motivo, "excluir")}>Descartar o pedido<//>
+        <${Btn} onClick=${() => onConfirmar(motivo, "nova")}>Gerar outra versão do zero<//>
+      </div>
+    <//>`;
+}
+
+// Aviso ao aprovar depois de correções: "Atualizar skill com as novas informações?". Sim = a IA resume as correções
+// em regras gerais (arena_regras_sugerir), a Tia revisa e elas vão para arena_regras (valem já na próxima geração,
+// marcadas pendente_skill para entrar na skill tia-do-ingles-materials). Não = só este material.
+function ModalRegrasArena({ pedido, onClose, onRespondido }) {
   const [fase, setFase] = useState("pergunta"); // pergunta | carregando | editar
   const [regras, setRegras] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -7981,14 +7995,14 @@ function ModalRegrasArena({ pedido, onClose }) {
     try {
       const d = await aiCall("arena_regras_sugerir", { pedido_id: pedido.id });
       const lista = (d && d.regras) || [];
-      if (!lista.length) { notify("A IA não viu nenhuma regra geral nesses ajustes (eram pontuais deste material).", "info"); onClose(); return; }
+      if (!lista.length) { notify("A IA não viu nenhuma regra geral nessas correções (eram pontuais deste material).", "info"); onRespondido && onRespondido(); onClose(); return; }
       setRegras(lista.map((r) => ({ ...r, usar: true })));
       setFase("editar");
     } catch (e) { notify(errMsg(e), "err"); onClose(); }
   }
   async function salvar() {
     const sel = regras.filter((r) => r.usar && r.texto.trim());
-    if (!sel.length) return onClose();
+    if (!sel.length) { onRespondido && onRespondido(); return onClose(); }
     setBusy(true);
     try {
       const { data, error } = await sb.from("arena_regras").insert(sel.map((r) => ({ texto: r.texto.trim(), origem: "aprendida", ativa: true, pendente_skill: true, pedido_id: pedido.id }))).select("*");
@@ -7999,23 +8013,24 @@ function ModalRegrasArena({ pedido, onClose }) {
         if (e2) throw e2;
         dispatchEvent(new CustomEvent("arena:regras"));
         return true;
-      }, { mensagem: `${ids.length} regra(s) salva(s): já valem nos próximos materiais` });
+      }, { mensagem: `Skill atualizada: ${ids.length} regra(s) nova(s), já valem nos próximos materiais` });
       dispatchEvent(new CustomEvent("arena:regras"));
+      onRespondido && onRespondido();
       onClose();
     } catch (e) { notify(errMsg(e), "err"); }
     finally { setBusy(false); }
   }
   return html`
-    <${Modal} title="Transformar os ajustes em regras?" onClose=${onClose} wide>
+    <${Modal} title="Atualizar a skill com as novas informações?" onClose=${onClose} wide>
       ${fase === "pergunta" ? html`
-        <p class="text-sm text-ink">Você fez ${(pedido.ajustes || []).length} ajuste(s) neste pedido. Quer que eles virem <b>regras</b> para os próximos materiais?</p>
-        <ul class="mt-2 list-disc space-y-1 pl-5 text-xs text-muted">${[...new Set((pedido.ajustes || []).map((a) => a.instrucao))].map((t) => html`<li>${t}</li>`)}</ul>
+        <p class="text-sm text-ink">Você corrigiu este material antes de aprovar. Quer <b>atualizar a skill</b> com essas informações, para os próximos materiais já saírem assim?</p>
+        <ul class="mt-2 list-disc space-y-1 pl-5 text-xs text-muted">${[...new Set((pedido.ajustes || []).slice(Number((pedido.briefing || {}).skill_respondido_ate || 0)).map((a) => a.instrucao))].map((t) => html`<li>${t}</li>`)}</ul>
         <div class="mt-4 flex flex-wrap justify-end gap-2">
-          <${Btn} variant="ghost" onClick=${onClose}>Não, foram só deste material<//>
-          <${Btn} onClick=${sugerir}>Sim, sugerir regras<//>
+          <${Btn} variant="ghost" onClick=${() => { onRespondido && onRespondido(); onClose(); }}>Não, foi só deste material<//>
+          <${Btn} onClick=${sugerir}>Sim, atualizar a skill<//>
         </div>` : fase === "carregando" ? html`
-        <div class="text-sm text-muted"><span class="spinner mr-2"></span>Resumindo os ajustes em regras gerais…</div>` : html`
-        <p class="text-xs text-muted">Edite se quiser e desmarque o que não deve virar regra. Elas valem já na próxima geração e ficam marcadas como “pendente de levar para a skill”.</p>
+        <div class="text-sm text-muted"><span class="spinner mr-2"></span>Resumindo as correções em regras gerais…</div>` : html`
+        <p class="text-xs text-muted">Confira as regras que vão entrar. Edite se quiser e desmarque o que não deve virar regra. Elas valem já na próxima geração e ficam marcadas como “pendente de levar para a skill” do Claude.</p>
         <div class="mt-3 space-y-3">${regras.map((r, i) => html`
           <div class="rounded-lg border border-line p-2.5">
             <label class="flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked=${r.usar}
@@ -8025,7 +8040,7 @@ function ModalRegrasArena({ pedido, onClose }) {
           </div>`)}</div>
         <div class="mt-4 flex justify-end gap-2">
           <${Btn} variant="ghost" onClick=${onClose}>Cancelar<//>
-          <${Btn} loading=${busy} onClick=${salvar}>Salvar regras<//>
+          <${Btn} loading=${busy} onClick=${salvar}>Atualizar a skill<//>
         </div>`}
     <//>`;
 }
