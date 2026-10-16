@@ -130,72 +130,80 @@ const NAV = [
 
 // <permissoes>
 // ---------------------------------------------------------------------------
-// Papéis e permissões de rota. FONTE ÚNICA: o menu (Shell), os links de topo/rodapé e a
-// guarda do Router passam todos por rotaPermitida(). Este bloco é puro (sem DOM nem
-// imports) para poder ser testado fora do navegador: scripts/teste-permissoes.js.
-//   admin  (ADM)  : acesso a tudo, inclusive Administração.
-//   adm_limitado (ADM limitado): usa tudo como editor, sem Administração e sem mexer na
-//                  estrutura (seções da Base, registro de Ferramentas, squad) nem excluir
-//                  documentos/seções. No banco é role "editor" + profiles.acesso_limitado = true;
-//                  papelEfetivo() converte ao carregar o perfil.
-//   cs     (CS)   : somente #/cs/<item do grupo CS / Suporte> e #/perfil.
-//   editor / leitor: tudo, menos Administração (leitor sem escrita).
-//   papel desconhecido/ausente: nenhum privilégio (só #/perfil).
-// A RLS do banco é a barreira real; isto é a camada de interface.
+// Acesso por aba (decisão da Tia, 16/10/2026). FONTE ÚNICA: o menu (Shell), os links de
+// topo/rodapé e a guarda do Router passam todos por rotaPermitida(). Este bloco é puro (sem
+// DOM nem imports) para poder ser testado fora do navegador: scripts/teste-permissoes.js.
+//   ADM (profiles.role = "admin"): vê e altera tudo, inclusive Início, Farol do Lucro, Pedir a IA,
+//        Squad, Ferramentas e Administração.
+//   Equipe (profiles.role = "equipe"): só as abas de profiles.areas (slugs dos grupos do NAV:
+//        bc, agenda, pedagogico, cs, comercial, financeiro, conteudo) e "Meu perfil". Dentro de
+//        cada aba liberada, cadastra, edita e gera. Sem nenhuma aba: só "Meu perfil".
+//   Qualquer outro papel (os legados editor/leitor/cs, que o banco não aceita mais) ou perfil
+//        ausente: nenhum privilégio (só #/perfil).
+// A RLS do banco (app.tem_area) é a barreira real; isto é a camada de interface.
 // ---------------------------------------------------------------------------
-const ROLE_LABEL = { leitor: "Leitor", editor: "Editor", admin: "ADM", adm_limitado: "ADM limitado", cs: "CS" };
-const ROLES_CONHECIDOS = ["leitor", "editor", "admin", "adm_limitado", "cs"];
-// Papéis que o ADM escolhe na Administração (ordem e descrição curta do formulário).
-const PAPEIS_ADMIN = [
-  ["admin", "ADM", "Acesso a tudo, inclusive usuários, papéis e senhas."],
-  ["adm_limitado", "ADM limitado", "Usa todas as abas no dia a dia; não acessa a Administração, não muda a estrutura do sistema e não exclui documentos ou seções."],
-  ["cs", "CS", "Somente a aba CS / Suporte."],
-  ["editor", "Editor", "Cria e edita conteúdo (papel legado)."],
-  ["leitor", "Leitor", "Só consulta, sem gravar (papel legado)."],
-];
-const SLUGS_CS = new Set(((NAV.find((g) => g.id === "cs") || {}).itens || []).map((i) => i.slug));
+const AREAS = NAV.map((g) => g.id);
+const NOME_AREA = Object.fromEntries(NAV.map((g) => [g.id, g.nome]));
+const ROTAS_BC = new Set(["base", "secao", "doc", "novo"]); // telas da Base de Conhecimento
 
-function roleValido(role) { return ROLES_CONHECIDOS.includes(role) ? role : null; }
-function rotuloRole(role) { const r = roleValido(role); return r ? ROLE_LABEL[r] : "Sem papel"; }
-// Quem cria/edita Base de Conhecimento, Agenda, Farol, Ferramentas etc.
-function ehEditor(role) { return role === "editor" || role === "admin" || role === "adm_limitado"; }
-// Quem mexe na estrutura do sistema (seções da Base, registro de Ferramentas, squad): não o ADM limitado.
-function podeMexerEstrutura(role) { return role === "editor" || role === "admin"; }
-// Papel usado no front a partir da linha de profiles (o ADM limitado é editor + acesso_limitado).
-function papelEfetivo(perfil) {
-  if (!perfil) return null;
-  if (perfil.acesso_limitado) return perfil.role === "editor" ? "adm_limitado" : null; // combinação inválida: sem privilégio
-  return perfil.role;
+function ehAdmin(me) { return !!me && me.role === "admin"; }
+// Abas que a pessoa enxerga, na ordem do menu (ADM: todas).
+function areasDe(me) {
+  if (!me) return [];
+  if (ehAdmin(me)) return AREAS.slice();
+  if (me.role !== "equipe" || !Array.isArray(me.areas)) return [];
+  return AREAS.filter((a) => me.areas.includes(a));
 }
-// Quem grava nas telas de CS / Suporte (FAQ, Envios, Diagnóstico, Metas...).
-function podeEscreverCS(role) { return role === "cs" || ehEditor(role); }
+function temArea(me, area) { return areasDe(me).includes(area); }
+// Rótulo do acesso (sidebar, Meu perfil).
+function rotuloAcesso(me) {
+  if (ehAdmin(me)) return "ADM";
+  const a = areasDe(me);
+  return a.length ? a.map((x) => NOME_AREA[x]).join(", ") : "Sem abas liberadas";
+}
 
 function partesRota(path) { return String(path || "").split("?")[0].split("/").filter(Boolean); }
+// Aba dona de uma rota (null = rota que não é de aba: Início, Farol, Squad, Ferramentas, Admin...).
+function areaDaRota(path) {
+  const p0 = partesRota(path)[0] || "";
+  if (ROTAS_BC.has(p0)) return "bc";
+  return p0 !== "bc" && AREAS.includes(p0) ? p0 : null;
+}
 
-function rotaPermitida(role, path) {
-  const r = roleValido(role);
+function rotaPermitida(me, path) {
   const partes = partesRota(path);
   const p0 = partes[0] || "";
-  if (!r) return p0 === "perfil" && partes.length === 1;
-  if (r === "admin") return true;
-  if (r === "cs") {
-    if (p0 === "perfil") return partes.length === 1;
-    return p0 === "cs" && partes.length === 2 && SLUGS_CS.has(partes[1]);
-  }
-  return p0 !== "admin"; // editor e leitor
+  if (ehAdmin(me)) return true;
+  if (p0 === "perfil") return partes.length === 1;
+  const area = areaDaRota(path);
+  if (!area || !temArea(me, area)) return false;
+  if (area === "bc") return (p0 === "base" || p0 === "novo") ? partes.length === 1 : partes.length === 2;
+  const grupo = NAV.find((g) => g.id === area);
+  return partes.length === 2 && grupo.itens.some((it) => it.slug === partes[1]);
 }
-// Para onde mandar quem entra (ou cai numa rota que não pode ver).
-function rotaEntrada(role) {
-  const r = roleValido(role);
-  if (r === "cs") return "/cs/faq";
-  return r ? "/" : "/perfil";
+// Para onde mandar quem entra (ou cai numa rota que não pode ver): ADM vai para o Início;
+// a equipe, para o primeiro item da primeira aba liberada; sem aba, para Meu perfil.
+function rotaEntrada(me) {
+  if (ehAdmin(me)) return "/";
+  const area = areasDe(me)[0];
+  if (!area) return "/perfil";
+  if (area === "bc") return "/base";
+  return "/" + area + "/" + NAV.find((g) => g.id === area).itens[0].slug;
 }
-// Grupos do menu lateral que o papel enxerga.
-function navParaRole(role) {
-  const r = roleValido(role);
-  if (!r) return [];
-  if (r === "cs") return NAV.filter((g) => g.id === "cs");
-  return NAV;
+// Grupos do menu lateral que a pessoa enxerga.
+function navPara(me) { return NAV.filter((g) => temArea(me, g.id)); }
+// Quem grava na tela de uma rota: o ADM sempre; a equipe, na rota de uma aba liberada.
+function podeEscreverRota(me, path) {
+  if (ehAdmin(me)) return true;
+  const area = areaDaRota(path);
+  return !!area && temArea(me, area) && rotaPermitida(me, path);
+}
+// Normaliza o acesso escolhido na Administração (ADM marcado = só ADM; abas válidas, sem repetir,
+// na ordem do menu). Mesma regra da Edge Function admin-users.
+function normalizarAcesso(admin, areas) {
+  if (admin === true) return { admin: true, areas: [] };
+  const lista = Array.isArray(areas) ? areas : [];
+  return { admin: false, areas: AREAS.filter((a) => lista.includes(a)) };
 }
 // Mensagem de erro do login em português claro (sem vazar detalhe técnico).
 function mensagemErroLogin(e) {
@@ -674,6 +682,7 @@ function escopoDesfazer(route) {
   if (p0 === "conteudo" && p1 === "linkedin") return LI_ESCOPO;
   if (p0 === "pedagogico" && p1 === "gerador-materiais") return ARENA_ESCOPO;
   if (p0 === "base" || p0 === "secao" || p0 === "doc") return "base";
+  if (p0 === "admin") return "admin";
   return null;
 }
 
@@ -1009,8 +1018,8 @@ function Shell({ me, route, children }) {
   const homeActive = p0 === "";
   const fullBleed = EMBED_ROUTES.has(route.path);
   const escopoDesf = escopoDesfazer(route);
-  const nav = navParaRole(me.role);
-  const ok = (path) => rotaPermitida(me.role, path); // mesma regra da guarda do Router
+  const nav = navPara(me);
+  const ok = (path) => rotaPermitida(me, path); // mesma regra da guarda do Router
   const [openGroups, setOpenGroups] = useState(() => new Set([p0, ...(nav.length === 1 ? [nav[0].id] : [])]));
   useEffect(() => { setOpenGroups((s) => new Set([...s, p0])); }, [p0]);
   const toggle = (id) => setOpenGroups((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -1062,7 +1071,7 @@ function Shell({ me, route, children }) {
         </div>
         <div class="min-w-0">
           <div class="truncate text-sm font-semibold text-ink">${me.nome || me.email}</div>
-          <div class="text-xs text-muted">${rotuloRole(me.role)}</div>
+          <div class="truncate text-xs text-muted" title=${rotuloAcesso(me)}>${rotuloAcesso(me)}</div>
         </div>
       </div>
 
@@ -1077,7 +1086,7 @@ function Shell({ me, route, children }) {
 
       <div class="space-y-0.5 border-t border-line px-2 py-2">
         ${ok("/ferramentas") ? linkItem("Ferramentas", "🧰", "/ferramentas", route.path === "/ferramentas") : null}
-        ${ok("/admin") && me.role === "admin" ? linkItem("Administração", "⚙️", "/admin", route.path === "/admin") : null}
+        ${ok("/admin") && ehAdmin(me) ? linkItem("Administração", "⚙️", "/admin", route.path === "/admin") : null}
         ${ok("/perfil") ? linkItem("Meu perfil", "👤", "/perfil", route.path === "/perfil") : null}
         ${cfg.AUTH_MODE === "open" ? null : html`
           <button
@@ -1108,7 +1117,7 @@ function Shell({ me, route, children }) {
         ${fullBleed
           ? children
           : html`<div class="mx-auto max-w-5xl px-4 py-7 sm:px-6 lg:px-10 lg:py-10">
-              ${escopoDesf && podeEscreverCS(me.role) ? html`<div class="mb-3 flex justify-end"><${BotaoDesfazer} key=${escopoDesf} escopo=${escopoDesf} /></div>` : null}
+              ${escopoDesf && podeEscreverRota(me, route.path) ? html`<div class="mb-3 flex justify-end"><${BotaoDesfazer} key=${escopoDesf} escopo=${escopoDesf} /></div>` : null}
               ${children}
             </div>`}
       </main>
@@ -1182,7 +1191,7 @@ function Dashboard({ me, sections }) {
             ${recent === null
               ? html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
               : recent.length === 0
-              ? html`<${Empty} title="Nenhum documento ainda" icon="📭">${ehEditor(me.role) ? "Abra uma seção e clique em “Novo documento”." : "Peça a um editor para publicar os primeiros materiais."}<//>`
+              ? html`<${Empty} title="Nenhum documento ainda" icon="📭">${temArea(me, "bc") ? "Abra uma seção e clique em “Novo documento”." : "Peça ao ADM para publicar os primeiros materiais."}<//>`
               : html`<${DocTable} docs=${recent} showSection />`}
           </div>`}
     </div>`;
@@ -1220,7 +1229,7 @@ function SectionPage({ slug, me, sections, onSectionsChanged }) {
       (!tagFilter || (d.tags || []).includes(tagFilter))
   );
 
-  const canEdit = ehEditor(me.role);
+  const canEdit = temArea(me, "bc");
 
   return html`
     <div>
@@ -1230,7 +1239,7 @@ function SectionPage({ slug, me, sections, onSectionsChanged }) {
           <h1 class="mt-1 flex items-center gap-2 text-2xl font-semibold text-ink">${section.icone || "📄"} ${section.nome}</h1>
         </div>
         <div class="flex gap-2">
-          ${podeMexerEstrutura(me.role) && html`<${Btn} variant="ghost" onClick=${() => setEditing(true)}>Editar descrição<//>`}
+          ${temArea(me, "bc") && html`<${Btn} variant="ghost" onClick=${() => setEditing(true)}>Editar descrição<//>`}
           ${canEdit && html`<${Btn} as="a" href=${"#/novo?secao=" + section.slug}>+ Novo documento<//>`}
         </div>
       </div>
@@ -1492,7 +1501,7 @@ function DocDetail({ id, me, sections }) {
       const v = await fetchVersions(id);
       setVersions(v);
       setSelVersion(d.current ? d.current.id : v[0] && v[0].id);
-      if (ehEditor(me.role)) setActivity(await fetchActivity(id));
+      if (temArea(me, "bc")) setActivity(await fetchActivity(id));
     } catch (e) {
       if (e && e.code === "PGRST116") setNotFound(true);
       else notify(errMsg(e), "err");
@@ -1505,8 +1514,8 @@ function DocDetail({ id, me, sections }) {
   if (notFound) return html`<${Empty} title="Documento não encontrado" icon="🔍"><a class="text-brand" href="#/base">Voltar à Base de Conhecimento</a><//>`;
   if (!doc) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
 
-  const canEdit = ehEditor(me.role);
-  const canDelete = me.role === "admin";
+  const canEdit = temArea(me, "bc");
+  const canDelete = ehAdmin(me); // excluir documento continua só do ADM (RLS kb_documents_del_admin)
   const shown = versions.find((v) => v.id === selVersion) || doc.current || versions[0];
 
   async function removeDoc() {
@@ -1581,7 +1590,7 @@ function DocDetail({ id, me, sections }) {
         </div>
       </div>
 
-      ${ehEditor(me.role) && activity.length > 0 && html`
+      ${temArea(me, "bc") && activity.length > 0 && html`
         <div class="mt-10">
           <h2 class="mb-2 text-sm font-semibold uppercase tracking-wider text-muted">Atividade</h2>
           <ul class="space-y-1 text-sm text-muted">
@@ -1820,8 +1829,8 @@ function NewDocPage({ me, sections, query }) {
   const [busy, setBusy] = useState(false);
   useEffect(() => { fetchProfiles().then(setProfiles).catch(() => {}); }, []);
 
-  if (!ehEditor(me.role))
-    return html`<${Empty} title="Sem permissão" icon="🔒">Apenas editores e admins podem criar documentos.<//>`;
+  if (!temArea(me, "bc"))
+    return html`<${Empty} title="Sem permissão" icon="🔒">Só quem tem a aba Base de Conhecimento pode criar documentos.<//>`;
 
   async function save(e) {
     e.preventDefault();
@@ -1977,8 +1986,12 @@ function ProfilePage({ me, onProfileChanged }) {
         <div class="rounded-xl border border-line bg-white p-5">
           <div class="text-sm text-muted">E-mail</div>
           <div class="font-medium text-ink">${me.email}</div>
-          <div class="mt-1 text-xs text-muted">Papel: ${rotuloRole(me.role)}</div>
+          <div class="mt-1 text-xs text-muted">Acesso: ${rotuloAcesso(me)}</div>
         </div>
+        ${!ehAdmin(me) && areasDe(me).length === 0 ? html`
+          <div role="status" class="rounded-xl bg-[#f6efd6] px-4 py-3 text-sm text-[#7a6420]">
+            Peça ao ADM para liberar suas abas.
+          </div>` : null}
         <div class="rounded-xl border border-line bg-white p-5">
           <${Field} label="Nome"><input class=${inputCls} value=${nome} onInput=${(e) => setNome(e.target.value)} /><//>
           <div class="mt-3"><${Btn} loading=${busy} onClick=${saveName}>Salvar nome<//></div>
@@ -1997,10 +2010,69 @@ async function fetchSyncStatus() {
   return data || [];
 }
 
+// Pills das abas de um usuário na lista da Administração.
+function PillsAcesso({ u }) {
+  if (u.role === "admin") return html`<${Badge} class="bg-brand-light text-brand-dark">ADM<//>`;
+  const a = areasDe(u);
+  if (!a.length) return html`<span class="text-xs text-muted">Nenhuma aba</span>`;
+  return html`<div class="flex flex-wrap gap-1">${a.map((x) => html`<${Badge} key=${x} class=${PILL_NEUTRAL}>${NOME_AREA[x]}<//>`)}</div>`;
+}
+
+// Caixas de seleção do acesso: ADM (inclui tudo e desabilita as outras) + as 7 abas do menu.
+// As abas marcadas ficam guardadas enquanto o ADM estiver marcado (desmarcar o ADM devolve a seleção);
+// quem grava normaliza com normalizarAcesso (ADM = abas vazias).
+function CamposAcesso({ valor, onChange, admBloqueado = false }) {
+  const marcar = (area, sim) => onChange({ admin: false, areas: AREAS.filter((a) => a === area ? sim : valor.areas.includes(a)) });
+  return html`
+    <div class="space-y-2">
+      <label class=${cx("flex items-start gap-2.5 rounded-lg border px-3 py-2.5", valor.admin ? "border-brand/40 bg-brand-light/50" : "border-line")}>
+        <input type="checkbox" class="mt-0.5 h-4 w-4 rounded border-line text-brand focus:ring-brand" checked=${valor.admin}
+          disabled=${admBloqueado} onChange=${(e) => onChange({ admin: e.target.checked, areas: valor.areas })} />
+        <span>
+          <span class="block text-sm font-medium text-ink">ADM</span>
+          <span class="block text-xs text-muted">Vê e altera tudo, inclusive Início, Farol do Lucro, Pedir a IA, Squad, Ferramentas e Administração (usuários e abas).</span>
+        </span>
+      </label>
+      <div class=${cx("grid gap-1.5 sm:grid-cols-2", valor.admin && "opacity-50")}>
+        ${NAV.map((g) => html`
+          <label key=${g.id} class="flex items-center gap-2.5 rounded-lg border border-line px-3 py-2 text-sm text-ink">
+            <input type="checkbox" class="h-4 w-4 rounded border-line text-brand focus:ring-brand"
+              checked=${valor.admin || valor.areas.includes(g.id)} disabled=${valor.admin}
+              onChange=${(e) => marcar(g.id, e.target.checked)} />
+            <span>${g.icone} ${g.nome}</span>
+          </label>`)}
+      </div>
+      <p class="text-xs text-muted">Quem não é ADM vê só as abas marcadas e o próprio perfil. Dentro de cada aba, pode cadastrar, editar e gerar.</p>
+    </div>`;
+}
+
+function AcessoModal({ u, onClose, onSalvar }) {
+  const [valor, setValor] = useState(() => ({ admin: u.role === "admin", areas: areasDe({ role: "equipe", areas: u.areas || [] }) }));
+  const [busy, setBusy] = useState(false);
+  async function salvar() {
+    setBusy(true);
+    try { await onSalvar(normalizarAcesso(valor.admin, valor.areas)); onClose(); }
+    catch (e) { notify(errMsg(e), "err"); }
+    finally { setBusy(false); }
+  }
+  return html`
+    <${Modal} title=${"Abas de " + (u.nome || u.email)} onClose=${onClose}>
+      <div class="space-y-4">
+        <div class="text-xs text-muted">${u.email}</div>
+        <${CamposAcesso} valor=${valor} onChange=${setValor} />
+        <div class="flex justify-end gap-2"><${Btn} variant="subtle" onClick=${onClose}>Cancelar<//><${Btn} loading=${busy} onClick=${salvar}>Salvar<//></div>
+      </div>
+    <//>`;
+}
+
+const ADMIN_ESCOPO = "admin";
+const mesmoAcesso = (x, y) => !!x && !!y && x.admin === y.admin && JSON.stringify(x.areas) === JSON.stringify(y.areas);
+
 function AdminPage({ me }) {
   const [tab, setTab] = useState("usuarios");
   const [users, setUsers] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [editando, setEditando] = useState(null);
   const [tempResult, setTempResult] = useState(null);
 
   const load = useCallback(async () => {
@@ -2008,10 +2080,25 @@ function AdminPage({ me }) {
     catch (e) { notify(errMsg(e), "err"); setUsers([]); }
   }, []);
   useEffect(() => { load(); }, [load]);
+  useAoDesfazer(ADMIN_ESCOPO, load);
 
-  async function setRole(u, role) {
-    try { await adminCall({ action: "setRole", userId: u.id, role }); notify("Papel atualizado.", "ok"); await load(); }
-    catch (e) { notify(errMsg(e), "err"); }
+  // Grava ADM/abas pela Edge Function admin-users e registra o DESFAZER (volta ao acesso anterior).
+  async function salvarAcesso(u, valor) {
+    const r = await adminCall({ action: "setAcesso", userId: u.id, admin: valor.admin, areas: valor.areas });
+    const antes = normalizarAcesso(r.antes && r.antes.admin, r.antes && r.antes.areas);
+    const depois = normalizarAcesso(r.depois && r.depois.admin, r.depois && r.depois.areas);
+    const rotulo = "abas de " + (u.nome || u.email);
+    if (!mesmoAcesso(antes, depois)) {
+      registrarDesfazer(ADMIN_ESCOPO, rotulo, async () => {
+        const lista = await adminCall({ action: "list" });
+        const atual = (lista.users || []).find((x) => x.id === u.id);
+        if (!atual) throw new Error("o usuário não existe mais");
+        if (!mesmoAcesso(normalizarAcesso(atual.role === "admin", atual.areas), depois) && !confirmarConflito(rotulo)) return false;
+        await adminCall({ action: "setAcesso", userId: u.id, admin: antes.admin, areas: antes.areas });
+        return true;
+      }, { mensagem: "Abas salvas" });
+    } else notify("Nada mudou.", "info");
+    await load();
   }
   async function resetPw(u) {
     if (!confirm(`Gerar nova senha temporária para ${u.email}?`)) return;
@@ -2031,7 +2118,7 @@ function AdminPage({ me }) {
 
   return html`
     <div>
-      <div class="flex items-center justify-between">
+      <div class="flex flex-wrap items-center justify-between gap-2">
         <h1 class="text-2xl font-semibold text-ink">Administração</h1>
         ${tab === "usuarios" ? html`<${Btn} onClick=${() => setShowCreate(true)}>+ Novo usuário<//>` : null}
       </div>
@@ -2045,7 +2132,7 @@ function AdminPage({ me }) {
 
       ${tab === "usuarios" ? html`
       <div>
-        <p class="mt-3 text-sm text-muted">Crie contas, defina papéis e gere senhas temporárias. Não é necessário e-mail de confirmação.</p>
+        <p class="mt-3 text-sm text-muted">Crie contas, escolha as abas de cada pessoa (ou ADM) e gere senhas temporárias. Não é necessário e-mail de confirmação.</p>
 
         <div class="mt-4 overflow-x-auto rounded-xl border border-line bg-white">
           ${users === null
@@ -2053,21 +2140,18 @@ function AdminPage({ me }) {
             : html`
             <table class="w-full min-w-[640px] text-left text-sm">
               <thead class="border-b border-line text-xs uppercase tracking-wide text-muted">
-                <tr><th class="px-4 py-3 font-medium">Pessoa</th><th class="px-4 py-3 font-medium">Papel</th><th class="px-4 py-3 font-medium">Desde</th><th class="px-4 py-3"></th></tr>
+                <tr><th class="px-4 py-3 font-medium">Pessoa</th><th class="px-4 py-3 font-medium">Abas</th><th class="px-4 py-3 font-medium">Desde</th><th class="px-4 py-3"></th></tr>
               </thead>
               <tbody class="divide-y divide-line">
                 ${users.map((u) => html`
                   <tr key=${u.id}>
                     <td class="px-4 py-3">
-                      <div class="font-medium text-ink">${u.nome || "—"}</div><div class="text-xs text-muted">${u.email}</div>
+                      <div class="font-medium text-ink">${u.nome || "—"}${u.id === me.id ? html`<span class="ml-1 text-xs font-normal text-muted">(você)</span>` : null}</div><div class="text-xs text-muted">${u.email}</div>
                       ${u.precisa_trocar_senha ? html`<div class="mt-1"><${Badge} class=${PILL_WARN}>Troca de senha pendente<//></div>` : null}
                     </td>
                     <td class="px-4 py-3">
-                      <select class=${cx(inputCls, "w-auto py-1")} value=${papelEfetivo(u) || u.role} disabled=${u.id === me.id}
-                        title=${(PAPEIS_ADMIN.find((p) => p[0] === papelEfetivo(u)) || [])[2] || ""}
-                        onChange=${(e) => setRole(u, e.target.value)}>
-                        ${PAPEIS_ADMIN.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
-                      </select>
+                      <${PillsAcesso} u=${u} />
+                      ${u.id !== me.id ? html`<button class="mt-1.5 block text-xs font-medium text-brand hover:underline" onClick=${() => setEditando(u)}>Editar abas</button>` : null}
                     </td>
                     <td class="px-4 py-3 text-muted">${fmtDate(u.created_at)}</td>
                     <td class="px-4 py-3 text-right">
@@ -2084,6 +2168,8 @@ function AdminPage({ me }) {
 
       ${showCreate && html`<${CreateUserModal} onClose=${() => setShowCreate(false)}
         onCreated=${async (res) => { setShowCreate(false); setTempResult(res); await load(); }} />`}
+
+      ${editando && html`<${AcessoModal} u=${editando} onClose=${() => setEditando(null)} onSalvar=${(v) => salvarAcesso(editando, v)} />`}
 
       ${tempResult && html`
         <${Modal} title="Senha temporária" onClose=${() => setTempResult(null)}>
@@ -2203,12 +2289,14 @@ function SyncRow({ row, onDone }) {
 function CreateUserModal({ onClose, onCreated }) {
   const [email, setEmail] = useState("");
   const [nome, setNome] = useState("");
-  const [role, setRole] = useState("cs");
+  const [acesso, setAcesso] = useState({ admin: false, areas: [] });
   const [busy, setBusy] = useState(false);
   async function save() {
+    const final = normalizarAcesso(acesso.admin, acesso.areas);
+    if (!final.admin && !final.areas.length && !confirm("Nenhuma aba marcada: a pessoa só vai ver Meu perfil até você liberar alguma. Criar assim mesmo?")) return;
     setBusy(true);
     try {
-      const r = await adminCall({ action: "create", email, nome, role });
+      const r = await adminCall({ action: "create", email, nome, admin: final.admin, areas: final.areas });
       notify("Usuário criado.", "ok");
       onCreated({ email: r.email, senha: r.senhaTemporaria });
     } catch (e) { notify(errMsg(e), "err"); }
@@ -2219,12 +2307,10 @@ function CreateUserModal({ onClose, onCreated }) {
       <div class="space-y-4">
         <${Field} label="E-mail" required><input class=${inputCls} type="email" value=${email} onInput=${(e) => setEmail(e.target.value)} /><//>
         <${Field} label="Nome"><input class=${inputCls} value=${nome} onInput=${(e) => setNome(e.target.value)} /><//>
-        <${Field} label="Papel">
-          <select class=${inputCls} value=${role} onChange=${(e) => setRole(e.target.value)}>
-            ${PAPEIS_ADMIN.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
-          </select>
-          <p class="mt-1.5 text-xs text-muted">${(PAPEIS_ADMIN.find((p) => p[0] === role) || [])[2] || ""}</p>
-        <//>
+        <div>
+          <span class="mb-1 block text-sm font-medium text-ink">Abas</span>
+          <${CamposAcesso} valor=${acesso} onChange=${setAcesso} />
+        </div>
         <p class="text-xs text-muted">O sistema gera uma senha temporária. No primeiro acesso, a pessoa escolhe uma senha nova.</p>
         <div class="flex justify-end gap-2"><${Btn} variant="subtle" onClick=${onClose}>Cancelar<//><${Btn} loading=${busy} onClick=${save}>Criar<//></div>
       </div>
@@ -2253,7 +2339,7 @@ function FerramentasPage({ me }) {
   const [statusFilter, setStatusFilter] = useState("");
   const [checking, setChecking] = useState(false);
   const [editing, setEditing] = useState(null); // ferramenta ou {novo:true}
-  const canEdit = podeMexerEstrutura(me.role); // registro global = estrutura (ADM limitado só consulta)
+  const canEdit = ehAdmin(me); // Ferramentas é só do ADM
 
   const load = useCallback(async () => {
     try { setTools(await fetchFerramentas()); }
@@ -2474,7 +2560,7 @@ function FerramentaModal({ ferramenta, me, onClose, onSaved }) {
         `}
 
         <div class="flex items-center justify-between gap-2 pt-1">
-          <div>${!novo && me.role === "admin" ? html`<${Btn} variant="danger" onClick=${remover} loading=${busy}>Remover<//>` : null}</div>
+          <div>${!novo && ehAdmin(me) ? html`<${Btn} variant="danger" onClick=${remover} loading=${busy}>Remover<//>` : null}</div>
           <div class="flex gap-2">
             <${Btn} variant="subtle" onClick=${onClose}>Cancelar<//>
             <${Btn} loading=${busy} onClick=${save}>Salvar<//>
@@ -2861,7 +2947,7 @@ function FaqPage({ me }) {
 
       <div class="mt-3 flex items-center justify-between rounded-xl border border-line bg-card px-4 py-2.5 text-xs text-muted">
         <span>Base atual: ${base ? html`<b class="text-ink">${nf(base.total)}</b>` : "…"} documento(s) ${base && base.nome ? `em "${base.nome}"` : ""}</span>
-        ${rotaPermitida(me && me.role, "/secao/cs-suporte") ? html`<a href="#/secao/cs-suporte" class="font-medium text-brand hover:underline">ver documentos →</a>` : null}
+        ${rotaPermitida(me, "/secao/cs-suporte") ? html`<a href="#/secao/cs-suporte" class="font-medium text-brand hover:underline">ver documentos →</a>` : null}
       </div>
 
       ${configured === false && html`
@@ -3736,7 +3822,7 @@ function rotuloEdicaoFicha(antes, depois) {
 const desfazerFichaComMetas = (fn) => async () => { const r = await fn(); if (r !== false) agendarSyncPlanilha(); return r; };
 
 function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
-  const canEdit = podeEscreverCS(me.role);
+  const canEdit = temArea(me, "cs");
   const [dados, setDados] = useState(null);
   const [row, setRow] = useState(null);
   const [salvo, setSalvo] = useState("");
@@ -3978,7 +4064,7 @@ function DiagnosticoPage({ me, query }) {
   const [lista, setLista] = useState(null);
   const [busca, setBusca] = useState("");
   const [baixandoId, setBaixandoId] = useState(null);
-  const canEdit = podeEscreverCS(me.role);
+  const canEdit = temArea(me, "cs");
   useAoDesfazer("cs/diagnostico", () => { if (!id && !novo) recarregar(); });
 
   async function baixarDaLista(d) {
@@ -4192,7 +4278,7 @@ function MetaManualModal({ meta, diags, onClose, onSalvo }) {
 }
 
 function MetasPage({ me }) {
-  const canEdit = podeEscreverCS(me.role);
+  const canEdit = temArea(me, "cs");
   const [metas, setMetas] = useState(null);
   const [diags, setDiags] = useState([]);
   const [status, setStatus] = useState(null);
@@ -5943,7 +6029,7 @@ const LI_MOTIVOS_OAUTH = {
 function LinkedinConexao({ me, onStatus }) {
   const [st, setSt] = useState(null); // resposta de op status
   const [busy, setBusy] = useState(null);
-  const admin = me && me.role === "admin";
+  const admin = ehAdmin(me);
   const carregar = useCallback(() => linkedinCall("status")
     .then((d) => { setSt(d); onStatus && onStatus(d); })
     .catch((e) => { setSt({ falhou: errMsg(e) }); onStatus && onStatus(null); }), []);
@@ -6007,7 +6093,7 @@ async function liSalvar(post, patch, rotulo, mensagem) {
 }
 
 function LinkedinPage({ me }) {
-  const pode = ehEditor(me && me.role);
+  const pode = temArea(me, "conteudo");
   const [rows, setRows] = useState(null);
   const [semana, setSemana] = useState(null); // segunda-feira exibida (AAAA-MM-DD)
   const [verDescartados, setVerDescartados] = useState(false);
@@ -6535,7 +6621,7 @@ function FarolPage({ me }) {
   // rowsRef é a fonte síncrona da verdade: efeitos do Preact rodam tarde demais
   // para o flush imediato (mudança de status/julgamento) enxergar o estado novo.
   const commitRows = (next) => { const arr = typeof next === "function" ? next(rowsRef.current) : next; rowsRef.current = arr; setRows(arr); };
-  const podeEditar = !me || ehEditor(me.role);
+  const podeEditar = ehAdmin(me); // Farol do Lucro: só ADM
   const blocosVisiveis = FAROL_BLOCOS;
   const antesGrupo = useRef({}); // linha antes da 1ª edição de cada grupo de digitação (DESFAZER)
   const flushes = useRef({});    // gravações pendentes (debounce), para o DESFAZER gravar antes de voltar
@@ -7392,7 +7478,7 @@ async function emParalelo(indices, limite, fn) {
 function GeradorMateriaisPage({ me, query }) {
   const [pedidos, setPedidos] = useState(null);
   const [aberto, setAberto] = useState((query && query.get && query.get("pedido")) || null);
-  const podeEditar = !!me && ehEditor(me.role);
+  const podeEditar = temArea(me, "pedagogico");
   const recarregar = useCallback(() => fetchMateriaisPedidos().then(setPedidos).catch((e) => { notify(errMsg(e), "err"); setPedidos([]); }), []);
   useEffect(() => { recarregar(); }, [recarregar]);
   useAoDesfazer(ARENA_ESCOPO, recarregar);
@@ -8153,7 +8239,7 @@ function AulasPraticasPage() {
 function GeradorSlidesPage({ me }) {
   const [pedidos, setPedidos] = useState(null);
   const [busy, setBusy] = useState(false);
-  const podeEditar = !me || ehEditor(me.role);
+  const podeEditar = temArea(me, "pedagogico");
 
   const [f, setF] = useState({
     tema: "", duracao: "60 min", duracaoOutro: "", nivel: "", nivelOutro: "",
@@ -8440,7 +8526,7 @@ async function fetchAutomacaoEstado() {
 }
 
 function UsoIABloco({ me }) {
-  const canEdit = me && ehEditor(me.role);
+  const canEdit = ehAdmin(me); // Uso de IA / pausa: só ADM (Início)
   const [rows, setRows] = useState(null);
   const [estado, setEstado] = useState(null);
   const [busyPausa, setBusyPausa] = useState(false);
@@ -8545,7 +8631,7 @@ function HomePage({ me, sections }) {
   const [data, setData] = useState(null);
   const [liToken, setLiToken] = useState(null); // conexão do LinkedIn (só editor/ADM)
   useEffect(() => {
-    if (!ehEditor(me && me.role)) return;
+    if (!ehAdmin(me)) return;
     sb.rpc("linkedin_conexao_status").then(({ data: d }) => {
       const r = Array.isArray(d) ? d[0] : d;
       if (r && r.conectado) setLiToken(liSituacaoToken(r.expires_at));
@@ -8780,7 +8866,7 @@ function AgendaPage({ me, view }) {
   const [eventos, setEventos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null); // { dataISO } | { evento }
-  const podeEditar = !me || ehEditor(me.role);
+  const podeEditar = temArea(me, "agenda");
 
   const primeiroDoMes = new Date(ym.y, ym.m, 1);
   const gridInicio = new Date(ym.y, ym.m, 1 - primeiroDoMes.getDay()); // volta ao domingo
@@ -8938,7 +9024,7 @@ function Redirecionar({ para }) {
 function Router({ route, me, sections, reload }) {
   const [p0, p1] = route.parts;
   // Guarda única: rota fora do papel nunca renderiza conteúdo nem "página não encontrada".
-  if (!rotaPermitida(me.role, route.path)) return html`<${Redirecionar} para=${rotaEntrada(me.role)} />`;
+  if (!rotaPermitida(me, route.path)) return html`<${Redirecionar} para=${rotaEntrada(me)} />`;
   if (!p0) return html`<${HomePage} me=${me} sections=${sections} />`;
   if (p0 === "base") return html`<${Dashboard} me=${me} sections=${sections} />`;
   if (p0 === "agenda" && (p1 === "calendario" || p1 === "datas-importantes"))
@@ -8950,7 +9036,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "squad") return html`<${SquadPage} />`;
   if (p0 === "pedir-ia") return html`<${PedirIA} />`;
   if (p0 === "perfil") return html`<${ProfilePage} me=${me} onProfileChanged=${reload} />`;
-  if (p0 === "admin" && me.role === "admin") return html`<${AdminPage} me=${me} />`;
+  if (p0 === "admin" && ehAdmin(me)) return html`<${AdminPage} me=${me} />`;
   if (p0 === "farol") return html`<${FarolPage} me=${me} />`;
   if (p0 === "conteudo" && (p1 === "metricas" || p1 === "instagram")) return html`<${ConteudoMetricasPage} />`;
   if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
@@ -9012,7 +9098,7 @@ function App() {
         fetchSections().catch(() => []),
       ]);
       if (error) throw error;
-      setMe(prof ? { ...prof, role: papelEfetivo(prof) } : null);
+      setMe(prof || null);
       setSections(secs);
     } catch (e) {
       setMeError(true);

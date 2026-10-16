@@ -42,65 +42,70 @@ como backend.
   Email: mínimo 8 e "Letters and digits"); a senha temporária gerada já atende.
   (Ainda é preciso desligar "Allow new users to sign up" no painel do Supabase:
   Authentication > Sign In / Providers; não dá para fazer por SQL.)
-- **Papéis** (`profiles.role`, enum `user_role`): `admin` (rótulo **ADM**, acesso a tudo),
-  `adm_limitado` (rótulo **ADM limitado**, ver abaixo), `cs` (rótulo **CS**, só a aba CS / Suporte),
-  e os legados `editor` e `leitor` (editor/leitor veem tudo menos Administração; leitor não grava).
-  `ROLE_LABEL`/`PAPEIS_ADMIN` em `app.js`.
-- **ADM limitado** ("usa tudo, sem mexer na estrutura"): no banco é `role = 'editor'` +
-  `profiles.acesso_limitado = true` (check `profiles_acesso_limitado_so_editor`); no front
-  `papelEfetivo(perfil)` vira `adm_limitado` ao carregar o perfil. Assim passa como editor em
-  `app.is_editor()` e em todas as Edge Functions que checam editor/admin (sem redeploy). Bloqueios:
-  Administração (menu/Router + `admin-users` recusa `role<>'admin'` ou `acesso_limitado`), `app_config`,
-  excluir documentos/versões/seções e criar seções (já eram só `app.is_admin()`), editar seções
-  (`kb_sections` update), registro de Ferramentas (`os_ferramentas` insert/update) e squad
-  (`os_squad_agentes` escrita) — via `app.is_editor_estrutura()` (= `is_editor() and not
-  is_adm_limitado()`); no front, `podeMexerEstrutura(role)`. Desconectar o LinkedIn segue só admin.
-  **Tabela/tela nova que seja estrutura** (configuração global, cadastro que muda o sistema):
-  escrita com `app.is_editor_estrutura()` e botão com `podeMexerEstrutura`; o resto do dia a dia usa
-  `app.is_editor()`/`ehEditor` normalmente. Exclusões do dia a dia (eventos da agenda, indicadores
-  do Farol, fichas/metas de CS, posts) continuam liberadas para ele, com DESFAZER.
-  Teste de RLS: `scripts/migrations/teste_rls_adm_limitado.sql`.
-- **Camada de interface**: bloco `// <permissoes>` em `app.js` (logo após `NAV`):
-  `rotaPermitida(role, path)` é a **fonte única**; o `Shell` (menu e links de topo/rodapé)
-  e o `Router` (guarda: rota proibida => `Redirecionar` para `rotaEntrada(role)`, nunca
-  "página não encontrada" nem conteúdo) passam por ela. Helpers: `ehEditor`,
-  `podeEscreverCS`, `podeMexerEstrutura`, `papelEfetivo`, `navParaRole`, `rotuloRole`, `mensagemErroLogin`. Papel desconhecido
-  não ganha privilégio (só `#/perfil`). **Não** compare `me.role !== "leitor"`: use
-  `ehEditor(role)` (Base, Agenda, Farol, Ferramentas...) ou `podeEscreverCS(role)` (telas de CS).
-  Item novo no grupo `cs` do `NAV` já fica liberado para o CS; item novo em outro grupo
-  fica bloqueado para ele automaticamente.
-- **Teste dos helpers**: `node scripts/teste-permissoes.js` (extrai o bloco do `app.js`;
-  rode antes de mexer em `NAV`/papéis). Sem Node na máquina: rode no console do preview
-  (`fetch` do script + `new Function(...)(module)` e `module.exports.executar(textoDoAppJs)`).
-- **Camada de banco (a barreira real)** — SQL em `scripts/migrations/`. A migration
-  `20261009_papel_cs_helpers_e_rls.sql` foi **aplicada em 16/10/2026** (nome no Supabase:
-  `papel_cs_helpers_e_rls`; reverter com `rollback_papel_cs.sql`). O papel `cs` NÃO entra em `app.is_editor()`.
-  Helpers `app.is_cs()`, `app.is_cs_or_editor()` (cs/editor/admin, inclui ADM limitado) e `app.cs_section_id()`.
-  Tabelas do CS (escrita para cs/editor/admin): `livros_envios`, `faq_interacoes` (cs só na seção `cs-suporte`),
-  `cs_diagnosticos`, `cs_metas` (+ RPCs de DESFAZER `os_restaurar_cs_metas`/`os_restaurar_diagnostico`);
-  só leitura para cs: `cs_mentorados`, `cs_teste_vac`, `pesquisa_avatar`, `chat_widget_logs`,
-  `sync_status` (só `metas-planilha`/`mentorados-planilha`/`teste-vac-planilha`), `automacao_estado`,
-  o próprio `profiles` e a seção `cs-suporte` da Base (`kb_sections`/`kb_documents`/`kb_document_versions`,
-  alimenta o FAQ; storage `kb-documents` fechado para cs). As demais tabelas
-  têm `select` `to authenticated using (not app.is_cs())`; `kb_activity_log` insert também exclui cs.
-  Desde esta migration o **anon não lê nenhuma tabela do OS** (antes lia `livros_envios`, `ai_usage_log` etc.).
-  Tela/tabela nova do CS: escrita via `app.is_cs_or_editor()`; tabela de outra área: `not app.is_cs()` no select.
-  Teste: `scripts/migrations/teste_rls_cs.sql` (cs, editor, admin, leitor, ADM limitado e anon; rollback).
-  Lacuna conhecida: a Edge Function `ai` (ação `ask`) aceita qualquer `secao_slug` e o modo geral para
-  qualquer logado — para o cs quem limita é só o RLS acima (consultas com o JWT do usuário); e a `sync`
-  aceita qualquer logado em todas as ops (roda com service_role).
-- **Edge Functions e papel**: `admin-users` (só admin pleno; aceita leitor/editor/admin/cs/adm_limitado;
-  `list` devolve `acesso_limitado`/`precisa_trocar_senha`),
-  `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet`/`teste-vac-sheet` (force) e `planilha`
-  aceitam editor/admin/cs. `ai` e `sync` só exigem usuário logado (ver lacunas no relatório
-  de segurança da tarefa de login).
+- **Acesso por aba** (decisão da Tia, 16/10/2026; SQL em `scripts/migrations/20261016_areas_por_aba.sql`,
+  aplicado como `areas_por_aba_enum` + `areas_por_aba_rls`; reverter com `rollback_areas_por_aba.sql`).
+  Cada usuário é **ADM** (`profiles.role = 'admin'`: vê e altera tudo, inclusive Início, Farol do Lucro, Pedir a IA,
+  Squad, Ferramentas e Administração) ou **equipe** (`role = 'equipe'`) com uma ou mais abas em `profiles.areas`
+  (`text[]`, check `profiles_areas_validas` nos 7 slugs do `NAV`: `bc`, `agenda`, `pedagogico`, `cs`, `comercial`,
+  `financeiro`, `conteudo`). Quem é da equipe vê só as abas dele e "Meu perfil"; dentro de cada aba cadastra, edita e
+  gera. Sem aba: só Meu perfil, com o aviso "Peça ao ADM para liberar suas abas". Ao entrar, cai no 1º item da 1ª aba
+  liberada (ordem do menu). A troca de senha obrigatória continua antes de tudo.
+  **Legados dormentes**: os valores `editor`, `leitor` e `cs` continuam no enum `user_role` (remover valor de enum exige
+  recriar o tipo), mas o check `profiles_role_admin_ou_equipe` só aceita `admin`/`equipe`; o ADM limitado saiu
+  (`acesso_limitado` fica sempre false, check `profiles_acesso_limitado_dormente`). Os helpers antigos foram mantidos
+  só por segurança: `app.is_editor()` e `app.is_editor_estrutura()` = `app.is_admin()`, `app.is_cs_or_editor()` =
+  `app.tem_area('cs')`, `app.is_cs()`/`app.is_adm_limitado()` = false. **Não use os helpers antigos em código novo.**
+  Só o ADM muda papel/abas (trigger `app.protect_profile_role`, que também protege `areas`).
+- **Camada de interface**: bloco `// <permissoes>` em `app.js` (logo após `NAV`): `rotaPermitida(me, path)` é a
+  **fonte única**; o `Shell` (menu e links de topo/rodapé) e o `Router` (guarda: rota proibida => `Redirecionar` para
+  `rotaEntrada(me)`, nunca "página não encontrada" nem conteúdo) passam por ela. Helpers (recebem o `me`, a linha de
+  `profiles`): `ehAdmin`, `areasDe`, `temArea(me, "cs")`, `areaDaRota`, `navPara`, `podeEscreverRota` (botão DESFAZER
+  do topo), `rotuloAcesso`, `normalizarAcesso`, `mensagemErroLogin`. Escrita numa tela = `temArea(me, "<aba da tela>")`;
+  telas só do ADM (Início, Farol, Ferramentas, Squad, Administração) = `ehAdmin(me)`. Excluir documento/seção da Base
+  e criar seção continuam só do ADM. Item novo num grupo do `NAV` já fica liberado para quem tem aquela aba.
+- **Teste dos helpers**: `node scripts/teste-permissoes.js` (extrai o bloco do `app.js`; 2.080 verificações em
+  16/10/2026). Sem Node na máquina: rode no console do preview (`fetch` do script + `new Function("module","require", t)(module)`
+  e `module.exports.executar(textoDoAppJs)`).
+- **Camada de banco (a barreira real)**: `app.tem_area(slug)` (security definer; ADM = todas). Mapa aba → tabelas:
+  - `bc`: `kb_sections` (update; insert/delete só ADM), `kb_documents` e `kb_document_versions` (delete só ADM),
+    `kb_activity_log`, storage `kb-documents` (delete só ADM). Quem tem `cs` lê só a seção `cs-suporte` (FAQ).
+    `profiles`: cada um lê a própria linha; ADM e quem tem `bc` leem todas (responsável/autor dos documentos).
+  - `agenda`: `agenda_eventos`.
+  - `pedagogico`: `aulas_agenda`, `materiais_pedidos`, `slides_pedidos`, `arena_regras` (escrita só `origem='aprendida'`),
+    storage `gerados` (escrita; leitura segue pública).
+  - `cs`: `livros_envios`, `faq_interacoes` (só `secao_slug='cs-suporte'`; ADM todas), `cs_diagnosticos`, `cs_metas`
+    (delete só manual), `cs_mentorados`, `cs_teste_vac`, `chat_widget_logs`, `pesquisa_avatar`, `nivelamento_respostas`
+    (leitura; o insert público do teste continua) e `sync_status` (leitura das chaves `metas-planilha`,
+    `mentorados-planilha`, `teste-vac-planilha`); RPCs `os_restaurar_cs_metas`/`os_restaurar_diagnostico`.
+  - `conteudo`: `conteudo_calendario`, `conteudo_objetivo_resumo`, `conteudo_insights`, `ig_dia`, `ig_perfil`, `ig_post`,
+    `linkedin_posts`; RPC `linkedin_conexao_status`.
+  - `comercial`, `financeiro`: nenhuma tabela ainda.
+  - **Só ADM**: `app_config`, `ai_usage_log`, `farol_config`, `farol_indicadores`, `os_ferramentas`, `os_squad_agentes`,
+    `sync_status` (escrita e demais chaves), `automacao_estado` (escrita; a leitura é de qualquer logado porque as Edge
+    Functions conferem a pausa com o JWT de quem chamou), `profiles` (escrita de outros).
+  O anon não lê nenhuma tabela do OS. **Tabela nova**: `select`/escrita `to authenticated using (app.tem_area('<aba>'))`;
+  transversal/configuração: `app.is_admin()`. Teste: `scripts/migrations/teste_rls_areas.sql` (ADM, `{cs}`,
+  `{cs,pedagogico}`, `{conteudo}`, sem aba e anon; rollback; 420 + 51 verificações em 16/10/2026).
+- **Edge Functions e área** (checagem no servidor, `role === 'admin' || areas.includes(...)`): `admin-users` (só ADM;
+  ações `list`/`create {admin, areas}`/`setAcesso {userId, admin, areas}` (devolve `antes`/`depois` para o DESFAZER;
+  recusa tirar o próprio ADM)/`resetPassword`/`delete`); `planilha`, `diagnostico-drive`, `metas-sheet-sync`,
+  `mentorados-sheet`, `teste-vac-sheet` = `cs` (os crons continuam pelo `x-sync-token`); `ai`: `classify` = `bc`,
+  `ask` com `secao_slug=cs-suporte` = `cs`, com outra seção = `bc`, sem seção (Gerador de conteúdos; Pedir a IA é só do
+  ADM na interface) = `conteudo`, `linkedin_*` = `conteudo` (o guia editorial é lido com service_role depois da
+  checagem), `arena_*` = `pedagogico`, `status` só pede login; `linkedin`: `status`/`auth_url` = `conteudo`,
+  `desconectar` = ADM; `sync` (botões): `envios`/`pesquisas`/`chat-categorias`/`regenerar_resumo_pesquisa` = `cs`,
+  `conteudo-metricas`/`conteudo-insights` = `conteudo`, `aulas-praticas` = `pedagogico`, `drive` = `bc`.
+- **Contas atuais (16/10/2026)**: contato@ e marcela@ = ADM; suporte@, tutores@, tutores1@ = `{cs}`;
+  `sync@os.tiadoingles.com.br` (conta de serviço do `scripts/sync_skills.py`, que só lê `kb_sections` e lê/grava
+  `kb_documents`/`kb_document_versions`) = `{bc}`; `teste@os.tiadoingles.com.br` (editor legado do modo aberto) = as 7
+  abas, aguardando a Tia decidir se exclui.
 - **LinkedIn da Tia** (`#/conteudo/linkedin`, `LinkedinPage`/`LinkedinCard`): fila de posts em
-  `public.linkedin_posts` (RLS: select `not app.is_cs()`, escrita `app.is_editor()`; SQL em
+  `public.linkedin_posts` (RLS: aba `conteudo` via `app.tem_area`; SQL em
   `scripts/migrations/20261014_linkedin_*.sql`). Ações da Edge Function `ai` (arquivo
   `linkedin.ts` dentro da função): `linkedin_semana` (gera os rascunhos da grade a partir do
   guia `kb_documents.chave_externa='linkedin:guia-editorial'` + `conteudo_insights` + últimos
   posts; só preenche horários vazios) e `linkedin_reescrever` (devolve texto, não grava); as
-  duas exigem editor/admin. Formatos história/case/depoimento (`formato` contendo "história",
+  duas exigem a aba Conteúdo. Formatos história/case/depoimento (`formato` contendo "história",
   "case" ou "depoimento") seguem a estrutura de roteiro do guia (v2, seção 4.1) e vão de 1.500 a
   2.500 caracteres; os demais, 900 a 1.500 — regra duplicada em `ehFormatoRoteiro`/`faixaTamanho`
   (`linkedin.ts`) e `liFaixaTamanho` (`app.js`), mantenha as duas iguais. Horários em America/Sao_Paulo (UTC-03:00).
@@ -108,11 +113,11 @@ como backend.
   Post `aprovado` é publicado sozinho no perfil pessoal quando chega o `agendado_para` (até 24 h de atraso;
   mais que isso fica parado e a aba pede nova data). Edge Function `linkedin` (`verify_jwt=false`, valida
   por op): `GET /functions/v1/linkedin/callback` (redirect do OAuth, state de uso único 10 min),
-  `auth_url`/`status` (editor/admin), `desconectar` (admin), `publicar_pendentes` (header `x-cron-token`,
+  `auth_url`/`status` (aba Conteúdo), `desconectar` (ADM), `publicar_pendentes` (header `x-cron-token`,
   cron `linkedin-publicar` */5 min; o token fica só em `app.linkedin_config`, nunca no repo). Segredos
   `LINKEDIN_CLIENT_ID`/`LINKEDIN_CLIENT_SECRET`; sem eles tudo degrada com "LinkedIn não configurado".
   Token OAuth em `app.linkedin_conexao` (schema não exposto, sem grant, RLS sem política), lido só pelas
-  RPCs `linkedin_svc_*` (execute só service_role); o front usa `linkedin_conexao_status()` (editor/admin,
+  RPCs `linkedin_svc_*` (execute só service_role); o front usa `linkedin_conexao_status()` (aba Conteúdo,
   só nome/expires_at). Status `publicando` = trava atômica (`linkedin_svc_reservar`, lote 3); preso há
   +15 min vira `erro` (nunca republica sozinho). Trigger `app.linkedin_posts_guarda` impede o front de
   mudar status de post publicando/publicado (inclusive via DESFAZER), gravar `linkedin_urn`/`publicado_em`
@@ -131,7 +136,7 @@ como backend.
   pdfmake no navegador, `montarDocArena`/`gerarPdfArena`, upload em `gerados/arenas/<data>-<tema>-<id8>/` com a
   sessão de quem aprovou + .zip via JSZip) → `pronto` → modal "ajustes viram regras?" (`arena_regras_sugerir` →
   `public.arena_regras`, origem `aprendida`, `pendente_skill=true`). `pendente`/`processando` são legado.
-  Ações `arena_*` (arquivo `arena.ts` da função `ai`): exigem editor/admin, respeitam a pausa (`automacao_estado`),
+  Ações `arena_*` (arquivo `arena.ts` da função `ai`): exigem a aba Pedagógico, respeitam a pausa (`automacao_estado`),
   registram custo (`ai:arena_gerar|ajustar|regras`), usam structured outputs (`output_config.format`) + validação
   (`validarMaterial`) e regeram 1 vez se vier fora das regras. Prompt: regras ativas de `arena_regras` (as `base`
   são a semente aprovada em 16/10; só mudam por migration — RLS bloqueia escrita nelas), MYPA, resumo do método,
@@ -151,10 +156,9 @@ como backend.
 - **Página**: `useState(null)` = carregando, `useEffect` chama o fetch,
   `notify(errMsg(e), "err")` no catch. Veja `FerramentasPage`/
   `fetchFerramentas` como referência de estilo.
-- **RLS**: padrão do OS é `select` para `authenticated` (nunca para o role público/anon)
-  excluindo o papel cs (`not app.is_cs()`) / `write=app.is_editor()` — desvie
-  disso só com razão explícita (ex. dado financeiro sensível), nunca por
-  omissão. Tabelas de CS usam `app.is_cs_or_editor()` na escrita.
+- **RLS**: toda tabela do OS tem `select`/escrita `to authenticated` com `app.tem_area('<aba>')` (a aba da tela que
+  usa a tabela) ou `app.is_admin()` (configuração/transversal). Nunca para o role público/anon. Os helpers antigos
+  (`is_editor`, `is_cs`, `is_cs_or_editor`, `is_editor_estrutura`) estão dormentes: não use.
 - **Rota**: `#/<grupo>/<slug>` pros itens de `NAV`; grupos sem sub-item (ex.
   Base de Conhecimento) usam `#/<grupo>` direto. Links de topo/rodapé (Início,
   Squad, Farol do Lucro, Pedir a IA, Ferramentas, Administração, Meu perfil)
@@ -165,10 +169,10 @@ como backend.
   `select("*")` tirado antes) ou `desfazerExclusao` (reinsere com o mesmo id).
   Aparece o aviso "Alteração salva · DESFAZER" (10 s) e o botão DESFAZER no topo
   da aba (renderizado pelo `Shell` via `escopoDesfazer(route)`; pilha de até 20
-  por aba, só na memória da sessão, escondido para leitor). A tela recarrega com
+  por aba, só na memória da sessão, só para quem pode gravar naquela rota: `podeEscreverRota`). A tela recarrega com
   `useAoDesfazer(escopo, fn)`. Conflito (registro mudou depois) pede confirmação.
   Tabela com campos protegidos por trigger (ex. `cs_metas`, `cs_diagnosticos`)
-  restaura por RPC `security definer` restrita a editor (`os_restaurar_cs_metas`,
+  restaura por RPC `security definer` restrita à aba CS (`os_restaurar_cs_metas`,
   `os_restaurar_diagnostico`) que usam a versão guardada pelo próprio banco
   (`os_desfazer_snapshots`, limpa após 3 dias), nunca afrouxando RLS nem
   confiando no JSON do cliente. Tela nova com escrita:
