@@ -120,6 +120,29 @@ como backend.
   hashtags viram `{hashtag|\#|tag}`); `LinkedIn-Version` na constante `LINKEDIN_VERSION` (renovar antes
   do sunset, ~1 ano por versão). Aviso na Início quando o token expira em ≤7 dias.
 
+- **Gerador de Materiais das Arenas** (`#/pedagogico/gerador-materiais`, `GeradorMateriaisPage`/`FormArena`/
+  `PedidoArena`/`RegrasArena`; SQL em `scripts/migrations/20261016_arenas_previa_regras.sql`, teste de RLS em
+  `teste_rls_arena_regras.sql`). Desde 16/10/2026 gera **sob demanda dentro do OS** (a tarefa local
+  `gerar-materiais-os` está desativada; não há fila). Fluxo e `materiais_pedidos.status`: formulário →
+  `gerando_previa` (o front cria `conteudo` com um placeholder `{nivel,n,tema}` por material e chama a ação
+  `arena_gerar` da Edge Function `ai` **uma vez por material**, até 3 em paralelo, `ARENA_PARALELO`; pode repetir
+  só o que falhou) → `previa` (cartões com todo o conteúdo + indicadores `checarMaterial`) → ajustes livres
+  (`arena_ajustar`, histórico em `materiais_pedidos.ajustes`, DESFAZER) → "Aprovar e gerar PDFs" (`gerando_pdf`:
+  pdfmake no navegador, `montarDocArena`/`gerarPdfArena`, upload em `gerados/arenas/<data>-<tema>-<id8>/` com a
+  sessão de quem aprovou + .zip via JSZip) → `pronto` → modal "ajustes viram regras?" (`arena_regras_sugerir` →
+  `public.arena_regras`, origem `aprendida`, `pendente_skill=true`). `pendente`/`processando` são legado.
+  Ações `arena_*` (arquivo `arena.ts` da função `ai`): exigem editor/admin, respeitam a pausa (`automacao_estado`),
+  registram custo (`ai:arena_gerar|ajustar|regras`), usam structured outputs (`output_config.format`) + validação
+  (`validarMaterial`) e regeram 1 vez se vier fora das regras. Prompt: regras ativas de `arena_regras` (as `base`
+  são a semente aprovada em 16/10; só mudam por migration — RLS bloqueia escrita nelas), MYPA, resumo do método,
+  exemplos aprovados e a `variacao` dos últimos 10 pedidos prontos. `ehSimNao`/`itemNoTexto` existem em
+  `arena.ts` e em `app.js` (`arenaSimNao`/`arenaItemNoTexto`): mantenha iguais. Modo de teste sem senha: header
+  `x-arena-teste` igual a `app_config.arena_teste_token` (só existe enquanto essa linha existir; apague após testar).
+  PDF: A4, timbrado `assets/timbrado-arenas.jpg` de fundo, margens 2,2/2,5/3,8/3,2 cm, tamanhos da skill; fonte
+  **Source Sans 3** (OFL, jsDelivr/@fontsource) porque a licença da Aller (Dalton Maag) não permite hospedá-la no
+  repo público; reserva Montserrat. Se uma seção não cabe numa página, cai para leitura 12 / perguntas compactas /
+  Glossary 22 → 20 (avisa na tela e no `log`).
+
 ## Convenções
 
 - **Fetch**: uma função `async function fetchX() { const { data, error } =

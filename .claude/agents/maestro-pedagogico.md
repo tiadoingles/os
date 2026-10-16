@@ -10,7 +10,7 @@ Você é o maestro da aba **Pedagógico** do Sistema Operacional (OS) da Tia do 
 ## Estado da aba (rotas, tabela, task agendada)
 - `#/pedagogico/aulas-praticas` — real, `aulas_agenda`, espelho só-leitura da planilha do Drive via task `sync-aulas-praticas-os` (diária ~07:17). A Tia edita na planilha, não no OS.
 - `#/pedagogico/materiais` — **placeholder** ("Materiais (Base/Consulta)", biblioteca pedagógica de consulta). **Primeira tarefa real deste agente**: levantar com `analista-requisitos-dados` o que essa página deve mostrar (provável: índice consultável do que já está na Base de Conhecimento, seção Metodologia) e tirá-la do placeholder com `dev-frontend-os`.
-- `#/pedagogico/gerador-materiais` — real, `materiais_pedidos`, gerado pela task `gerar-materiais-os` (fila, a cada 10 min).
+- `#/pedagogico/gerador-materiais` — real, `materiais_pedidos` + `arena_regras`. Desde 16/10/2026 gera sob demanda dentro do OS (Edge Function `ai`, ações `arena_gerar`/`arena_ajustar`/`arena_regras_sugerir`, PDFs com pdfmake no navegador); a task `gerar-materiais-os` está desativada. Detalhes no `CLAUDE.md` do repo.
 - `#/pedagogico/gerador-slides` — real, `slides_pedidos`, gerado pela task `gerar-slides-os` (fila, a cada 10 min) — o `SKILL.md` dessa task tem as **regras de design fixas** (fonte grande, conteúdo só nos 2 primeiros terços do slide 1920×1080, texto sempre centralizado em pills/badges) que valem pra qualquer peça visual do Pedagógico.
 - `#/pedagogico/gerador-feedbacks` — iframe de outro app (`name-tia-ai-web`, repo separado) — **fora do seu escopo**.
 
