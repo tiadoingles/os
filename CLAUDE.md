@@ -72,16 +72,23 @@ como backend.
 - **Teste dos helpers**: `node scripts/teste-permissoes.js` (extrai o bloco do `app.js`;
   rode antes de mexer em `NAV`/papéis). Sem Node na máquina: rode no console do preview
   (`fetch` do script + `new Function(...)(module)` e `module.exports.executar(textoDoAppJs)`).
-- **Camada de banco (a barreira real)** — SQL em `scripts/migrations/` (a migration
-  `20261009_papel_cs_helpers_e_rls.sql` só vale depois de aplicada no Supabase; o valor
-  `cs` do enum já foi aplicado; conferir `select * from pg_policies` antes de confiar): o papel `cs` NÃO entra em `app.is_editor()`.
-  Helpers `app.is_cs()`, `app.is_cs_or_editor()` e `app.cs_section_id()`. Tabelas do CS
-  (escrita para cs/editor/admin): `livros_envios`, `faq_interacoes` (só seção `cs-suporte`),
-  `cs_diagnosticos`, `cs_metas`; leitura para cs: também `cs_mentorados`, `cs_teste_vac`, `pesquisa_avatar`,
-  `chat_widget_logs`, `sync_status` (só `metas-planilha`/`mentorados-planilha`/`teste-vac-planilha`),
-  `automacao_estado` e a seção `cs-suporte` da Base (alimenta o FAQ). As demais tabelas
-  têm `select` `to authenticated using (not app.is_cs())`. Tela/tabela nova do CS: dar
-  escrita via `app.is_cs_or_editor()`; tabela de outra área: `not app.is_cs()` no select.
+- **Camada de banco (a barreira real)** — SQL em `scripts/migrations/`. A migration
+  `20261009_papel_cs_helpers_e_rls.sql` foi **aplicada em 16/10/2026** (nome no Supabase:
+  `papel_cs_helpers_e_rls`; reverter com `rollback_papel_cs.sql`). O papel `cs` NÃO entra em `app.is_editor()`.
+  Helpers `app.is_cs()`, `app.is_cs_or_editor()` (cs/editor/admin, inclui ADM limitado) e `app.cs_section_id()`.
+  Tabelas do CS (escrita para cs/editor/admin): `livros_envios`, `faq_interacoes` (cs só na seção `cs-suporte`),
+  `cs_diagnosticos`, `cs_metas` (+ RPCs de DESFAZER `os_restaurar_cs_metas`/`os_restaurar_diagnostico`);
+  só leitura para cs: `cs_mentorados`, `cs_teste_vac`, `pesquisa_avatar`, `chat_widget_logs`,
+  `sync_status` (só `metas-planilha`/`mentorados-planilha`/`teste-vac-planilha`), `automacao_estado`,
+  o próprio `profiles` e a seção `cs-suporte` da Base (`kb_sections`/`kb_documents`/`kb_document_versions`,
+  alimenta o FAQ; storage `kb-documents` fechado para cs). As demais tabelas
+  têm `select` `to authenticated using (not app.is_cs())`; `kb_activity_log` insert também exclui cs.
+  Desde esta migration o **anon não lê nenhuma tabela do OS** (antes lia `livros_envios`, `ai_usage_log` etc.).
+  Tela/tabela nova do CS: escrita via `app.is_cs_or_editor()`; tabela de outra área: `not app.is_cs()` no select.
+  Teste: `scripts/migrations/teste_rls_cs.sql` (cs, editor, admin, leitor, ADM limitado e anon; rollback).
+  Lacuna conhecida: a Edge Function `ai` (ação `ask`) aceita qualquer `secao_slug` e o modo geral para
+  qualquer logado — para o cs quem limita é só o RLS acima (consultas com o JWT do usuário); e a `sync`
+  aceita qualquer logado em todas as ops (roda com service_role).
 - **Edge Functions e papel**: `admin-users` (só admin pleno; aceita leitor/editor/admin/cs/adm_limitado;
   `list` devolve `acesso_limitado`/`precisa_trocar_senha`),
   `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet`/`teste-vac-sheet` (force) e `planilha`

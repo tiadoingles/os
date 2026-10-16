@@ -5,6 +5,7 @@
 -- depois, o preludio + PARTE 2 (cada pedido termina com o bloco "RESULTADOS", que forca o rollback).
 -- Depois conferir que nada persistiu: select count(*) from auth.users where email like 'zz-%'; => 0
 -- e select count(*) from public.livros_envios where nome like 'ZZ%'; => 0.
+-- Papeis simulados: cs, editor, admin, leitor, limitado (editor + acesso_limitado = ADM limitado) e anon.
 -- Observacao: o fluxo do sync@ (editor) e simulado com um editor ficticio; a conta real nao e tocada.
 -- ===== fixtures e helper de teste (tudo some no rollback) =====
 insert into auth.users (instance_id,id,aud,role,email,email_confirmed_at,created_at,updated_at,raw_app_meta_data,raw_user_meta_data)
@@ -13,10 +14,12 @@ from (values
  ('aaaaaaaa-0000-0000-0000-0000000000c5'::uuid,'zz-cs@invalid.test'),
  ('aaaaaaaa-0000-0000-0000-0000000000e1'::uuid,'zz-editor@invalid.test'),
  ('aaaaaaaa-0000-0000-0000-0000000000a1'::uuid,'zz-admin@invalid.test'),
- ('aaaaaaaa-0000-0000-0000-0000000000b1'::uuid,'zz-leitor@invalid.test')) v(id,e);
+ ('aaaaaaaa-0000-0000-0000-0000000000b1'::uuid,'zz-leitor@invalid.test'),
+ ('aaaaaaaa-0000-0000-0000-0000000000f1'::uuid,'zz-limitado@invalid.test')) v(id,e);
 update public.profiles set role='cs' where id='aaaaaaaa-0000-0000-0000-0000000000c5';
 update public.profiles set role='editor' where id='aaaaaaaa-0000-0000-0000-0000000000e1';
 update public.profiles set role='admin' where id='aaaaaaaa-0000-0000-0000-0000000000a1';
+update public.profiles set role='editor', acesso_limitado=true where id='aaaaaaaa-0000-0000-0000-0000000000f1';
 
 create table public.t_res(n serial, caso text, resultado text);
 grant all on public.t_res to authenticated, anon;
@@ -42,9 +45,9 @@ end $f$;
 do $t$
 declare t text; u record;
 begin
-  for t in select unnest(array['agenda_eventos','ai_usage_log','app_config','aulas_agenda','automacao_estado','chat_widget_logs','conteudo_calendario','conteudo_insights','conteudo_objetivo_resumo','cs_diagnosticos','cs_mentorados','cs_metas','faq_interacoes','farol_config','farol_indicadores','ig_dia','ig_perfil','ig_post','kb_activity_log','kb_document_versions','kb_documents','kb_sections','livros_envios','materiais_pedidos','nivelamento_respostas','os_desfazer_snapshots','os_ferramentas','os_squad_agentes','pesquisa_avatar','profiles','slides_pedidos','sync_status']) loop
+  for t in select unnest(array['agenda_eventos','ai_usage_log','app_config','aulas_agenda','automacao_estado','chat_widget_logs','conteudo_calendario','conteudo_insights','conteudo_objetivo_resumo','cs_diagnosticos','cs_mentorados','cs_metas','cs_teste_vac','faq_interacoes','farol_config','farol_indicadores','ig_dia','ig_perfil','ig_post','kb_activity_log','kb_document_versions','kb_documents','kb_sections','linkedin_posts','livros_envios','materiais_pedidos','nivelamento_respostas','os_desfazer_snapshots','os_ferramentas','os_squad_agentes','pesquisa_avatar','profiles','slides_pedidos','sync_status']) loop
     execute format('insert into public.t_res(caso,resultado) select %L, count(*)::text from public.%I', t||' | total', t);
-    for u in select * from (values ('cs','aaaaaaaa-0000-0000-0000-0000000000c5'::uuid),('editor','aaaaaaaa-0000-0000-0000-0000000000e1'::uuid),('admin','aaaaaaaa-0000-0000-0000-0000000000a1'::uuid),('leitor','aaaaaaaa-0000-0000-0000-0000000000b1'::uuid),('anon',null::uuid)) x(nm,id) loop
+    for u in select * from (values ('cs','aaaaaaaa-0000-0000-0000-0000000000c5'::uuid),('editor','aaaaaaaa-0000-0000-0000-0000000000e1'::uuid),('admin','aaaaaaaa-0000-0000-0000-0000000000a1'::uuid),('leitor','aaaaaaaa-0000-0000-0000-0000000000b1'::uuid),('limitado','aaaaaaaa-0000-0000-0000-0000000000f1'::uuid),('anon',null::uuid)) x(nm,id) loop
       perform public.t_run(u.id, t||' | '||u.nm, format('select count(*) from public.%I', t), 'val');
     end loop;
   end loop;
@@ -53,7 +56,13 @@ begin
   perform public.t_run('aaaaaaaa-0000-0000-0000-0000000000c5','storage kb-documents | cs',$q$select count(*) from storage.objects where bucket_id='kb-documents'$q$,'val');
   perform public.t_run('aaaaaaaa-0000-0000-0000-0000000000e1','storage kb-documents | editor',$q$select count(*) from storage.objects where bucket_id='kb-documents'$q$,'val');
   perform public.t_run('aaaaaaaa-0000-0000-0000-0000000000c5','kb_documents fora cs-suporte | cs',$q$select count(*) from public.kb_documents d join public.kb_sections s on s.id=d.section_id where s.slug<>'cs-suporte'$q$,'val');
-  perform public.t_run('aaaaaaaa-0000-0000-0000-0000000000c5','sync_status chaves fora do cs | cs',$q$select count(*) from public.sync_status where chave not in ('metas-planilha','mentorados-planilha')$q$,'val');
+  perform public.t_run('aaaaaaaa-0000-0000-0000-0000000000c5','sync_status chaves fora do cs | cs',$q$select count(*) from public.sync_status where chave not in ('metas-planilha','mentorados-planilha','teste-vac-planilha')$q$,'val');
+  perform public.t_run('aaaaaaaa-0000-0000-0000-0000000000c5','sync_status chaves do cs | cs',$q$select count(*) from public.sync_status where chave in ('metas-planilha','mentorados-planilha','teste-vac-planilha')$q$,'val');
+  insert into public.t_res(caso,resultado) select 'kb_document_versions da cs-suporte | total', count(*)::text from public.kb_document_versions v join public.kb_documents d on d.id=v.document_id join public.kb_sections s on s.id=d.section_id where s.slug='cs-suporte';
+  insert into public.t_res(caso,resultado) select 'kb_documents da cs-suporte nao arquivados | total', count(*)::text from public.kb_documents d join public.kb_sections s on s.id=d.section_id where s.slug='cs-suporte' and d.status<>'arquivado';
+  insert into public.t_res(caso,resultado) select 'faq_interacoes cs-suporte | total', count(*)::text from public.faq_interacoes where secao_slug='cs-suporte';
+  perform public.t_run('aaaaaaaa-0000-0000-0000-0000000000c5','kb_document_versions fora cs-suporte | cs',$q$select count(*) from public.kb_document_versions v join public.kb_documents d on d.id=v.document_id join public.kb_sections s on s.id=d.section_id where s.slug<>'cs-suporte'$q$,'val');
+  perform public.t_run('aaaaaaaa-0000-0000-0000-0000000000c5','faq_interacoes fora cs-suporte | cs',$q$select count(*) from public.faq_interacoes where secao_slug<>'cs-suporte'$q$,'val');
   perform public.t_run('aaaaaaaa-0000-0000-0000-0000000000c5','profiles de outros | cs',$q$select count(*) from public.profiles where id<>'aaaaaaaa-0000-0000-0000-0000000000c5'$q$,'val');
 end $t$;
 
@@ -65,6 +74,7 @@ do $t$
 declare
   cs uuid := 'aaaaaaaa-0000-0000-0000-0000000000c5'; ed uuid := 'aaaaaaaa-0000-0000-0000-0000000000e1';
   ad uuid := 'aaaaaaaa-0000-0000-0000-0000000000a1'; le uuid := 'aaaaaaaa-0000-0000-0000-0000000000b1';
+  li uuid := 'aaaaaaaa-0000-0000-0000-0000000000f1';
   sec uuid; ts text;
 begin
   select id into sec from public.kb_sections where slug = 'cs-suporte';
@@ -106,6 +116,11 @@ begin
   perform public.t_run(cs,'cs update app_config (NEGADO)',$q$update public.app_config set chave=chave$q$);
   perform public.t_run(cs,'cs update cs_mentorados (NEGADO)',$q$update public.cs_mentorados set nome=nome$q$);
   perform public.t_run(cs,'cs call cs_mentorados_substituir (NEGADO)',$q$select public.cs_mentorados_substituir('[]'::jsonb)$q$,'val');
+  perform public.t_run(cs,'cs insert kb_activity_log (NEGADO)',format($q$insert into public.kb_activity_log(actor_id,action) values (%L,'zz')$q$, cs));
+  perform public.t_run(cs,'cs insert linkedin_posts (NEGADO)',$q$insert into public.linkedin_posts(pilar,texto) values (1,'zz')$q$);
+  perform public.t_run(cs,'cs update cs_teste_vac (NEGADO)',$q$update public.cs_teste_vac set nome=nome$q$);
+  perform public.t_run(cs,'cs call cs_teste_vac_substituir (NEGADO)',$q$select public.cs_teste_vac_substituir('[]'::jsonb)$q$,'val');
+  perform public.t_run(cs,'cs rpc linkedin_conexao_status (NEGADO)',$q$select count(*) from public.linkedin_conexao_status()$q$,'val');
   perform public.t_run(cs,'cs insert storage kb-documents (NEGADO)',$q$insert into storage.objects(bucket_id,name) values ('kb-documents','zz.txt')$q$);
   -- Papel: ninguem vira admin por brecha
   perform public.t_run(cs,'cs update profiles.role=admin em si (NEGADO)',format($q$update public.profiles set role='admin' where id=%L$q$, cs));
@@ -114,7 +129,6 @@ begin
   perform public.t_run(le,'leitor update profiles.role=admin em si (NEGADO)',format($q$update public.profiles set role='admin' where id=%L$q$, le));
   perform public.t_run(ed,'editor update profiles.role=admin em si (NEGADO)',format($q$update public.profiles set role='admin' where id=%L$q$, ed));
   perform public.t_run(cs,'cs insert profiles (NEGADO)',$q$insert into public.profiles(id,email,role) values (gen_random_uuid(),'zz@x','admin')$q$);
-  perform public.t_run(ad,'admin update profiles.role de leitor para cs (permitido)',format($q$update public.profiles set role='cs' where id=%L$q$, le));
   -- Editor / admin / leitor continuam como antes
   perform public.t_run(ed,'editor insert agenda_eventos',$q$insert into public.agenda_eventos(data,titulo) values (current_date,'zz')$q$);
   perform public.t_run(ed,'editor insert livros_envios',$q$insert into public.livros_envios(nome) values ('ZZ')$q$);
@@ -124,10 +138,25 @@ begin
   perform public.t_run(ed,'editor update automacao_estado',$q$update public.automacao_estado set pausado=pausado$q$);
   perform public.t_run(ed,'editor select app_config (NEGADO: 0)',$q$select count(*) from public.app_config$q$,'val');
   perform public.t_run(ad,'admin select app_config',$q$select count(*) from public.app_config$q$,'val');
+  perform public.t_run(ed,'editor insert kb_activity_log (permitido)',format($q$insert into public.kb_activity_log(actor_id,action) values (%L,'zz')$q$, ed));
+  perform public.t_run(ed,'editor app.is_cs_or_editor() (sim)',$q$select app.is_cs_or_editor()::int$q$,'val');
+  perform public.t_run(li,'limitado app.is_cs_or_editor() (sim)',$q$select app.is_cs_or_editor()::int$q$,'val');
+  perform public.t_run(li,'limitado app.is_editor_estrutura() (nao)',$q$select app.is_editor_estrutura()::int$q$,'val');
+  perform public.t_run(li,'limitado insert livros_envios (permitido)',$q$insert into public.livros_envios(nome) values ('ZZ')$q$);
+  perform public.t_run(li,'limitado insert cs_metas manual (permitido)',$q$insert into public.cs_metas(origem,mentorado_nome,descricao) values ('manual','ZZ','zz')$q$);
+  perform public.t_run(li,'limitado insert agenda_eventos (permitido)',$q$insert into public.agenda_eventos(data,titulo) values (current_date,'zz')$q$);
+  perform public.t_run(li,'limitado update kb_sections (NEGADO: 0)',$q$update public.kb_sections set nome=nome$q$);
+  perform public.t_run(li,'limitado insert os_ferramentas (NEGADO)',$q$insert into public.os_ferramentas(slug,nome) values ('zz2','zz')$q$);
+  perform public.t_run(cs,'cs app.is_cs_or_editor() (sim)',$q$select app.is_cs_or_editor()::int$q$,'val');
+  perform public.t_run(cs,'cs app.is_editor() (nao)',$q$select app.is_editor()::int$q$,'val');
+  perform public.t_run(le,'leitor app.is_cs_or_editor() (nao)',$q$select app.is_cs_or_editor()::int$q$,'val');
+  perform public.t_run(le,'leitor insert cs_metas (NEGADO)',$q$insert into public.cs_metas(origem,mentorado_nome,descricao) values ('manual','ZZ','zz')$q$);
   perform public.t_run(le,'leitor insert livros_envios (NEGADO)',$q$insert into public.livros_envios(nome) values ('ZZ')$q$);
   perform public.t_run(le,'leitor insert agenda_eventos (NEGADO)',$q$insert into public.agenda_eventos(data,titulo) values (current_date,'zz')$q$);
   perform public.t_run(null,'anon select livros_envios (NEGADO)',$q$select count(*) from public.livros_envios$q$,'val');
   perform public.t_run(null,'anon insert livros_envios (NEGADO)',$q$insert into public.livros_envios(nome) values ('ZZ')$q$);
+  -- por ultimo: muda o papel do leitor ficticio (os casos de leitor acima ja rodaram)
+  perform public.t_run(ad,'admin update profiles.role de leitor para cs (permitido)',format($q$update public.profiles set role='cs' where id=%L$q$, le));
 end $t$;
 
 do $r$ begin raise exception E'RESULTADOS\n%', (select string_agg(caso||' => '||resultado, E'\n' order by n) from public.t_res); end $r$;

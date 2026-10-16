@@ -39,5 +39,13 @@ drop policy if exists documents_select on public.kb_documents;
 create policy documents_select on public.kb_documents for select to authenticated using (status <> 'arquivado'::doc_status or app.is_editor());
 drop policy if exists kb_storage_select_auth on storage.objects;
 create policy kb_storage_select_auth on storage.objects for select to authenticated using (bucket_id = 'kb-documents');
--- As funcoes os_restaurar_cs_metas / os_restaurar_diagnostico: trocar app.is_cs_or_editor() por app.is_editor() na 1a linha do corpo.
+drop policy if exists activity_insert_self on public.kb_activity_log;
+create policy activity_insert_self on public.kb_activity_log for insert to authenticated with check (actor_id = auth.uid());
+do $m$
+declare f text;
+begin
+  foreach f in array array['os_restaurar_cs_metas(jsonb)', 'os_restaurar_diagnostico(uuid)'] loop
+    execute replace(pg_get_functiondef(('public.' || f)::regprocedure), 'app.is_cs_or_editor()', 'app.is_editor()');
+  end loop;
+end $m$;
 -- Helpers app.is_cs(), app.is_cs_or_editor(), app.cs_section_id() podem ficar (inofensivos).
