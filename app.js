@@ -134,19 +134,39 @@ const NAV = [
 // guarda do Router passam todos por rotaPermitida(). Este bloco é puro (sem DOM nem
 // imports) para poder ser testado fora do navegador: scripts/teste-permissoes.js.
 //   admin  (ADM)  : acesso a tudo, inclusive Administração.
+//   adm_limitado (ADM limitado): usa tudo como editor, sem Administração e sem mexer na
+//                  estrutura (seções da Base, registro de Ferramentas, squad) nem excluir
+//                  documentos/seções. No banco é role "editor" + profiles.acesso_limitado = true;
+//                  papelEfetivo() converte ao carregar o perfil.
 //   cs     (CS)   : somente #/cs/<item do grupo CS / Suporte> e #/perfil.
 //   editor / leitor: tudo, menos Administração (leitor sem escrita).
 //   papel desconhecido/ausente: nenhum privilégio (só #/perfil).
 // A RLS do banco é a barreira real; isto é a camada de interface.
 // ---------------------------------------------------------------------------
-const ROLE_LABEL = { leitor: "Leitor", editor: "Editor", admin: "ADM", cs: "CS" };
-const ROLES_CONHECIDOS = ["leitor", "editor", "admin", "cs"];
+const ROLE_LABEL = { leitor: "Leitor", editor: "Editor", admin: "ADM", adm_limitado: "ADM limitado", cs: "CS" };
+const ROLES_CONHECIDOS = ["leitor", "editor", "admin", "adm_limitado", "cs"];
+// Papéis que o ADM escolhe na Administração (ordem e descrição curta do formulário).
+const PAPEIS_ADMIN = [
+  ["admin", "ADM", "Acesso a tudo, inclusive usuários, papéis e senhas."],
+  ["adm_limitado", "ADM limitado", "Usa todas as abas no dia a dia; não acessa a Administração, não muda a estrutura do sistema e não exclui documentos ou seções."],
+  ["cs", "CS", "Somente a aba CS / Suporte."],
+  ["editor", "Editor", "Cria e edita conteúdo (papel legado)."],
+  ["leitor", "Leitor", "Só consulta, sem gravar (papel legado)."],
+];
 const SLUGS_CS = new Set(((NAV.find((g) => g.id === "cs") || {}).itens || []).map((i) => i.slug));
 
 function roleValido(role) { return ROLES_CONHECIDOS.includes(role) ? role : null; }
 function rotuloRole(role) { const r = roleValido(role); return r ? ROLE_LABEL[r] : "Sem papel"; }
 // Quem cria/edita Base de Conhecimento, Agenda, Farol, Ferramentas etc.
-function ehEditor(role) { return role === "editor" || role === "admin"; }
+function ehEditor(role) { return role === "editor" || role === "admin" || role === "adm_limitado"; }
+// Quem mexe na estrutura do sistema (seções da Base, registro de Ferramentas, squad): não o ADM limitado.
+function podeMexerEstrutura(role) { return role === "editor" || role === "admin"; }
+// Papel usado no front a partir da linha de profiles (o ADM limitado é editor + acesso_limitado).
+function papelEfetivo(perfil) {
+  if (!perfil) return null;
+  if (perfil.acesso_limitado) return perfil.role === "editor" ? "adm_limitado" : null; // combinação inválida: sem privilégio
+  return perfil.role;
+}
 // Quem grava nas telas de CS / Suporte (FAQ, Envios, Diagnóstico, Metas...).
 function podeEscreverCS(role) { return role === "cs" || ehEditor(role); }
 
@@ -187,6 +207,36 @@ function mensagemErroLogin(e) {
   if (m.includes("banned") || m.includes("user is banned")) return "Esta conta está desativada. Fale com o ADM.";
   if (m.includes("failed to fetch") || m.includes("network") || m.includes("load failed")) return "Não foi possível conectar. Verifique sua internet e tente de novo.";
   return "Não foi possível entrar agora. Tente de novo em instantes.";
+}
+// Regras da senha nova (decididas pela Tia): mínimo 8 caracteres, com letras e números, e diferente
+// da senha atual (essa última o Supabase confere ao salvar: erro same_password).
+function regrasSenha(pw, confirmacao) {
+  const s = String(pw || "");
+  const itens = [
+    { id: "tamanho", texto: "Pelo menos 8 caracteres", ok: s.length >= 8 },
+    { id: "letra", texto: "Pelo menos uma letra", ok: /\p{L}/u.test(s) },
+    { id: "numero", texto: "Pelo menos um número", ok: /\p{N}/u.test(s) },
+    { id: "confirmacao", texto: "Confirmação igual à senha nova", ok: s.length > 0 && s === String(confirmacao || "") },
+  ];
+  return { itens, ok: itens.every((i) => i.ok) };
+}
+// Mensagem de erro da troca de senha (supabase.auth.updateUser) em português claro.
+function mensagemErroSenha(e) {
+  const code = String((e && e.code) || "").toLowerCase();
+  const m = String((e && (e.message || e.error_description || e.error)) || "").toLowerCase();
+  if (code === "same_password" || m.includes("different from the old") || m.includes("same password"))
+    return "A senha nova precisa ser diferente da senha atual. Escolha outra.";
+  if (code === "weak_password" || m.includes("weak") || m.includes("at least") || m.includes("should contain"))
+    return "Essa senha não foi aceita por ser fraca. Use pelo menos 8 caracteres, com letras e números.";
+  if (code === "reauthentication_needed" || m.includes("reauthentication"))
+    return "Por segurança, saia e entre de novo antes de trocar a senha.";
+  if (code === "session_not_found" || m.includes("session missing") || m.includes("jwt expired") || (e && e.status === 401))
+    return "Sua sessão expirou. Saia e entre de novo para trocar a senha.";
+  if ((e && e.status === 429) || m.includes("rate limit") || m.includes("too many"))
+    return "Muitas tentativas seguidas. Aguarde alguns minutos e tente de novo.";
+  if (m.includes("failed to fetch") || m.includes("network") || m.includes("load failed"))
+    return "Não foi possível conectar. Verifique sua internet e tente de novo.";
+  return "Não foi possível trocar a senha agora. Tente de novo em instantes.";
 }
 // </permissoes>
 
@@ -1179,7 +1229,7 @@ function SectionPage({ slug, me, sections, onSectionsChanged }) {
           <h1 class="mt-1 flex items-center gap-2 text-2xl font-semibold text-ink">${section.icone || "📄"} ${section.nome}</h1>
         </div>
         <div class="flex gap-2">
-          ${canEdit && html`<${Btn} variant="ghost" onClick=${() => setEditing(true)}>Editar descrição<//>`}
+          ${podeMexerEstrutura(me.role) && html`<${Btn} variant="ghost" onClick=${() => setEditing(true)}>Editar descrição<//>`}
           ${canEdit && html`<${Btn} as="a" href=${"#/novo?secao=" + section.slug}>+ Novo documento<//>`}
         </div>
       </div>
@@ -1815,12 +1865,98 @@ function NewDocPage({ me, sections, query }) {
     </form>`;
 }
 
-function ProfilePage({ me, onProfileChanged }) {
-  const [nome, setNome] = useState(me.nome || "");
+// Campos de senha nova com checklist ao vivo (mesmas regras na troca obrigatória e em Meu perfil).
+function NovaSenhaForm({ onSaved, botao = "Salvar nova senha", autoFocus = false }) {
   const [pw, setPw] = useState("");
   const [pw2, setPw2] = useState("");
+  const [ver, setVer] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [busyPw, setBusyPw] = useState(false);
+  const [erro, setErro] = useState("");
+  const ref = useRef(null);
+  useEffect(() => { if (autoFocus && ref.current) ref.current.focus(); }, []);
+  const regras = regrasSenha(pw, pw2);
+
+  async function salvar(e) {
+    e && e.preventDefault();
+    if (busy) return;
+    setErro("");
+    if (!regras.ok) { setErro("Confira os itens da lista abaixo antes de salvar."); return; }
+    setBusy(true);
+    try {
+      const { error } = await sb.auth.updateUser({ password: pw });
+      if (error) throw error;
+      setPw(""); setPw2("");
+      await onSaved();
+    } catch (e2) {
+      setErro(mensagemErroSenha(e2));
+    } finally { setBusy(false); }
+  }
+
+  const campo = (label, valor, setValor, auto, r) => html`
+    <${Field} label=${label} required>
+      <div class="relative">
+        <input ref=${r} class=${cx(inputCls, "pr-20")} type=${ver ? "text" : "password"} autocomplete=${auto} required
+          value=${valor} onInput=${(e) => { setValor(e.target.value); setErro(""); }} />
+        <button type="button" onClick=${() => setVer((v) => !v)} aria-label=${ver ? "Ocultar senha" : "Mostrar senha"}
+          class="absolute inset-y-0 right-0 px-3 text-xs font-medium text-muted hover:text-ink">${ver ? "Ocultar" : "Mostrar"}</button>
+      </div>
+    <//>`;
+
+  return html`
+    <form onSubmit=${salvar} class="space-y-3">
+      ${campo("Senha nova", pw, setPw, "new-password", ref)}
+      ${campo("Confirme a senha nova", pw2, setPw2, "new-password", null)}
+      <ul class="space-y-1 rounded-lg bg-black/[0.03] px-3 py-2.5 text-sm" aria-live="polite">
+        ${regras.itens.map((i) => html`
+          <li key=${i.id} class=${cx("flex items-center gap-2", i.ok ? "text-[#4c6b3f]" : "text-muted")}>
+            <span class=${cx("grid h-4 w-4 shrink-0 place-items-center rounded-full text-[10px] font-bold",
+              i.ok ? "bg-[#dcecd5] text-[#4c6b3f]" : "bg-black/[0.06] text-transparent")}>${i.ok ? "✓" : "·"}</span>
+            ${i.texto}
+          </li>`)}
+        <li class="flex items-center gap-2 text-muted">
+          <span class="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-black/[0.06] text-[10px]"></span>
+          Diferente da senha atual (conferido ao salvar)
+        </li>
+      </ul>
+      ${erro ? html`<div role="alert" class="rounded-lg bg-[#f4e0db] px-3 py-2 text-sm text-[#a44b43]">${erro}</div>` : null}
+      <${Btn} type="submit" loading=${busy} class="w-full sm:w-auto">${botao}<//>
+    </form>`;
+}
+
+// Tela bloqueante do primeiro acesso (profiles.precisa_trocar_senha): sem menu nem navegação até trocar.
+function TrocaSenhaObrigatoria({ me, onDone }) {
+  const [aviso, setAviso] = useState("");
+  async function concluido() {
+    // O banco desliga a flag sozinho quando a senha muda (trigger em auth.users); confere antes de liberar.
+    const { data } = await sb.from("profiles").select("precisa_trocar_senha").eq("id", me.id).maybeSingle();
+    if (data && data.precisa_trocar_senha) {
+      setAviso("Sua senha nova foi salva, mas o sistema ainda não liberou o acesso. Recarregue a página; se continuar assim, fale com o ADM.");
+      return;
+    }
+    notify("Senha nova salva. Tudo pronto!", "ok");
+    await onDone();
+  }
+  return html`
+    <div class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-gradient-to-b from-card to-bg px-4 py-10 sm:items-center">
+      <div role="dialog" aria-modal="true" aria-labelledby="troca-senha-titulo" class="w-full max-w-md rounded-2xl bg-white p-6 shadow-sm ring-1 ring-line">
+        <h1 id="troca-senha-titulo" class="text-lg font-semibold text-ink">Crie a sua senha</h1>
+        <p class="mt-2 text-sm text-ink/75">
+          Olá${me.nome ? ", " + me.nome.split(" ")[0] : ""}! Você entrou com uma senha temporária.
+          Para continuar, escolha uma senha só sua. Ela vale a partir do próximo acesso.
+        </p>
+        ${aviso ? html`<div role="alert" class="mt-4 rounded-lg bg-[#f6efd6] px-3 py-2 text-sm text-[#7a6420]">${aviso}</div>` : null}
+        <div class="mt-5"><${NovaSenhaForm} onSaved=${concluido} botao="Salvar e entrar" autoFocus /></div>
+        <div class="mt-5 flex items-center justify-between border-t border-line pt-4 text-xs text-muted">
+          <span class="truncate">${me.email}</span>
+          <button class="font-medium text-muted hover:text-ink" onClick=${async () => { await sb.auth.signOut(); location.hash = "/"; }}>Sair</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function ProfilePage({ me, onProfileChanged }) {
+  const [nome, setNome] = useState(me.nome || "");
+  const [busy, setBusy] = useState(false);
 
   async function saveName() {
     setBusy(true);
@@ -1831,18 +1967,6 @@ function ProfilePage({ me, onProfileChanged }) {
       await onProfileChanged();
     } catch (e) { notify(errMsg(e), "err"); }
     finally { setBusy(false); }
-  }
-  async function savePw() {
-    if (pw.length < 8) return notify("A senha precisa ter ao menos 8 caracteres.", "err");
-    if (pw !== pw2) return notify("As senhas não conferem.", "err");
-    setBusyPw(true);
-    try {
-      const { error } = await sb.auth.updateUser({ password: pw });
-      if (error) throw error;
-      setPw(""); setPw2("");
-      notify("Senha alterada.", "ok");
-    } catch (e) { notify(errMsg(e), "err"); }
-    finally { setBusyPw(false); }
   }
 
   return html`
@@ -1860,11 +1984,7 @@ function ProfilePage({ me, onProfileChanged }) {
         </div>
         <div class="rounded-xl border border-line bg-white p-5">
           <h2 class="mb-3 font-medium text-ink">Trocar senha</h2>
-          <div class="space-y-3">
-            <${Field} label="Nova senha"><input class=${inputCls} type="password" value=${pw} onInput=${(e) => setPw(e.target.value)} /><//>
-            <${Field} label="Repita a nova senha"><input class=${inputCls} type="password" value=${pw2} onInput=${(e) => setPw2(e.target.value)} /><//>
-            <${Btn} loading=${busyPw} onClick=${savePw}>Alterar senha<//>
-          </div>
+          <${NovaSenhaForm} botao="Alterar senha" onSaved=${async () => { notify("Senha alterada.", "ok"); }} />
         </div>
       </div>
     </div>`;
@@ -1894,7 +2014,12 @@ function AdminPage({ me }) {
   }
   async function resetPw(u) {
     if (!confirm(`Gerar nova senha temporária para ${u.email}?`)) return;
-    try { const r = await adminCall({ action: "resetPassword", userId: u.id }); setTempResult({ email: u.email, senha: r.senhaTemporaria }); }
+    try {
+      const r = await adminCall({ action: "resetPassword", userId: u.id });
+      setTempResult({ email: u.email, senha: r.senhaTemporaria });
+      if (r.aviso) notify(r.aviso, "err");
+      await load();
+    }
     catch (e) { notify(errMsg(e), "err"); }
   }
   async function removeUser(u) {
@@ -1932,11 +2057,15 @@ function AdminPage({ me }) {
               <tbody class="divide-y divide-line">
                 ${users.map((u) => html`
                   <tr key=${u.id}>
-                    <td class="px-4 py-3"><div class="font-medium text-ink">${u.nome || "—"}</div><div class="text-xs text-muted">${u.email}</div></td>
                     <td class="px-4 py-3">
-                      <select class=${cx(inputCls, "w-auto py-1")} value=${u.role} disabled=${u.id === me.id}
+                      <div class="font-medium text-ink">${u.nome || "—"}</div><div class="text-xs text-muted">${u.email}</div>
+                      ${u.precisa_trocar_senha ? html`<div class="mt-1"><${Badge} class=${PILL_WARN}>Troca de senha pendente<//></div>` : null}
+                    </td>
+                    <td class="px-4 py-3">
+                      <select class=${cx(inputCls, "w-auto py-1")} value=${papelEfetivo(u) || u.role} disabled=${u.id === me.id}
+                        title=${(PAPEIS_ADMIN.find((p) => p[0] === papelEfetivo(u)) || [])[2] || ""}
                         onChange=${(e) => setRole(u, e.target.value)}>
-                        <option value="admin">ADM</option><option value="cs">CS</option><option value="editor">Editor</option><option value="leitor">Leitor</option>
+                        ${PAPEIS_ADMIN.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
                       </select>
                     </td>
                     <td class="px-4 py-3 text-muted">${fmtDate(u.created_at)}</td>
@@ -1957,7 +2086,7 @@ function AdminPage({ me }) {
 
       ${tempResult && html`
         <${Modal} title="Senha temporária" onClose=${() => setTempResult(null)}>
-          <p class="text-sm text-ink/75">Envie estes dados para <b>${tempResult.email}</b> por um canal seguro. Peça para trocar a senha em “Meu perfil” no primeiro acesso.</p>
+          <p class="text-sm text-ink/75">Envie estes dados para <b>${tempResult.email}</b> por um canal seguro. No próximo acesso, o sistema vai pedir para a pessoa criar uma senha nova antes de continuar.</p>
           <div class="mt-3 rounded-lg bg-black/[0.03] p-3 font-mono text-sm">
             <div>E-mail: ${tempResult.email}</div>
             <div>Senha: <b>${tempResult.senha}</b></div>
@@ -2091,12 +2220,11 @@ function CreateUserModal({ onClose, onCreated }) {
         <${Field} label="Nome"><input class=${inputCls} value=${nome} onInput=${(e) => setNome(e.target.value)} /><//>
         <${Field} label="Papel">
           <select class=${inputCls} value=${role} onChange=${(e) => setRole(e.target.value)}>
-            <option value="admin">ADM — acesso a tudo, inclui gestão de usuários</option>
-            <option value="cs">CS — somente a aba CS / Suporte</option>
-            <option value="editor">Editor — cria e edita documentos (papel legado)</option>
-            <option value="leitor">Leitor — só consulta (papel legado)</option>
+            ${PAPEIS_ADMIN.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
           </select>
+          <p class="mt-1.5 text-xs text-muted">${(PAPEIS_ADMIN.find((p) => p[0] === role) || [])[2] || ""}</p>
         <//>
+        <p class="text-xs text-muted">O sistema gera uma senha temporária. No primeiro acesso, a pessoa escolhe uma senha nova.</p>
         <div class="flex justify-end gap-2"><${Btn} variant="subtle" onClick=${onClose}>Cancelar<//><${Btn} loading=${busy} onClick=${save}>Criar<//></div>
       </div>
     <//>`;
@@ -2124,7 +2252,7 @@ function FerramentasPage({ me }) {
   const [statusFilter, setStatusFilter] = useState("");
   const [checking, setChecking] = useState(false);
   const [editing, setEditing] = useState(null); // ferramenta ou {novo:true}
-  const canEdit = ehEditor(me.role);
+  const canEdit = podeMexerEstrutura(me.role); // registro global = estrutura (ADM limitado só consulta)
 
   const load = useCallback(async () => {
     try { setTools(await fetchFerramentas()); }
@@ -8134,7 +8262,7 @@ function App() {
         fetchSections().catch(() => []),
       ]);
       if (error) throw error;
-      setMe(prof || null);
+      setMe(prof ? { ...prof, role: papelEfetivo(prof) } : null);
       setSections(secs);
     } catch (e) {
       setMeError(true);
@@ -8167,6 +8295,11 @@ function App() {
           : html`<span class="spinner mr-2"></span> Carregando…`}
       </div>
       <${Toaster} />`;
+  }
+
+  // Primeiro acesso / senha temporária: nada do sistema aparece até a pessoa escolher uma senha.
+  if (me.precisa_trocar_senha) {
+    return html`<${TrocaSenhaObrigatoria} me=${me} onDone=${reload} /><${Toaster} />`;
   }
 
   return html`

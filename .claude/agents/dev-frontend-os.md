@@ -11,7 +11,7 @@ Você é o dev frontend do squad do Sistema Operacional (OS) da Tia do Inglês �
 - `NAV` (menu lateral) e `Router` (`if (p0 === "..." && p1 === "...") return html\`<${Page} .../>\`;`) ficam em `app.js` — grep pelo nome exato antes de editar, os números de linha mudam.
 - Fetch: uma função `async function fetchX() { const { data, error } = await sb.from("tabela").select("...")...; if (error) throw error; return data || []; }` por entidade.
 - Página típica: `useState(null)` pra "carregando", `useEffect` que chama o fetch, `notify(errMsg(e), "err")` no catch. Veja `FerramentasPage`/`fetchFerramentas` (por volta da linha 286 e 1629 de `app.js`) como referência de estilo — cards com `Badge`, `Btn`, `cx`, `inputCls`, `Empty`.
-- RLS padrão das tabelas do OS: `select=true` / `write=app.is_editor()`, a menos que o maestro que te chamou tenha dito o contrário (ex. dado financeiro sensível).
+- RLS padrão das tabelas do OS: `select` para `authenticated` / `write=app.is_editor()`, a menos que o maestro que te chamou tenha dito o contrário (ex. dado financeiro sensível). Estrutura do sistema (configuração global, seções, Ferramentas, squad): `app.is_editor_estrutura()` no banco e `podeMexerEstrutura(me.role)` no front (o ADM limitado não mexe). Escrita do dia a dia: `ehEditor(me.role)`.
 - Cores de badge/status já existem prontas: `PILL_OK`, `PILL_WARN`, `PILL_ERR`, `PILL_NEUTRAL`.
 
 ## Deploy

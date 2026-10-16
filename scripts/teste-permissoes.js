@@ -12,7 +12,7 @@ function carregar(src) {
   if (ini < 0 || fim < 0) throw new Error("bloco NAV/permissoes não encontrado no app.js");
   const corpo = src.slice(ini, fim);
   // eslint-disable-next-line no-new-func
-  return new Function(corpo + "\nreturn { NAV, ROLE_LABEL, SLUGS_CS, roleValido, rotuloRole, ehEditor, podeEscreverCS, rotaPermitida, rotaEntrada, navParaRole, mensagemErroLogin };")();
+  return new Function(corpo + "\nreturn { NAV, ROLE_LABEL, SLUGS_CS, PAPEIS_ADMIN, roleValido, rotuloRole, ehEditor, podeEscreverCS, podeMexerEstrutura, papelEfetivo, regrasSenha, mensagemErroSenha, rotaPermitida, rotaEntrada, navParaRole, mensagemErroLogin };")();
 }
 
 function executar(src) {
@@ -41,8 +41,8 @@ function executar(src) {
   // --- admin (ADM): tudo ---
   for (const r of [...rotasCS, ...rotasForaDoCS, "/perfil"]) confere("admin " + r, m.rotaPermitida("admin", r), true);
 
-  // --- editor e leitor: tudo, menos /admin ---
-  for (const papel of ["editor", "leitor"]) {
+  // --- editor, leitor e ADM limitado: tudo, menos /admin ---
+  for (const papel of ["editor", "leitor", "adm_limitado"]) {
     for (const r of [...rotasCS, ...rotasForaDoCS, "/perfil"]) {
       const admin = r === "/admin" || r === "/admin/usuarios";
       confere(papel + " " + r, m.rotaPermitida(papel, r), !admin);
@@ -71,33 +71,66 @@ function executar(src) {
   }
 
   // --- rota de entrada: sempre permitida para o próprio papel (sem laço de redirecionamento) ---
-  for (const papel of ["admin", "cs", "editor", "leitor", undefined, "xyz"]) {
+  for (const papel of ["admin", "adm_limitado", "cs", "editor", "leitor", undefined, "xyz"]) {
     confere("entrada permitida " + String(papel), m.rotaPermitida(papel, m.rotaEntrada(papel)), true);
   }
   confere("entrada cs", m.rotaEntrada("cs"), "/cs/faq");
   confere("entrada admin", m.rotaEntrada("admin"), "/");
   confere("entrada editor", m.rotaEntrada("editor"), "/");
   confere("entrada leitor", m.rotaEntrada("leitor"), "/");
+  confere("entrada adm_limitado", m.rotaEntrada("adm_limitado"), "/");
 
   // --- menu lateral ---
   confere("nav cs = só o grupo CS", m.navParaRole("cs").map((g) => g.id), ["cs"]);
   confere("nav admin = tudo", m.navParaRole("admin").length, m.NAV.length);
   confere("nav editor = tudo", m.navParaRole("editor").length, m.NAV.length);
   confere("nav leitor = tudo", m.navParaRole("leitor").length, m.NAV.length);
+  confere("nav adm_limitado = tudo", m.navParaRole("adm_limitado").length, m.NAV.length);
   confere("nav cs tem todos os itens do grupo", m.navParaRole("cs")[0].itens.map((i) => i.slug), slugsCS);
 
   // --- escrita na interface ---
-  const escrita = { admin: [true, true], editor: [true, true], cs: [false, true], leitor: [false, false] };
+  // [ehEditor, podeEscreverCS, podeMexerEstrutura]
+  const escrita = { admin: [true, true, true], adm_limitado: [true, true, false], editor: [true, true, true], cs: [false, true, false], leitor: [false, false, false], xyz: [false, false, false] };
   for (const papel of Object.keys(escrita)) {
     confere(papel + " ehEditor", m.ehEditor(papel), escrita[papel][0]);
     confere(papel + " podeEscreverCS", m.podeEscreverCS(papel), escrita[papel][1]);
+    confere(papel + " podeMexerEstrutura", m.podeMexerEstrutura(papel), escrita[papel][2]);
   }
+
+  // --- papel efetivo a partir da linha de profiles ---
+  confere("efetivo admin", m.papelEfetivo({ role: "admin", acesso_limitado: false }), "admin");
+  confere("efetivo editor", m.papelEfetivo({ role: "editor", acesso_limitado: false }), "editor");
+  confere("efetivo editor sem coluna", m.papelEfetivo({ role: "editor" }), "editor");
+  confere("efetivo limitado", m.papelEfetivo({ role: "editor", acesso_limitado: true }), "adm_limitado");
+  confere("efetivo admin+limitado (inválido) sem privilégio", m.papelEfetivo({ role: "admin", acesso_limitado: true }), null);
+  confere("efetivo cs", m.papelEfetivo({ role: "cs", acesso_limitado: false }), "cs");
+  confere("efetivo nulo", m.papelEfetivo(null), null);
+  confere("limitado não é admin na rota /admin", m.rotaPermitida(m.papelEfetivo({ role: "editor", acesso_limitado: true }), "/admin"), false);
+  confere("papéis do formulário", m.PAPEIS_ADMIN.map((p) => p[0]), ["admin", "adm_limitado", "cs", "editor", "leitor"]);
+
+  // --- regras da senha nova ---
+  const ok = (a, b) => m.regrasSenha(a, b).ok;
+  confere("senha vazia", ok("", ""), false);
+  confere("senha curta", ok("abc1234", "abc1234"), false);
+  confere("senha só letras", ok("abcdefgh", "abcdefgh"), false);
+  confere("senha só números", ok("12345678", "12345678"), false);
+  confere("senha ok", ok("abcdefg1", "abcdefg1"), true);
+  confere("senha ok com acento", ok("coração9", "coração9"), true);
+  confere("confirmação diferente", ok("abcdefg1", "abcdefg2"), false);
+  confere("itens da checklist", m.regrasSenha("a1", "").itens.map((i) => i.ok), [false, true, true, false]);
+  confere("erro same_password", m.mensagemErroSenha({ code: "same_password", message: "New password should be different from the old password." }), "A senha nova precisa ser diferente da senha atual. Escolha outra.");
+  confere("erro same_password por texto", m.mensagemErroSenha({ message: "New password should be different from the old password." }), "A senha nova precisa ser diferente da senha atual. Escolha outra.");
+  confere("erro weak_password", m.mensagemErroSenha({ code: "weak_password", message: "Password should be at least 8 characters." }), "Essa senha não foi aceita por ser fraca. Use pelo menos 8 caracteres, com letras e números.");
+  confere("erro reauth", m.mensagemErroSenha({ code: "reauthentication_needed" }), "Por segurança, saia e entre de novo antes de trocar a senha.");
+  confere("erro sessão", m.mensagemErroSenha({ message: "Auth session missing!" }), "Sua sessão expirou. Saia e entre de novo para trocar a senha.");
+  confere("erro genérico senha", m.mensagemErroSenha(null), "Não foi possível trocar a senha agora. Tente de novo em instantes.");
 
   // --- rótulos ---
   confere("rótulo admin", m.rotuloRole("admin"), "ADM");
   confere("rótulo cs", m.rotuloRole("cs"), "CS");
   confere("rótulo editor", m.rotuloRole("editor"), "Editor");
   confere("rótulo leitor", m.rotuloRole("leitor"), "Leitor");
+  confere("rótulo adm_limitado", m.rotuloRole("adm_limitado"), "ADM limitado");
   confere("rótulo desconhecido", m.rotuloRole("xyz"), "Sem papel");
   confere("rótulo __proto__", m.rotuloRole("__proto__"), "Sem papel");
 
@@ -115,9 +148,9 @@ function executar(src) {
 // Tabela papel x rota para o relatório (legível a olho).
 function matriz(m) {
   const rotas = ["/", "/cs/faq", "/cs/metas", "/cs/nps", "/base", "/financeiro/dre", "/admin", "/squad", "/farol", "/rota-inexistente"];
-  const papeis = ["admin", "cs", "editor", "leitor"];
-  const linhas = ["rota".padEnd(22) + papeis.map((p) => p.padEnd(8)).join("")];
-  for (const r of rotas) linhas.push(r.padEnd(22) + papeis.map((p) => (m.rotaPermitida(p, r) ? "sim" : "-").padEnd(8)).join(""));
+  const papeis = ["admin", "adm_limitado", "cs", "editor", "leitor"];
+  const linhas = ["rota".padEnd(22) + papeis.map((p) => p.padEnd(14)).join("")];
+  for (const r of rotas) linhas.push(r.padEnd(22) + papeis.map((p) => (m.rotaPermitida(p, r) ? "sim" : "-").padEnd(14)).join(""));
   return linhas.join("\n");
 }
 

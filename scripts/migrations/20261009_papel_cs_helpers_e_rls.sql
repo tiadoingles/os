@@ -2,6 +2,8 @@
 -- Pre-requisito ja aplicado: user_role_add_cs (alter type public.user_role add value 'cs').
 -- Teste de RLS apos aplicar: teste_rls_cs.sql (roda tudo em transacao que termina em erro => rollback).
 -- Reverter: rollback_papel_cs.sql.
+-- Compatível com 20261016_troca_senha_e_adm_limitado (ADM limitado é role editor: entra em is_cs_or_editor;
+-- esta migration só mexe em políticas de select de kb_sections/os_ferramentas/os_squad_agentes).
 -- ===== Papel "cs": helpers, escrita nas tabelas de CS e leitura restrita nas demais =====
 
 -- Helpers (schema app, mesmo padrao de is_editor/is_admin: security definer, so authenticated executa).

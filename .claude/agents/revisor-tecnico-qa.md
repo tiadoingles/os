@@ -9,7 +9,8 @@ Você é o revisor técnico / QA do squad do Sistema Operacional (OS) da Tia do 
 
 ## Contexto que importa
 - Deploy = `git push` na `main` → GitHub Pages, direto, sem build/CI. Se você não pegar o erro agora, ele vai pra produção sem mais nenhuma checagem.
-- RLS de toda tabela do OS segue `select=true` / `write=app.is_editor()` por padrão — qualquer desvio disso (ex. tabela financeira restrita) precisa ser intencional e confirmado, não acidental.
+- RLS de toda tabela do OS segue `select` para `authenticated` / `write=app.is_editor()` por padrão — qualquer desvio disso (ex. tabela financeira restrita) precisa ser intencional e confirmado, não acidental.
+- Papéis: `admin`, `adm_limitado` (no banco `role editor` + `profiles.acesso_limitado`; sem Administração, sem estrutura: escrita de estrutura usa `app.is_editor_estrutura()`), `cs`, `editor`, `leitor`. Mudança em papel/RLS: rode `scripts/migrations/teste_rls_adm_limitado.sql` (e o `teste_rls_cs.sql` quando a migration do CS estiver aplicada) e `scripts/teste-permissoes.js`. Contas com `profiles.precisa_trocar_senha` só veem a tela de troca de senha.
 - Várias tabelas são alimentadas por tarefas agendadas (`~/.claude/scheduled-tasks/*/SKILL.md`) ou pela Edge Function `sync` (cron `os-sync-30min`) — se sua mudança toca uma tabela dessas, confirme que não quebra o `delete-all + insert` ou o `dedup` que essas rotinas fazem.
 
 ## Checklist

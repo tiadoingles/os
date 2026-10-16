@@ -28,23 +28,50 @@ como backend.
 
 - **Login**: componente `Login` (`app.js`), sem cadastro público. Contas só são criadas
   pelo ADM em Administração (Edge Function `admin-users`, que só aceita `admin`).
-  Esqueci a senha = o ADM gera nova senha temporária ("Nova senha"); o usuário troca em
-  Meu perfil. (Ainda é preciso desligar "Allow new users to sign up" no painel do
-  Supabase: Authentication > Sign In / Providers; não dá para fazer por SQL.)
+  Esqueci a senha = o ADM gera nova senha temporária ("Nova senha").
+- **Troca de senha obrigatória** (`profiles.precisa_trocar_senha`, SQL em
+  `scripts/migrations/20261016_troca_senha_e_adm_limitado.sql`): a `admin-users` liga a flag em
+  `create` e `resetPassword` (service_role); o trigger `on_auth_user_password_changed` em `auth.users`
+  (`app.handle_password_change`) desliga quando `encrypted_password` muda (ou seja, depois de
+  `supabase.auth.updateUser({ password })`). O usuário não liga/desliga a flag de ninguém, nem a
+  própria sem trocar a senha (`app.protect_profile_role`). Com a flag ligada o `App` mostra só
+  `TrocaSenhaObrigatoria` (sem menu/rotas; tem "Sair"). Regras da senha (Tia): mínimo 8 caracteres,
+  letras e números, diferente da atual — `regrasSenha`/`mensagemErroSenha` no bloco `<permissoes>`,
+  usadas também em Meu perfil (`NovaSenhaForm`). "Diferente da atual" é conferido pelo Supabase
+  (erro `same_password`). A regra no servidor depende do painel do Supabase (Auth > Providers >
+  Email: mínimo 8 e "Letters and digits"); a senha temporária gerada já atende.
+  (Ainda é preciso desligar "Allow new users to sign up" no painel do Supabase:
+  Authentication > Sign In / Providers; não dá para fazer por SQL.)
 - **Papéis** (`profiles.role`, enum `user_role`): `admin` (rótulo **ADM**, acesso a tudo),
-  `cs` (rótulo **CS**, só a aba CS / Suporte), e os legados `editor` e `leitor`
-  (editor/leitor veem tudo menos Administração; leitor não grava). `ROLE_LABEL` em `app.js`.
+  `adm_limitado` (rótulo **ADM limitado**, ver abaixo), `cs` (rótulo **CS**, só a aba CS / Suporte),
+  e os legados `editor` e `leitor` (editor/leitor veem tudo menos Administração; leitor não grava).
+  `ROLE_LABEL`/`PAPEIS_ADMIN` em `app.js`.
+- **ADM limitado** ("usa tudo, sem mexer na estrutura"): no banco é `role = 'editor'` +
+  `profiles.acesso_limitado = true` (check `profiles_acesso_limitado_so_editor`); no front
+  `papelEfetivo(perfil)` vira `adm_limitado` ao carregar o perfil. Assim passa como editor em
+  `app.is_editor()` e em todas as Edge Functions que checam editor/admin (sem redeploy). Bloqueios:
+  Administração (menu/Router + `admin-users` recusa `role<>'admin'` ou `acesso_limitado`), `app_config`,
+  excluir documentos/versões/seções e criar seções (já eram só `app.is_admin()`), editar seções
+  (`kb_sections` update), registro de Ferramentas (`os_ferramentas` insert/update) e squad
+  (`os_squad_agentes` escrita) — via `app.is_editor_estrutura()` (= `is_editor() and not
+  is_adm_limitado()`); no front, `podeMexerEstrutura(role)`. Desconectar o LinkedIn segue só admin.
+  **Tabela/tela nova que seja estrutura** (configuração global, cadastro que muda o sistema):
+  escrita com `app.is_editor_estrutura()` e botão com `podeMexerEstrutura`; o resto do dia a dia usa
+  `app.is_editor()`/`ehEditor` normalmente. Exclusões do dia a dia (eventos da agenda, indicadores
+  do Farol, fichas/metas de CS, posts) continuam liberadas para ele, com DESFAZER.
+  Teste de RLS: `scripts/migrations/teste_rls_adm_limitado.sql`.
 - **Camada de interface**: bloco `// <permissoes>` em `app.js` (logo após `NAV`):
   `rotaPermitida(role, path)` é a **fonte única**; o `Shell` (menu e links de topo/rodapé)
   e o `Router` (guarda: rota proibida => `Redirecionar` para `rotaEntrada(role)`, nunca
   "página não encontrada" nem conteúdo) passam por ela. Helpers: `ehEditor`,
-  `podeEscreverCS`, `navParaRole`, `rotuloRole`, `mensagemErroLogin`. Papel desconhecido
+  `podeEscreverCS`, `podeMexerEstrutura`, `papelEfetivo`, `navParaRole`, `rotuloRole`, `mensagemErroLogin`. Papel desconhecido
   não ganha privilégio (só `#/perfil`). **Não** compare `me.role !== "leitor"`: use
   `ehEditor(role)` (Base, Agenda, Farol, Ferramentas...) ou `podeEscreverCS(role)` (telas de CS).
   Item novo no grupo `cs` do `NAV` já fica liberado para o CS; item novo em outro grupo
   fica bloqueado para ele automaticamente.
 - **Teste dos helpers**: `node scripts/teste-permissoes.js` (extrai o bloco do `app.js`;
-  rode antes de mexer em `NAV`/papéis).
+  rode antes de mexer em `NAV`/papéis). Sem Node na máquina: rode no console do preview
+  (`fetch` do script + `new Function(...)(module)` e `module.exports.executar(textoDoAppJs)`).
 - **Camada de banco (a barreira real)** — SQL em `scripts/migrations/` (a migration
   `20261009_papel_cs_helpers_e_rls.sql` só vale depois de aplicada no Supabase; o valor
   `cs` do enum já foi aplicado; conferir `select * from pg_policies` antes de confiar): o papel `cs` NÃO entra em `app.is_editor()`.
@@ -55,7 +82,8 @@ como backend.
   `automacao_estado` e a seção `cs-suporte` da Base (alimenta o FAQ). As demais tabelas
   têm `select` `to authenticated using (not app.is_cs())`. Tela/tabela nova do CS: dar
   escrita via `app.is_cs_or_editor()`; tabela de outra área: `not app.is_cs()` no select.
-- **Edge Functions e papel**: `admin-users` (só admin; aceita leitor/editor/admin/cs),
+- **Edge Functions e papel**: `admin-users` (só admin pleno; aceita leitor/editor/admin/cs/adm_limitado;
+  `list` devolve `acesso_limitado`/`precisa_trocar_senha`),
   `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet`/`teste-vac-sheet` (force) e `planilha`
   aceitam editor/admin/cs. `ai` e `sync` só exigem usuário logado (ver lacunas no relatório
   de segurança da tarefa de login).
