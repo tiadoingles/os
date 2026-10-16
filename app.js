@@ -7502,6 +7502,58 @@ function GeradorMateriaisPage({ me, query }) {
     </div>`;
 }
 
+// Campo único de tema: digita livre ou, ao clicar, abre a lista suspensa dos 30 temas (agrupados por categoria,
+// filtrada pelo que foi digitado). Fora do FormArena para não remontar (e perder o foco) a cada tecla.
+function TemaArenaCombo({ valor, usados, onMudar }) {
+  const [aberto, setAberto] = useState(false);
+  const [ativo, setAtivo] = useState(-1);
+  const listaRef = useRef(null);
+  const termo = valor.trim().toLowerCase();
+  const exato = Object.values(ARENA_TEMAS).flat().some((t) => t.toLowerCase() === termo);
+  const grupos = ARENA_CATEGORIAS.map((c) => [c, ARENA_TEMAS[c].filter((t) => !termo || exato || t.toLowerCase().includes(termo))]).filter(([, ts]) => ts.length);
+  const planos = grupos.flatMap(([, ts]) => ts);
+  function escolher(t) { onMudar(t); setAberto(false); setAtivo(-1); }
+  function tecla(e) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!aberto) { setAberto(true); return; }
+      const n = planos.length; if (!n) return;
+      const prox = e.key === "ArrowDown" ? (ativo + 1) % n : (ativo - 1 + n) % n;
+      setAtivo(prox);
+      listaRef.current?.querySelector(`[data-i="${prox}"]`)?.scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter" && aberto) {
+      e.preventDefault();
+      if (ativo >= 0 && planos[ativo]) escolher(planos[ativo]); else setAberto(false);
+    } else if (e.key === "Escape") setAberto(false);
+  }
+  let i = -1;
+  return html`
+    <div class="relative">
+      <input class=${cx(inputCls, "pr-9")} placeholder="Clique para escolher ou digite um tema" value=${valor} autocomplete="off"
+        role="combobox" aria-expanded=${aberto ? "true" : "false"}
+        onFocus=${() => setAberto(true)} onClick=${() => setAberto(true)} onBlur=${() => setAberto(false)} onKeyDown=${tecla}
+        onInput=${(e) => { onMudar(e.target.value); setAberto(true); setAtivo(-1); }} />
+      <button type="button" tabindex="-1" aria-label="Mostrar temas" class="absolute inset-y-0 right-0 px-3 text-muted hover:text-ink"
+        onMouseDown=${(e) => { e.preventDefault(); setAberto((x) => !x); e.currentTarget.previousElementSibling.focus(); }}>▾</button>
+      ${aberto ? html`
+        <div ref=${listaRef} role="listbox" class="absolute z-20 mt-1 max-h-80 w-full overflow-y-auto rounded-xl border border-line bg-white py-1 shadow-lg"
+          onMouseDown=${(e) => e.preventDefault()}>
+          ${grupos.length ? grupos.map(([c, ts]) => html`
+            <div key=${c}>
+              <div class="px-3 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wider text-muted">${c}</div>
+              ${ts.map((t) => { i++; const idx = i; const sel = t.toLowerCase() === termo; return html`
+                <button type="button" role="option" data-i=${idx} aria-selected=${sel ? "true" : "false"} onClick=${() => escolher(t)}
+                  class=${cx("flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm",
+                    idx === ativo ? "bg-brand-light" : "hover:bg-black/[0.04]", sel ? "font-medium text-brand-dark" : "text-ink")}>
+                  <span>${t}</span>
+                  ${usados.has(t.toLowerCase()) ? html`<span class="shrink-0 text-[10px] text-muted">já usado</span>` : null}
+                </button>`; })}
+            </div>`) : html`
+            <div class="px-3 py-2 text-sm text-muted">Nenhum tema da lista com “${valor.trim()}”. Pode seguir com o seu tema.</div>`}
+        </div>` : null}
+    </div>`;
+}
+
 // Formulário enxuto (pedido da Tia, 16/10/2026): só Tema, Nível e Observações. Narrador, tom etc. ficam por conta
 // das regras (o narrador do RC roda sozinho na Edge Function). 1 material por nível marcado.
 function FormArena({ me, usados, onCriado }) {
@@ -7509,7 +7561,6 @@ function FormArena({ me, usados, onCriado }) {
   const [f, setF] = useState({ tema: "", niveis: ["Recém Chegados", "BIA"], observacoes: "" });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const toggleNivel = (n) => setF((s) => ({ ...s, niveis: s.niveis.includes(n) ? s.niveis.filter((x) => x !== n) : [...s.niveis, n] }));
-  const temaAtual = f.tema.trim().toLowerCase();
 
   async function gerar(e) {
     e && e.preventDefault();
@@ -7537,15 +7588,8 @@ function FormArena({ me, usados, onCriado }) {
     <form onSubmit=${gerar} class="mt-6 rounded-2xl border border-line bg-card p-4 sm:p-5">
       <div>
         <div class="text-sm font-medium text-ink">Tema <span class="text-brand">*</span></div>
-        <div class="mt-0.5 text-xs text-muted">Digite um tema ou escolha um dos 30 da lista. Os já usados aparecem marcados.</div>
-        <input class=${cx(inputCls, "mt-2")} placeholder="Ex.: A Problem at the Hotel" value=${f.tema} onInput=${(e) => set("tema", e.target.value)} />
-        <div class="mt-3 space-y-2">
-          ${ARENA_CATEGORIAS.map((c) => html`
-            <div key=${c}>
-              <div class="text-[11px] font-semibold uppercase tracking-wider text-muted">${c}</div>
-              <div class="mt-1">${ARENA_TEMAS[c].map((t) => html`<${SlidesOpc} on=${temaAtual === t.toLowerCase()} click=${() => set("tema", t)}>${t}${usados.has(t.toLowerCase()) ? html`<span class="ml-1 text-[10px] text-muted">· já usado</span>` : null}<//>`)}</div>
-            </div>`)}
-        </div>
+        <div class="mt-0.5 text-xs text-muted">Clique no campo para ver a lista dos 30 temas, ou digite um tema seu.</div>
+        <div class="mt-2"><${TemaArenaCombo} valor=${f.tema} usados=${usados} onMudar=${(v) => set("tema", v)} /></div>
       </div>
 
       <${SlidesGrupo} label="Nível" obrig hint="Marque um ou os dois. Sai 1 material por nível, com o mesmo tema.">

@@ -135,7 +135,7 @@ como backend.
   (`arena_ajustar`, histórico em `materiais_pedidos.ajustes`, DESFAZER) → "Aprovar e gerar PDFs" (`gerando_pdf`:
   pdfmake no navegador, `montarDocArena`/`gerarPdfArena`, upload em `gerados/arenas/<data>-<tema>-<id8>/` com a
   sessão de quem aprovou + .zip via JSZip) → `pronto`. `pendente`/`processando` são legado.
-  **Formulário (pedido da Tia, 16/10/2026)**: só Tema (digitado ou um dos 30 de `ARENA_TEMAS`, agrupados por categoria;
+  **Formulário (pedido da Tia, 16/10/2026)**: só Tema (campo único `TemaArenaCombo`: digita livre ou, ao clicar, lista suspensa dos 30 de `ARENA_TEMAS` por categoria, filtrada pelo texto;
   os já usados aparecem marcados), Nível (RC e/ou BIA; 1 material por nível, `quantidade=1`) e Observações extras
   (opcional, `briefing.observacoes`). Narrador/tom/objetivo etc. saíram: o narrador do RC roda sozinho no `arena.ts`
   e pedidos antigos com esses campos continuam abrindo. **Prévia**: Aprovar / Reprovar / campo de feedback livre
