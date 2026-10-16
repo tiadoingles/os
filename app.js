@@ -92,6 +92,9 @@ const NAV = [
     { slug: "mentorados", nome: "Lista de Mentorados",
       desc: "Lista da planilha Lista de Mentorados [Oficial] (aba Mentoria 2026), com busca, filtros e WhatsApp.",
       links: [["Planilha de Mentorados", "https://docs.google.com/spreadsheets/d/1CZ4qfhjEhrxtnTMBITRjOUy9o_I8LEPRoD6nuSrLdvs/edit?gid=1320664660"]] },
+    { slug: "teste-vac", nome: "Teste VAC",
+      desc: "Resultados do Teste VAC (Visual, Auditivo, Cinestésico) da planilha Respostas Teste VAC, com filtros.",
+      links: [["Planilha Respostas Teste VAC", "https://docs.google.com/spreadsheets/d/1oyj0QU4n49ZnbJ2ozPPxjaB0qo_Ou4NwaWPehGNvhYM/edit"]] },
     { slug: "nps", nome: "NPS", desc: "Acompanhamento do NPS das alunas ao longo do tempo." },
     { slug: "presenca", nome: "Presença nas Práticas",
       desc: "Presença em Sessões Práticas, Arenas de Conversação e Fluent Labs." },
@@ -2005,7 +2008,7 @@ function SyncRow({ row, onDone }) {
   async function sincronizarAgora() {
     setBusy(true);
     try {
-      const fn = { "metas-planilha": "metas-sheet-sync", "mentorados-planilha": "mentorados-sheet" }[row.chave] || "sync";
+      const fn = { "metas-planilha": "metas-sheet-sync", "mentorados-planilha": "mentorados-sheet", "teste-vac-planilha": "teste-vac-sheet" }[row.chave] || "sync";
       const { data, error } = await sb.functions.invoke(fn, { body: { op: row.chave, manual: true } });
       if (error) {
         let msg = error.message;
@@ -4511,6 +4514,353 @@ function MentoradosPage() {
               </div>`)}
         </div>
       `}
+    </div>`;
+}
+
+/* ============================ CS · Teste VAC ============================ */
+// Cache somente leitura (cs_teste_vac) da planilha "Respostas Teste VAC" (primeira aba),
+// alimentada pelo site público tiadoingles.github.io/teste-vac. A Edge Function
+// "teste-vac-sheet" lê a planilha e troca o cache: ao abrir a aba (se o último sync tiver
+// mais de 5 min), pelo botão "Atualizar" e pelo cron os-teste-vac-planilha-30min.
+// O canal (visual/auditivo/cinestesico/misto/indefinido) é calculado na Edge Function a
+// partir da coluna Resultado (empate "X e Y"/"Equilibrado" = misto; vazio = pelos totais).
+// Filtro de resultado: Visual/Auditivo/Cinestésico pegam só os resultados puros; os empates
+// (mesmo os que contêm Visual) ficam só em Misto.
+
+const PLANILHA_TESTE_VAC_URL = "https://docs.google.com/spreadsheets/d/1oyj0QU4n49ZnbJ2ozPPxjaB0qo_Ou4NwaWPehGNvhYM/edit";
+const CONTA_SERVICO_OS = "chatbot-tira-duvidas@tia-ai-platform.iam.gserviceaccount.com";
+const VAC_CANAIS = [
+  { id: "visual", nome: "Visual", letra: "A", pill: "bg-[#e1e8f2] text-[#4a6286]", cor: "#7d97bd" },
+  { id: "auditivo", nome: "Auditivo", letra: "B", pill: "bg-[#ece3f0] text-[#7a4f86]", cor: "#a882b5" },
+  { id: "cinestesico", nome: "Cinestésico", letra: "C", pill: "bg-[#f7e1cc] text-[#9a5a1c]", cor: "#d0955a" },
+  { id: "misto", nome: "Misto", pill: PILL_WARN, cor: "#bfa94e" },
+];
+const VAC_POR_ID = Object.fromEntries(VAC_CANAIS.map((c) => [c.id, c]));
+const VAC_POR_LETRA = { A: VAC_CANAIS[0], B: VAC_CANAIS[1], C: VAC_CANAIS[2] };
+
+async function fetchTesteVac() {
+  const { data, error } = await sb.from("cs_teste_vac").select("*")
+    .order("respondido_em", { ascending: false, nullsFirst: false }).order("linha", { ascending: false }).range(0, 9999);
+  if (error) throw error;
+  return data || [];
+}
+async function fetchStatusTesteVac() {
+  const { data } = await sb.from("sync_status").select("*").eq("chave", "teste-vac-planilha").maybeSingle();
+  return data || null;
+}
+async function sincronizarTesteVac(force) {
+  const { data, error } = await sb.functions.invoke("teste-vac-sheet", { body: { force: !!force } });
+  if (error) {
+    let msg = error.message;
+    try { const j = await error.context.json(); if (j && j.error) msg = j.error; } catch (_) { /* ignore */ }
+    return { ok: false, error: msg };
+  }
+  return data || { ok: false, error: "sem resposta" };
+}
+
+function PillVac({ r }) {
+  const c = VAC_POR_ID[r.canal];
+  if (!c) return html`<span title="Resultado vazio ou não reconhecido na planilha"><${Badge} class=${PILL_NEUTRAL}>${r.resultado || "Sem resultado"}<//></span>`;
+  // Misto mostra o texto da planilha ("Visual e Auditivo"); puro mostra o nome do canal.
+  const texto = r.canal === "misto" ? (r.resultado || "Misto") : c.nome;
+  return html`<${Badge} class=${cx("whitespace-nowrap", c.pill)}>${texto}<//>`;
+}
+function PillCurso({ r }) {
+  return r.mentorado
+    ? html`<${Badge} class=${cx("whitespace-nowrap", "bg-brand-light text-brand-dark")}>Mentorado<//>`
+    : html`<${Badge} class=${cx("whitespace-nowrap", PILL_NEUTRAL)}>Outros cursos<//>`;
+}
+// Totais A/B/C como mini barras proporcionais + números (V 12 · A 7 · C 6).
+function TotaisVac({ r }) {
+  const vals = [r.total_a, r.total_b, r.total_c];
+  if (vals.some((v) => v == null)) return html`<span class="text-xs text-muted">—</span>`;
+  const max = Math.max(...vals, 1);
+  return html`<div class="w-[120px] space-y-0.5" title=${`Visual ${vals[0]} · Auditivo ${vals[1]} · Cinestésico ${vals[2]}`}>
+    ${VAC_CANAIS.slice(0, 3).map((c, i) => html`
+      <div class="flex items-center gap-1.5 text-[11px] leading-4">
+        <span class="w-3 shrink-0 font-medium text-muted">${c.nome[0]}</span>
+        <div class="h-1.5 flex-1 overflow-hidden rounded bg-black/[0.05]">
+          <div class="h-full rounded" style=${`width:${((vals[i] / max) * 100).toFixed(0)}%;background:${c.cor}`}></div>
+        </div>
+        <span class="w-5 shrink-0 text-right tabular-nums text-ink/80">${vals[i]}</span>
+      </div>`)}
+  </div>`;
+}
+const dataHoraVac = (r) => {
+  const d = r.data ? r.data.split("-").reverse().join("/") : r.data_txt || "—";
+  return r.horario ? `${d} ${r.horario.slice(0, 5)}` : d;
+};
+const pctVac = (n, t) => (t ? Math.round((n / t) * 100) : 0) + "%";
+
+function exportarCsvVac(linhas) {
+  const esc = (v) => {
+    const s = v == null ? "" : String(v);
+    return /[";\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const nResp = Math.max(25, ...linhas.map((r) => (r.respostas || []).reduce((m, x) => Math.max(m, x.n || 0), 0)));
+  const cab = ["Data", "Horário", "Nome", "E-mail", "Telefone", "Curso", "Resultado", "Total A (Visual)", "Total B (Auditivo)", "Total C (Cinestésico)"];
+  for (let i = 1; i <= nResp; i++) cab.push("Resposta " + i);
+  const corpo = linhas.map((r) => {
+    const porN = Object.fromEntries((r.respostas || []).map((x) => [x.n, x.texto]));
+    const base = [r.data ? r.data.split("-").reverse().join("/") : r.data_txt, r.horario, r.nome, r.email, r.telefone,
+      r.mentorado ? "Mentorado" : "Outros cursos", r.resultado || "", r.total_a, r.total_b, r.total_c];
+    for (let i = 1; i <= nResp; i++) base.push(porN[i] || "");
+    return base.map(esc).join(";");
+  });
+  // BOM + ";" para o Excel em português abrir com acentos e colunas certas.
+  const blob = new Blob(["﻿" + [cab.map(esc).join(";"), ...corpo].join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `teste-vac-${hojeISO()}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+function DetalheVac({ r, onClose }) {
+  const respostas = [...(r.respostas || [])].sort((a, b) => a.n - b.n);
+  const tel = linksWhats(r.telefone);
+  return html`<${Modal} title=${r.nome || "Resposta do Teste VAC"} onClose=${onClose} wide>
+    <div class="flex flex-wrap items-center gap-2">
+      <${PillVac} r=${r} /><${PillCurso} r=${r} />
+      <span class="text-xs text-muted">Respondido em ${dataHoraVac(r)}</span>
+    </div>
+    <div class="mt-3 grid gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+      <div><div class="text-xs text-muted">E-mail</div><div class="break-all">${r.email || "—"}</div></div>
+      <div><div class="text-xs text-muted">Telefone</div><div>${tel.length ? tel.map((t, i) => html`${i ? " / " : ""}${t.url
+        ? html`<a class="text-[#3d7a45] hover:underline" href=${t.url} target="_blank" rel="noopener" title="Abrir no WhatsApp">${t.texto}</a>` : t.texto}`) : "—"}</div></div>
+    </div>
+    <div class="mt-3 grid grid-cols-3 gap-2">
+      ${VAC_CANAIS.slice(0, 3).map((c, i) => html`<div class="rounded-lg border border-line px-3 py-2 text-center">
+        <div class="text-[11px] uppercase tracking-wide text-muted">${c.letra} · ${c.nome}</div>
+        <div class="text-xl font-semibold text-ink">${[r.total_a, r.total_b, r.total_c][i] ?? "—"}</div>
+      </div>`)}
+    </div>
+    <div class="mt-4 text-xs font-semibold uppercase tracking-wide text-muted">Respostas (${respostas.length})</div>
+    ${respostas.length ? html`<ol class="mt-2 divide-y divide-line rounded-lg border border-line">
+      ${respostas.map((x) => {
+        const letra = (String(x.texto).match(/^\s*([ABC])\s*[\)\.\-:]/i) || [])[1];
+        const c = letra && VAC_POR_LETRA[letra.toUpperCase()];
+        return html`<li class="flex items-start gap-3 px-3 py-2 text-sm">
+          <span class="w-6 shrink-0 pt-0.5 text-right text-xs tabular-nums text-muted">${x.n}.</span>
+          <span class="flex-1 text-ink">${x.texto}</span>
+          ${c ? html`<${Badge} class=${cx("shrink-0", c.pill)}>${c.nome}<//>` : null}
+        </li>`;
+      })}
+    </ol>` : html`<div class="mt-2 text-sm text-muted">Nenhuma resposta registrada nesta linha.</div>`}
+    ${respostas.length && respostas.length !== 25 ? html`<p class="mt-2 text-xs text-muted">Esta linha tem ${respostas.length} respostas (o teste atual tem 25); pode ser um registro antigo de teste.</p>` : null}
+    <p class="mt-3 text-xs text-muted">Linha ${r.linha} da planilha.</p>
+  <//>`;
+}
+
+function TesteVacPage() {
+  const [lista, setLista] = useState(null);
+  const [status, setStatus] = useState(null);
+  const [semAcesso, setSemAcesso] = useState(false);
+  const [sincronizando, setSincronizando] = useState(false);
+  const [busca, setBusca] = useState("");
+  const [fCanal, setFCanal] = useState("");
+  const [fCurso, setFCurso] = useState("");
+  const [de, setDe] = useState("");
+  const [ate, setAte] = useState("");
+  const [aberta, setAberta] = useState(null);
+
+  async function carregar() {
+    const [l, s] = await Promise.all([fetchTesteVac(), fetchStatusTesteVac()]);
+    setLista(l); setStatus(s);
+    return s;
+  }
+  async function atualizar(force) {
+    setSincronizando(true);
+    const r = await sincronizarTesteVac(force);
+    let s = null;
+    try { s = await carregar(); } catch (e) { notify(errMsg(e), "err"); }
+    setSincronizando(false);
+    const naoCompartilhada = !!(r && r.semAcesso) || !!(s && s.ultimo_status === "erro" && /não foi compartilhada/.test(s.ultimo_detalhe || ""));
+    setSemAcesso(naoCompartilhada);
+    if (force) {
+      if (r.ok && r.pulado) notify("Os resultados acabaram de ser atualizados; tente de novo em alguns segundos.", "info");
+      else if (r.ok) notify("Resultados atualizados da planilha.", "ok");
+      else if (!naoCompartilhada) notify(r.error || "Não foi possível ler a planilha.", "err");
+    }
+  }
+  useEffect(() => {
+    carregar()
+      .then((s) => setSemAcesso(!!(s && s.ultimo_status === "erro" && /não foi compartilhada/.test(s.ultimo_detalhe || ""))))
+      .catch((e) => { notify(errMsg(e), "err"); setLista([]); })
+      .then(() => atualizar(false)); // o servidor pula se o cache tiver menos de 5 min
+  }, []);
+
+  // Filtros que não são o de resultado (o painel do topo usa só estes, para os cards
+  // servirem de atalho sem zerar uns aos outros).
+  const baseFiltrada = useMemo(() => {
+    const q = semAcentoMin(busca);
+    return (lista || []).filter((r) => {
+      if (fCurso === "mentorado" && !r.mentorado) return false;
+      if (fCurso === "outros" && r.mentorado) return false;
+      if (de && (!r.data || r.data < de)) return false;
+      if (ate && (!r.data || r.data > ate)) return false;
+      if (!q) return true;
+      return semAcentoMin(r.nome).includes(q) || semAcentoMin(r.email).includes(q);
+    });
+  }, [lista, busca, fCurso, de, ate]);
+  const filtrados = useMemo(() => (fCanal ? baseFiltrada.filter((r) => r.canal === fCanal) : baseFiltrada), [baseFiltrada, fCanal]);
+  const contagem = useMemo(() => {
+    const c = { visual: 0, auditivo: 0, cinestesico: 0, misto: 0, indefinido: 0 };
+    baseFiltrada.forEach((r) => { c[r.canal in c ? r.canal : "indefinido"]++; });
+    return c;
+  }, [baseFiltrada]);
+
+  const temFiltro = busca || fCanal || fCurso || de || ate;
+  const limpar = () => { setBusca(""); setFCanal(""); setFCurso(""); setDe(""); setAte(""); };
+  const erro = status && status.ultimo_status === "erro" && !semAcesso;
+  const atualizadoEm = (() => {
+    if (!status || !status.ultima_execucao_em || status.ultimo_status !== "ok") return null;
+    const d = new Date(status.ultima_execucao_em);
+    const hora = d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+    return isoDia(d) === hojeISO() ? "Atualizado às " + hora
+      : "Atualizado em " + d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" }) + " às " + hora;
+  })();
+  const total = baseFiltrada.length;
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">🤝 CS / Suporte</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">Teste VAC</h1>
+      <p class="mt-1 text-sm text-muted">Respostas do teste de canal de aprendizagem (Visual, Auditivo, Cinestésico) feito no site do Teste VAC, lidas da planilha Respostas Teste VAC (somente leitura).${" "}
+        <a class="text-brand hover:underline" href=${PLANILHA_TESTE_VAC_URL} target="_blank" rel="noopener">Abrir planilha ↗</a></p>
+
+      ${semAcesso ? html`
+        <div class="mt-4 rounded-xl border border-[#efe0b5] bg-[#faf5e4] px-4 py-3 text-sm text-[#6f5f24]">
+          <div class="font-medium">A planilha ainda não foi compartilhada com o OS</div>
+          <div class="mt-1">Para os resultados aparecerem aqui, abra a planilha Respostas Teste VAC, clique em Compartilhar e adicione${" "}
+            <span class="break-all font-medium">${CONTA_SERVICO_OS}</span> como <span class="font-medium">Leitor</span>. Depois, clique em Atualizar.</div>
+          ${lista && lista.length ? html`<div class="mt-1 text-xs">Mostrando a última versão salva no OS.</div>` : null}
+        </div>` : null}
+      ${erro ? html`
+        <div class="mt-4 rounded-lg border border-[#efe0b5] bg-[#faf5e4] px-3 py-2 text-sm text-[#7c6a2a]">
+          ${String(status.ultimo_detalhe || "Não foi possível ler a planilha.").replace(/\.$/, "")}.
+          ${lista && lista.length ? " Mostrando a última versão salva no OS." : ""}
+        </div>` : null}
+
+      ${lista === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
+        <div class="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+          <button type="button" onClick=${() => setFCanal("")}
+            class=${cx("col-span-2 rounded-xl border bg-card p-4 text-left transition hover:border-brand/40 sm:col-span-1", !fCanal ? "border-brand/50 ring-1 ring-brand/30" : "border-line")}>
+            <div class="text-xs uppercase tracking-wide text-muted">Respostas</div>
+            <div class="mt-1 text-2xl font-semibold text-ink">${nf(total)}</div>
+            <div class="text-xs text-muted">${temFiltro && total !== lista.length ? "de " + nf(lista.length) + " no total" : "no total"}</div>
+          </button>
+          ${VAC_CANAIS.map((c) => html`
+            <button type="button" onClick=${() => setFCanal(fCanal === c.id ? "" : c.id)} aria-pressed=${fCanal === c.id}
+              title=${c.id === "misto" ? "Empates entre canais (ex.: Visual e Auditivo)" : "Só resultados " + c.nome + " puros"}
+              class=${cx("rounded-xl border bg-card p-4 text-left transition hover:border-brand/40", fCanal === c.id ? "border-brand/50 ring-1 ring-brand/30" : "border-line")}>
+              <div class="flex items-center gap-1.5 text-xs uppercase tracking-wide text-muted">
+                <span class="inline-block h-2 w-2 rounded-full" style=${"background:" + c.cor}></span>${c.nome}
+              </div>
+              <div class="mt-1 text-2xl font-semibold text-ink">${nf(contagem[c.id])}</div>
+              <div class="flex items-center gap-2 text-xs text-muted">
+                <span class="tabular-nums">${pctVac(contagem[c.id], total)}</span>
+                <div class="h-1.5 flex-1 overflow-hidden rounded bg-black/[0.05]">
+                  <div class="h-full rounded" style=${`width:${total ? ((contagem[c.id] / total) * 100).toFixed(1) : 0}%;background:${c.cor}`}></div>
+                </div>
+              </div>
+            </button>`)}
+        </div>
+        <p class="mt-2 text-xs text-muted">Clique num card para filtrar. Visual, Auditivo e Cinestésico contam só resultados puros; empates entre canais entram em Misto.
+          ${contagem.indefinido ? ` ${contagem.indefinido} resposta${contagem.indefinido > 1 ? "s" : ""} sem resultado reconhecível ${contagem.indefinido > 1 ? "aparecem" : "aparece"} só em Todos.` : ""}</p>
+
+        <div class="mt-4 flex flex-wrap items-end gap-2">
+          <label class="block w-full sm:w-auto sm:min-w-[260px] sm:flex-1 lg:max-w-sm">
+            <span class="mb-1 block text-xs text-muted">Buscar</span>
+            <input class=${inputCls} type="search" placeholder="Nome ou e-mail" value=${busca} onInput=${(e) => setBusca(e.target.value)} />
+          </label>
+          <label class="block">
+            <span class="mb-1 block text-xs text-muted">Resultado</span>
+            <select class=${cx(inputCls, "w-auto")} value=${fCanal} onChange=${(e) => setFCanal(e.target.value)}>
+              <option value="">Todos</option>
+              ${VAC_CANAIS.map((c) => html`<option value=${c.id}>${c.nome}${c.id === "misto" ? " (empate)" : ""}</option>`)}
+            </select>
+          </label>
+          <label class="block">
+            <span class="mb-1 block text-xs text-muted">Curso</span>
+            <select class=${cx(inputCls, "w-auto")} value=${fCurso} onChange=${(e) => setFCurso(e.target.value)}>
+              <option value="">Todos</option>
+              <option value="mentorado">Mentorado</option>
+              <option value="outros">Outros cursos</option>
+            </select>
+          </label>
+          <label class="block">
+            <span class="mb-1 block text-xs text-muted">De</span>
+            <input class=${cx(inputCls, "w-auto")} type="date" value=${de} max=${ate || undefined} onInput=${(e) => setDe(e.target.value)} />
+          </label>
+          <label class="block">
+            <span class="mb-1 block text-xs text-muted">Até</span>
+            <input class=${cx(inputCls, "w-auto")} type="date" value=${ate} min=${de || undefined} onInput=${(e) => setAte(e.target.value)} />
+          </label>
+          ${temFiltro ? html`<${Btn} variant="subtle" type="button" onClick=${limpar}>Limpar filtros<//>` : null}
+        </div>
+
+        <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted">
+          <span class="font-medium text-ink">${nf(filtrados.length)} ${filtrados.length === 1 ? "resultado" : "resultados"}</span>
+          ${atualizadoEm ? html`<span>· ${atualizadoEm}</span>` : null}
+          <div class="ml-auto flex items-center gap-2">
+            <${Btn} variant="ghost" type="button" disabled=${!filtrados.length} onClick=${() => exportarCsvVac(filtrados)}>Exportar CSV<//>
+            <${Btn} variant="ghost" type="button" loading=${sincronizando} onClick=${() => atualizar(true)}>↻ Atualizar<//>
+          </div>
+        </div>
+
+        <div class="mt-3 hidden overflow-x-auto rounded-2xl border border-line bg-card md:block">
+          <table class="w-full min-w-[900px] text-sm">
+            <thead>
+              <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
+                <th class="px-3 py-2.5">Data</th>
+                <th class="px-3 py-2.5">Nome</th>
+                <th class="px-3 py-2.5">E-mail</th>
+                <th class="px-3 py-2.5">Telefone</th>
+                <th class="px-3 py-2.5">Curso</th>
+                <th class="px-3 py-2.5">Resultado</th>
+                <th class="px-3 py-2.5">Totais</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filtrados.length === 0 ? html`<tr><td colspan="7" class="px-4 py-8 text-center text-sm text-muted">
+                  ${lista.length ? "Nenhuma resposta com esses filtros." : "Nenhuma resposta do Teste VAC ainda."}</td></tr>` :
+                filtrados.map((r) => html`
+                  <tr key=${r.linha} class="cursor-pointer border-b border-line align-top last:border-0 hover:bg-black/[0.02]"
+                    onClick=${() => setAberta(r)} tabindex="0" onKeyDown=${(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), setAberta(r))}>
+                    <td class="whitespace-nowrap px-3 py-2.5 text-xs tabular-nums">${r.data ? r.data.split("-").reverse().join("/") : r.data_txt || "—"}
+                      ${r.horario ? html`<div class="text-[11px] text-muted">${r.horario.slice(0, 5)}</div>` : null}</td>
+                    <td class="min-w-[150px] px-3 py-2.5 font-medium text-ink">${r.nome || "—"}</td>
+                    <td class="min-w-[170px] break-all px-3 py-2.5 text-xs text-muted">${r.email || "—"}</td>
+                    <td class="whitespace-nowrap px-3 py-2.5 text-xs">${r.telefone || html`<span class="text-muted">—</span>`}</td>
+                    <td class="px-3 py-2.5"><${PillCurso} r=${r} /></td>
+                    <td class="px-3 py-2.5"><${PillVac} r=${r} /></td>
+                    <td class="px-3 py-2.5"><${TotaisVac} r=${r} /></td>
+                  </tr>`)}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="mt-3 space-y-2 md:hidden">
+          ${filtrados.length === 0 ? html`<div class="rounded-xl border border-line bg-card px-4 py-8 text-center text-sm text-muted">
+              ${lista.length ? "Nenhuma resposta com esses filtros." : "Nenhuma resposta do Teste VAC ainda."}</div>` :
+            filtrados.map((r) => html`
+              <button type="button" key=${r.linha} onClick=${() => setAberta(r)} class="block w-full rounded-xl border border-line bg-card p-4 text-left">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="min-w-0">
+                    <div class="font-medium text-ink">${r.nome || "—"}</div>
+                    <div class="break-all text-xs text-muted">${r.email || "—"}</div>
+                  </div>
+                  <span class="shrink-0"><${PillVac} r=${r} /></span>
+                </div>
+                <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
+                  <${PillCurso} r=${r} /><span>${dataHoraVac(r)}</span>${r.telefone ? html`<span>· ${r.telefone}</span>` : null}
+                </div>
+                <div class="mt-2"><${TotaisVac} r=${r} /></div>
+              </button>`)}
+        </div>
+      `}
+      ${aberta ? html`<${DetalheVac} r=${aberta} onClose=${() => setAberta(null)} />` : null}
     </div>`;
 }
 
@@ -7732,6 +8082,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "cs" && p1 === "diagnostico") return html`<${DiagnosticoPage} me=${me} query=${route.query} />`;
   if (p0 === "cs" && p1 === "metas") return html`<${MetasPage} me=${me} />`;
   if (p0 === "cs" && p1 === "mentorados") return html`<${MentoradosPage} />`;
+  if (p0 === "cs" && p1 === "teste-vac") return html`<${TesteVacPage} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
   if (p0 === "cs" && p1 === "chat-cademi") return html`<${ChatCademiPage} />`;
   if (p0 === "pedagogico" && p1 === "aulas-praticas") return html`<${AulasPraticasPage} />`;

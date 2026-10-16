@@ -20,7 +20,7 @@ como backend.
   (`GUEST_EMAIL/GUEST_PASSWORD`), só para testes e desligado.
 - **Backend** — Supabase projeto `hmvlkltyvyhlxfyaovpe` (região `sa-east-1`).
   Edge Functions (`ai`, `public-chat`, `sync`, `planilha`, `admin-users`,
-  `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet`, entre outras)
+  `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet`, `teste-vac-sheet`, entre outras)
   vivem no Supabase, não neste repo — leia/edite via MCP do Supabase
   (`get_edge_function`/`deploy_edge_function`).
 
@@ -50,13 +50,13 @@ como backend.
   `cs` do enum já foi aplicado; conferir `select * from pg_policies` antes de confiar): o papel `cs` NÃO entra em `app.is_editor()`.
   Helpers `app.is_cs()`, `app.is_cs_or_editor()` e `app.cs_section_id()`. Tabelas do CS
   (escrita para cs/editor/admin): `livros_envios`, `faq_interacoes` (só seção `cs-suporte`),
-  `cs_diagnosticos`, `cs_metas`; leitura para cs: também `cs_mentorados`, `pesquisa_avatar`,
-  `chat_widget_logs`, `sync_status` (só `metas-planilha`/`mentorados-planilha`),
+  `cs_diagnosticos`, `cs_metas`; leitura para cs: também `cs_mentorados`, `cs_teste_vac`, `pesquisa_avatar`,
+  `chat_widget_logs`, `sync_status` (só `metas-planilha`/`mentorados-planilha`/`teste-vac-planilha`),
   `automacao_estado` e a seção `cs-suporte` da Base (alimenta o FAQ). As demais tabelas
   têm `select` `to authenticated using (not app.is_cs())`. Tela/tabela nova do CS: dar
   escrita via `app.is_cs_or_editor()`; tabela de outra área: `not app.is_cs()` no select.
 - **Edge Functions e papel**: `admin-users` (só admin; aceita leitor/editor/admin/cs),
-  `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet` (force) e `planilha`
+  `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet`/`teste-vac-sheet` (force) e `planilha`
   aceitam editor/admin/cs. `ai` e `sync` só exigem usuário logado (ver lacunas no relatório
   de segurança da tarefa de login).
 - **LinkedIn da Tia** (`#/conteudo/linkedin`, `LinkedinPage`/`LinkedinCard`): fila de posts em
