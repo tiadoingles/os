@@ -118,6 +118,14 @@ como backend.
   Hotmart): gravar em `cs_mentorado_eventos` (service_role; `(fonte, chave_externa)` único; `mentorado_email` e/ou
   `email`/`telefone`) que a linha do tempo já mostra. Ao conectar ferramenta nova com dados de alunos, perguntar à Tia
   se quer integrar à ficha.
+  **Clint (CRM + WhatsApp)** (SQL `scripts/migrations/20261017_cs_clint.sql`): Edge Function `clint-sync` (verify_jwt=false)
+  lê a API REST do Clint (`https://api.clint.digital`, header `api-token`, segredo **`CLINT_API_TOKEN`** nas Edge Functions;
+  a chave só existe no plano Elite, em Conta > API) e grava por mentorado o cache `cs_clint` (contatos com tags, negócios
+  com origem/etapa/dono/ganho/perda, conversas com as últimas 15 mensagens das 2 mais recentes) + marcos em
+  `cs_mentorado_eventos` (fonte `clint`). Busca o contato por e-mail (principal + vínculos) e, se não achar, por telefone.
+  Cron `os-clint-30min` (aos 20/50 min) faz lotes de 40 dos sincronizados há mais tempo; o botão "Atualizar do Clint" da
+  ficha busca só a pessoa (e só quem está na Lista de Mentorados: não puxa leads de vendas). Sem o segredo, responde `naoConfigurado`.
+  Chave dos eventos inclui o e-mail da ficha; eventos do Clint que sumiram no Clint são apagados a cada busca. Somente leitura: o OS nunca escreve no Clint.
 - **Testes de Nivelamento** (`#/cs/nivelamento`, `NivelamentoPage`; SQL `scripts/migrations/20261017_cs_nivelamento.sql`):
   cache somente leitura `cs_nivelamento` da planilha `1YhlAuX3PqsJ1o0StPPe8GW4zEXsJjYqBY7yjSZhETO8`, SÓ a aba **Novo**
   (respostas do teste da Mentoria avaliadas pela IA da Edge Function pública `nivelamento`). Edge Function
