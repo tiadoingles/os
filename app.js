@@ -81,8 +81,8 @@ const NAV = [
       desc: "Volume de atendimentos, tempo de primeira resposta, tempo de resolução e satisfação do CS. Base de dados a definir." },
     { slug: "chat-cademi", nome: "Chat da Cademí",
       desc: "Perguntas e respostas do chatbot de dúvidas de conteúdo (popup na área de membros), para acompanhar o que as alunas perguntam." },
-    { slug: "pesquisas", nome: "Pesquisas de Alunos",
-      desc: "Principais insights e as pesquisas completas.",
+    { slug: "pesquisas", nome: "Pesquisas de Alunos", subrotas: ["mentorados", "outros"],
+      desc: "Mentorados e Outros cursos: mini dashboards, filtros e perguntas à IA sobre as respostas.",
       links: [
         ["Pesquisa Alunos Mentoria Fluent Mind", "https://docs.google.com/spreadsheets/d/1EUgDyUOo2pe4I790h-iuhbyf_t4GncDPLBIcOCeAAaA/edit"],
         ["Pesquisa Módulo PNL — Método Tia do Inglês", "https://docs.google.com/spreadsheets/d/1-WLmTHOTT7rISrdWwEezmjNGejlnET2gUGBZr9IwVYc/edit"],
@@ -95,6 +95,9 @@ const NAV = [
     { slug: "teste-vac", nome: "Teste VAC",
       desc: "Resultados do Teste VAC (Visual, Auditivo, Cinestésico) da planilha Respostas Teste VAC, com filtros.",
       links: [["Planilha Respostas Teste VAC", "https://docs.google.com/spreadsheets/d/1oyj0QU4n49ZnbJ2ozPPxjaB0qo_Ou4NwaWPehGNvhYM/edit"]] },
+    { slug: "nivelamento", nome: "Testes de Nivelamento",
+      desc: "Resultados do Teste de Nivelamento da Mentoria (trilha indicada e notas por área), da aba Novo da planilha de respostas, com filtros.",
+      links: [["Planilha de respostas (aba Novo)", "https://docs.google.com/spreadsheets/d/1YhlAuX3PqsJ1o0StPPe8GW4zEXsJjYqBY7yjSZhETO8/edit"]] },
     { slug: "nps", nome: "NPS", desc: "Acompanhamento do NPS das alunas ao longo do tempo." },
     { slug: "presenca", nome: "Presença nas Práticas",
       desc: "Presença em Sessões Práticas, Arenas de Conversação e Fluent Labs." },
@@ -179,6 +182,7 @@ function rotaPermitida(me, path) {
   if (!area || !temArea(me, area)) return false;
   if (area === "bc") return (p0 === "base" || p0 === "novo") ? partes.length === 1 : partes.length === 2;
   const grupo = NAV.find((g) => g.id === area);
+  if (partes.length === 3) return grupo.itens.some((it) => it.slug === partes[1] && (it.subrotas || []).includes(partes[2]));
   return partes.length === 2 && grupo.itens.some((it) => it.slug === partes[1]);
 }
 // Para onde mandar quem entra (ou cai numa rota que não pode ver): ADM vai para o Início;
@@ -1341,12 +1345,14 @@ function DocTable({ docs, showSection }) {
 function sanitizeHtml(dirty) {
   const tpl = document.createElement("template");
   tpl.innerHTML = dirty;
-  tpl.content.querySelectorAll("script,style,iframe,object,embed,link,meta,form").forEach((n) => n.remove());
+  tpl.content.querySelectorAll("script,style,iframe,object,embed,link,meta,form,svg,math,base,frame,frameset").forEach((n) => n.remove());
+  // Links/imagens só com esquema seguro (o navegador ignora tabs/controles no esquema: "java&#9;script:").
+  const urlSegura = (v) => /^(https?:|mailto:|tel:|#|\/(?!\/)|\.{0,2}\/|[^:]*$)/i.test(String(v).replace(/[\x00-\x20]/g, ""));
   tpl.content.querySelectorAll("*").forEach((el) => {
     [...el.attributes].forEach((a) => {
       const n = a.name.toLowerCase();
-      if (n.startsWith("on")) el.removeAttribute(a.name);
-      if ((n === "href" || n === "src") && /^\s*javascript:/i.test(a.value)) el.removeAttribute(a.name);
+      if (n.startsWith("on") || n === "formaction" || n === "srcdoc" || n === "style" || n.includes(":")) { el.removeAttribute(a.name); return; }
+      if ((n === "href" || n === "src" || n === "action" || n === "background" || n === "poster") && !urlSegura(a.value)) el.removeAttribute(a.name);
     });
     if (el.tagName === "A") { el.setAttribute("target", "_blank"); el.setAttribute("rel", "noopener nofollow"); }
   });
@@ -2224,7 +2230,7 @@ function SyncRow({ row, onDone }) {
   async function sincronizarAgora() {
     setBusy(true);
     try {
-      const fn = { "metas-planilha": "metas-sheet-sync", "mentorados-planilha": "mentorados-sheet", "teste-vac-planilha": "teste-vac-sheet" }[row.chave] || "sync";
+      const fn = { "metas-planilha": "metas-sheet-sync", "mentorados-planilha": "mentorados-sheet", "teste-vac-planilha": "teste-vac-sheet", "nivelamento-planilha": "nivelamento-sheet" }[row.chave] || "sync";
       const { data, error } = await sb.functions.invoke(fn, { body: { op: row.chave, manual: true } });
       if (error) {
         let msg = error.message;
@@ -5079,6 +5085,520 @@ function TesteVacPage() {
     </div>`;
 }
 
+/* ============================ CS · Testes de Nivelamento ============================ */
+// Cache somente leitura (cs_nivelamento) da planilha "Teste de Nivelamento Fluent Mind (respostas)",
+// SÓ a aba "Novo" (pedido da Tia, 17/10/2026), alimentada pelo teste da Mentoria (Edge Function pública
+// "nivelamento": a IA indica a trilha e dá as notas). A Edge Function "nivelamento-sheet" lê a aba e troca
+// o cache: ao abrir a aba (se o último sync tiver mais de 5 min), pelo botão "Atualizar" e pelo cron
+// os-nivelamento-planilha-30min. "Na Lista de Mentorados" = e-mail/WhatsApp encontrado em cs_mentorados
+// (calculado na Edge Function). Mesmo modelo da aba Teste VAC.
+
+const PLANILHA_NIVELAMENTO_URL = "https://docs.google.com/spreadsheets/d/1YhlAuX3PqsJ1o0StPPe8GW4zEXsJjYqBY7yjSZhETO8/edit";
+const NIV_TRILHAS = [
+  { n: 1, nome: "Básico I", cor: "#9cb88f" },
+  { n: 2, nome: "Básico II", cor: "#7d97bd" },
+  { n: 3, nome: "Inter I", cor: "#a882b5" },
+  { n: 4, nome: "Inter II", cor: "#d0955a" },
+  { n: 5, nome: "Advanced", cor: "#c9676f" },
+];
+const NIV_TRILHA = Object.fromEntries(NIV_TRILHAS.map((t) => [t.n, t]));
+const NIV_AREAS = [
+  { id: "vocabulario", nome: "Vocabulário", curto: "Voc" },
+  { id: "leitura", nome: "Leitura", curto: "Lei" },
+  { id: "gramatica", nome: "Gramática", curto: "Gra" },
+  { id: "listening", nome: "Listening", curto: "Lis" },
+  { id: "escrita", nome: "Escrita", curto: "Esc" },
+];
+const NIV_MEDIAS = [
+  { id: "baixa", nome: "Abaixo de 4", de: 0, ate: 3.95 },
+  { id: "media", nome: "4 a 5,9", de: 4, ate: 5.95 },
+  { id: "boa", nome: "6 a 7,9", de: 6, ate: 7.95 },
+  { id: "alta", nome: "8 ou mais", de: 8, ate: 10 },
+];
+const notaNiv = (r, a) => (r["nota_" + a] == null ? null : Number(r["nota_" + a]));
+const fmtNota = (v) => (v == null || Number.isNaN(Number(v)) ? "—" : Number(v).toLocaleString("pt-BR", { maximumFractionDigits: 1 }));
+// Área(s) com a menor nota da aluna (empates entram todas).
+function areasFracasNiv(r) {
+  const vals = NIV_AREAS.map((a) => [a.id, notaNiv(r, a.id)]).filter(([, v]) => v != null);
+  if (!vals.length) return [];
+  const min = Math.min(...vals.map(([, v]) => v));
+  return vals.filter(([, v]) => v === min).map(([id]) => id);
+}
+const dataHoraNiv = (r) => {
+  if (!r.enviado_em) return r.enviado_txt || "—";
+  const d = new Date(r.enviado_em);
+  return d.toLocaleDateString("pt-BR") + " " + d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+};
+
+async function fetchNivelamento() {
+  const { data, error } = await sb.from("cs_nivelamento").select("*")
+    .order("enviado_em", { ascending: false, nullsFirst: false }).order("linha", { ascending: false }).range(0, 9999);
+  if (error) throw error;
+  return data || [];
+}
+async function fetchStatusNivelamento() {
+  const { data } = await sb.from("sync_status").select("*").eq("chave", "nivelamento-planilha").maybeSingle();
+  return data || null;
+}
+async function sincronizarNivelamento(force) {
+  const { data, error } = await sb.functions.invoke("nivelamento-sheet", { body: { force: !!force } });
+  if (error) {
+    let msg = error.message;
+    try { const j = await error.context.json(); if (j && j.error) msg = j.error; } catch (_) { /* ignore */ }
+    return { ok: false, error: msg };
+  }
+  return data || { ok: false, error: "sem resposta" };
+}
+
+function PillTrilha({ r }) {
+  const t = NIV_TRILHA[r.trilha];
+  if (!t) return html`<span title="Trilha não reconhecida na planilha"><${Badge} class=${PILL_NEUTRAL}>${r.trilha_txt || "Sem trilha"}<//></span>`;
+  return html`<span title=${r.trilha_txt || ""} class="inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium text-white"
+    style=${"background:" + t.cor}>T${t.n} · ${t.nome}</span>`;
+}
+function PillListaMentorados({ r }) {
+  return r.mentorado
+    ? html`<span title=${r.mentorado_status ? "Lista de Mentorados: " + r.mentorado_status : "Encontrada na Lista de Mentorados"}><${Badge} class=${cx("whitespace-nowrap", "bg-brand-light text-brand-dark")}>Na lista${r.mentorado_status ? " · " + r.mentorado_status : ""}<//></span>`
+    : html`<span title="E-mail e WhatsApp não encontrados na Lista de Mentorados"><${Badge} class=${cx("whitespace-nowrap", PILL_NEUTRAL)}>Fora da lista<//></span>`;
+}
+// Notas das 5 áreas como mini barras (0 a 10).
+function NotasNiv({ r }) {
+  const fracas = areasFracasNiv(r);
+  return html`<div class="w-[140px] space-y-0.5" title=${NIV_AREAS.map((a) => a.nome + " " + fmtNota(notaNiv(r, a.id))).join(" · ")}>
+    ${NIV_AREAS.map((a) => {
+      const v = notaNiv(r, a.id);
+      return html`<div class="flex items-center gap-1.5 text-[11px] leading-4">
+        <span class=${cx("w-6 shrink-0", fracas.includes(a.id) ? "font-semibold text-[#a44b43]" : "font-medium text-muted")}>${a.curto}</span>
+        <div class="h-1.5 flex-1 overflow-hidden rounded bg-black/[0.05]">
+          <div class="h-full rounded" style=${`width:${v == null ? 0 : v * 10}%;background:${fracas.includes(a.id) ? "#d98a7f" : "#9aa7b8"}`}></div>
+        </div>
+        <span class="w-6 shrink-0 text-right tabular-nums text-ink/80">${fmtNota(v)}</span>
+      </div>`;
+    })}
+  </div>`;
+}
+
+function exportarCsvNivelamento(linhas) {
+  const esc = (v) => {
+    const s = v == null ? "" : String(v);
+    return /[";\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const titulosPerfil = [], titulosResp = [];
+  linhas.forEach((r) => {
+    (r.perfil || []).forEach((x) => { if (!titulosPerfil.includes(x.titulo)) titulosPerfil.push(x.titulo); });
+    (r.respostas || []).forEach((x) => { if (!titulosResp.includes(x.titulo)) titulosResp.push(x.titulo); });
+  });
+  const cab = ["Enviado às", "Nome", "E-mail", "WhatsApp", "Lista de Mentorados", "Trilha indicada",
+    ...NIV_AREAS.map((a) => a.nome + " (0-10)"), "Média", "Autoavaliação (1-5)", "Justificativa", "Pontos fortes",
+    "Pontos de atenção", "Observação emocional", ...titulosPerfil, ...titulosResp];
+  const corpo = linhas.map((r) => {
+    const perfil = Object.fromEntries((r.perfil || []).map((x) => [x.titulo, x.texto]));
+    const resp = Object.fromEntries((r.respostas || []).map((x) => [x.titulo, x.texto]));
+    return [dataHoraNiv(r), r.nome, r.email, r.whatsapp, r.mentorado ? (r.mentorado_status || "Sim") : "Não", r.trilha_txt,
+      ...NIV_AREAS.map((a) => fmtNota(notaNiv(r, a.id))), fmtNota(r.media), r.autoavaliacao, r.justificativa, r.pontos_fortes,
+      r.pontos_atencao, r.observacao_emocional, ...titulosPerfil.map((t) => perfil[t] || ""), ...titulosResp.map((t) => resp[t] || "")]
+      .map(esc).join(";");
+  });
+  const blob = new Blob(["﻿" + [cab.map(esc).join(";"), ...corpo].join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `testes-nivelamento-${hojeISO()}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+function BlocoTextoNiv({ titulo, texto }) {
+  if (!texto) return null;
+  return html`<div class="mt-4">
+    <div class="text-xs font-semibold uppercase tracking-wide text-muted">${titulo}</div>
+    <div class="mt-1 whitespace-pre-line text-sm leading-relaxed text-ink">${texto}</div>
+  </div>`;
+}
+
+function DetalheNivelamento({ r, onClose }) {
+  const tel = linksWhats(r.whatsapp);
+  const respostas = [...(r.respostas || [])].sort((a, b) => a.n - b.n);
+  const fracas = areasFracasNiv(r);
+  return html`<${Modal} title=${r.nome || "Teste de Nivelamento"} onClose=${onClose} wide>
+    <div class="flex flex-wrap items-center gap-2">
+      <${PillTrilha} r=${r} /><${PillListaMentorados} r=${r} />
+      <span class="text-xs text-muted">Enviado em ${dataHoraNiv(r)}</span>
+    </div>
+    ${r.trilha_txt ? html`<div class="mt-2 text-sm text-ink"><span class="text-muted">Trilha indicada:</span> ${r.trilha_txt}</div>` : null}
+    <div class="mt-3 grid gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+      <div><div class="text-xs text-muted">E-mail</div><div class="break-all">${r.email || "—"}</div></div>
+      <div><div class="text-xs text-muted">WhatsApp</div><div>${tel.length ? tel.map((t, i) => html`${i ? " / " : ""}${t.url
+        ? html`<a class="text-[#3d7a45] hover:underline" href=${t.url} target="_blank" rel="noopener" title="Abrir no WhatsApp">${t.texto}</a>` : t.texto}`) : "—"}</div></div>
+    </div>
+    <div class="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-7">
+      ${NIV_AREAS.map((a) => html`<div class=${cx("rounded-lg border px-2 py-2 text-center", fracas.includes(a.id) ? "border-[#e9c3bd] bg-[#fbf1ef]" : "border-line")}>
+        <div class="text-[11px] uppercase tracking-wide text-muted">${a.nome}</div>
+        <div class="text-xl font-semibold text-ink">${fmtNota(notaNiv(r, a.id))}</div>
+      </div>`)}
+      <div class="rounded-lg border border-line bg-black/[0.03] px-2 py-2 text-center">
+        <div class="text-[11px] uppercase tracking-wide text-muted">Média</div>
+        <div class="text-xl font-semibold text-ink">${fmtNota(r.media)}</div>
+      </div>
+      <div class="rounded-lg border border-line px-2 py-2 text-center" title="Como a aluna avalia o próprio inglês (1 = não sei nada, 5 = me viro bem)">
+        <div class="text-[11px] uppercase tracking-wide text-muted">Autoaval.</div>
+        <div class="text-xl font-semibold text-ink">${r.autoavaliacao ?? "—"}<span class="text-xs font-normal text-muted">/5</span></div>
+      </div>
+    </div>
+    <${BlocoTextoNiv} titulo="Justificativa da trilha" texto=${r.justificativa} />
+    <${BlocoTextoNiv} titulo="Pontos fortes" texto=${r.pontos_fortes} />
+    <${BlocoTextoNiv} titulo="Pontos de atenção" texto=${r.pontos_atencao} />
+    <${BlocoTextoNiv} titulo="Observação emocional" texto=${r.observacao_emocional} />
+    ${(r.perfil || []).length ? html`
+      <div class="mt-5 text-xs font-semibold uppercase tracking-wide text-muted">Sobre a aluna</div>
+      <dl class="mt-2 divide-y divide-line rounded-lg border border-line">
+        ${r.perfil.map((x) => html`<div class="px-3 py-2 text-sm">
+          <dt class="text-xs font-medium text-muted">${x.titulo}</dt>
+          <dd class="mt-0.5 whitespace-pre-line text-ink">${x.texto}</dd>
+        </div>`)}
+      </dl>` : null}
+    <div class="mt-5 text-xs font-semibold uppercase tracking-wide text-muted">Respostas do teste (${respostas.length})</div>
+    ${respostas.length ? html`<ol class="mt-2 divide-y divide-line rounded-lg border border-line">
+      ${respostas.map((x) => html`<li class="flex items-start gap-3 px-3 py-2 text-sm">
+        <span class="w-6 shrink-0 pt-0.5 text-right text-xs tabular-nums text-muted">${x.n}.</span>
+        <div class="flex-1"><div class="text-xs font-medium text-muted">${x.titulo}</div>
+          <div class="mt-0.5 whitespace-pre-line text-ink">${x.texto}</div></div>
+      </li>`)}
+    </ol>` : html`<div class="mt-2 text-sm text-muted">Nenhuma resposta registrada nesta linha.</div>`}
+    <p class="mt-3 text-xs text-muted">Linha ${r.linha} da aba Novo.</p>
+  <//>`;
+}
+
+function NivelamentoPage() {
+  const [lista, setLista] = useState(null);
+  const [status, setStatus] = useState(null);
+  const [semAcesso, setSemAcesso] = useState(false);
+  const [sincronizando, setSincronizando] = useState(false);
+  const [busca, setBusca] = useState("");
+  const [fTrilha, setFTrilha] = useState("");
+  const [fLista, setFLista] = useState("");
+  const [fAuto, setFAuto] = useState("");
+  const [fFraca, setFFraca] = useState("");
+  const [fMedia, setFMedia] = useState("");
+  const [de, setDe] = useState("");
+  const [ate, setAte] = useState("");
+  const [ordem, setOrdem] = useState("recentes");
+  const [aberta, setAberta] = useState(null);
+
+  async function carregar() {
+    const [l, s] = await Promise.all([fetchNivelamento(), fetchStatusNivelamento()]);
+    setLista(l); setStatus(s);
+    return s;
+  }
+  async function atualizar(force) {
+    setSincronizando(true);
+    const r = await sincronizarNivelamento(force);
+    let s = null;
+    try { s = await carregar(); } catch (e) { notify(errMsg(e), "err"); }
+    setSincronizando(false);
+    const naoCompartilhada = !!(r && r.semAcesso) || !!(s && s.ultimo_status === "erro" && /não foi compartilhada/.test(s.ultimo_detalhe || ""));
+    setSemAcesso(naoCompartilhada);
+    if (force) {
+      if (r.ok && r.pulado) notify("Os testes acabaram de ser atualizados; tente de novo em alguns segundos.", "info");
+      else if (r.ok) notify("Testes atualizados da planilha.", "ok");
+      else if (!naoCompartilhada) notify(r.error || "Não foi possível ler a planilha.", "err");
+    }
+  }
+  useEffect(() => {
+    carregar()
+      .then((s) => setSemAcesso(!!(s && s.ultimo_status === "erro" && /não foi compartilhada/.test(s.ultimo_detalhe || ""))))
+      .catch((e) => { notify(errMsg(e), "err"); setLista([]); })
+      .then(() => atualizar(false)); // o servidor pula se o cache tiver menos de 5 min
+  }, []);
+
+  // Todos os filtros menos o de trilha (os cards de trilha do topo servem de atalho sem zerar os outros).
+  const baseFiltrada = useMemo(() => {
+    const q = semAcentoMin(busca);
+    const qDig = busca.replace(/\D/g, "");
+    const faixa = NIV_MEDIAS.find((m) => m.id === fMedia);
+    return (lista || []).filter((r) => {
+      if (fLista === "sim" && !r.mentorado) return false;
+      if (fLista === "nao" && r.mentorado) return false;
+      if (fAuto && String(r.autoavaliacao) !== fAuto) return false;
+      if (fFraca && !areasFracasNiv(r).includes(fFraca)) return false;
+      if (faixa && (r.media == null || Number(r.media) < faixa.de || Number(r.media) > faixa.ate)) return false;
+      if (de && (!r.data || r.data < de)) return false;
+      if (ate && (!r.data || r.data > ate)) return false;
+      if (!q) return true;
+      return semAcentoMin(r.nome).includes(q) || semAcentoMin(r.email).includes(q)
+        || (qDig.length >= 4 && String(r.whatsapp_digitos || "").includes(qDig));
+    });
+  }, [lista, busca, fLista, fAuto, fFraca, fMedia, de, ate]);
+  const filtrados = useMemo(() => {
+    const l = fTrilha === "sem" ? baseFiltrada.filter((r) => !NIV_TRILHA[r.trilha])
+      : fTrilha ? baseFiltrada.filter((r) => String(r.trilha) === fTrilha) : [...baseFiltrada];
+    const num = (v) => (v == null ? null : Number(v));
+    if (ordem === "antigos") l.reverse();
+    else if (ordem === "maior" || ordem === "menor") {
+      const s = ordem === "maior" ? -1 : 1;
+      l.sort((a, b) => (num(a.media) == null) - (num(b.media) == null) || s * ((num(a.media) || 0) - (num(b.media) || 0)));
+    } else if (ordem === "nome") l.sort((a, b) => semAcentoMin(a.nome).localeCompare(semAcentoMin(b.nome)));
+    return l;
+  }, [baseFiltrada, fTrilha, ordem]);
+
+  // Mini dashboard (sobre a base filtrada, sem o filtro de trilha).
+  const dash = useMemo(() => {
+    const porTrilha = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, sem: 0 };
+    const somaArea = {}, nArea = {}, fraca = {};
+    NIV_AREAS.forEach((a) => { somaArea[a.id] = 0; nArea[a.id] = 0; fraca[a.id] = 0; });
+    const auto = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    let somaMedia = 0, nMedia = 0, somaAuto = 0, nAuto = 0, naLista = 0;
+    baseFiltrada.forEach((r) => {
+      porTrilha[NIV_TRILHA[r.trilha] ? r.trilha : "sem"]++;
+      NIV_AREAS.forEach((a) => { const v = notaNiv(r, a.id); if (v != null) { somaArea[a.id] += v; nArea[a.id]++; } });
+      areasFracasNiv(r).forEach((id) => fraca[id]++);
+      if (r.media != null) { somaMedia += Number(r.media); nMedia++; }
+      if (r.autoavaliacao) { auto[r.autoavaliacao]++; somaAuto += r.autoavaliacao; nAuto++; }
+      if (r.mentorado) naLista++;
+    });
+    const mediaArea = Object.fromEntries(NIV_AREAS.map((a) => [a.id, nArea[a.id] ? somaArea[a.id] / nArea[a.id] : null]));
+    const ultimo = (lista || []).reduce((m, r) => (r.enviado_em && (!m || r.enviado_em > m) ? r.enviado_em : m), null);
+    return { porTrilha, mediaArea, fraca, auto, naLista, ultimo,
+      media: nMedia ? somaMedia / nMedia : null, autoMedia: nAuto ? somaAuto / nAuto : null };
+  }, [baseFiltrada, lista]);
+
+  const temFiltro = busca || fTrilha || fLista || fAuto || fFraca || fMedia || de || ate;
+  const limpar = () => { setBusca(""); setFTrilha(""); setFLista(""); setFAuto(""); setFFraca(""); setFMedia(""); setDe(""); setAte(""); };
+  const erro = status && status.ultimo_status === "erro" && !semAcesso;
+  const atualizadoEm = (() => {
+    if (!status || !status.ultima_execucao_em || status.ultimo_status !== "ok") return null;
+    const d = new Date(status.ultima_execucao_em);
+    const hora = d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+    return isoDia(d) === hojeISO() ? "Atualizado às " + hora
+      : "Atualizado em " + d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" }) + " às " + hora;
+  })();
+  const total = baseFiltrada.length;
+  const maxFraca = Math.max(1, ...Object.values(dash.fraca));
+  const maxAuto = Math.max(1, ...Object.values(dash.auto));
+  const selCls = cx(inputCls, "w-auto");
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">🤝 CS / Suporte</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">Testes de Nivelamento</h1>
+      <p class="mt-1 text-sm text-muted">Resultados do Teste de Nivelamento da Mentoria (trilha indicada e notas por área dadas pela IA), lidos da aba Novo da planilha de respostas (somente leitura).${" "}
+        <a class="text-brand hover:underline" href=${PLANILHA_NIVELAMENTO_URL} target="_blank" rel="noopener">Abrir planilha ↗</a></p>
+
+      ${semAcesso ? html`
+        <div class="mt-4 rounded-xl border border-[#efe0b5] bg-[#faf5e4] px-4 py-3 text-sm text-[#6f5f24]">
+          <div class="font-medium">A planilha ainda não foi compartilhada com o OS</div>
+          <div class="mt-1">Para os testes aparecerem aqui, abra a planilha Teste de Nivelamento Fluent Mind (respostas), clique em Compartilhar e adicione${" "}
+            <span class="break-all font-medium">${CONTA_SERVICO_OS}</span> como <span class="font-medium">Leitor</span>. Depois, clique em Atualizar.</div>
+          ${lista && lista.length ? html`<div class="mt-1 text-xs">Mostrando a última versão salva no OS.</div>` : null}
+        </div>` : null}
+      ${erro ? html`
+        <div class="mt-4 rounded-lg border border-[#efe0b5] bg-[#faf5e4] px-3 py-2 text-sm text-[#7c6a2a]">
+          ${String(status.ultimo_detalhe || "Não foi possível ler a planilha.").replace(/\.$/, "")}.
+          ${lista && lista.length ? " Mostrando a última versão salva no OS." : ""}
+        </div>` : null}
+
+      ${lista === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
+        <div class="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          <button type="button" onClick=${() => setFTrilha("")}
+            class=${cx("col-span-2 rounded-xl border bg-card p-4 text-left transition hover:border-brand/40 sm:col-span-1", !fTrilha ? "border-brand/50 ring-1 ring-brand/30" : "border-line")}>
+            <div class="text-xs uppercase tracking-wide text-muted">Testes</div>
+            <div class="mt-1 text-2xl font-semibold text-ink">${nf(total)}</div>
+            <div class="text-xs text-muted">${temFiltro && total !== lista.length ? "de " + nf(lista.length) + " no total" : "no total"}</div>
+          </button>
+          ${NIV_TRILHAS.map((t) => html`
+            <button type="button" onClick=${() => setFTrilha(fTrilha === String(t.n) ? "" : String(t.n))} aria-pressed=${fTrilha === String(t.n)}
+              title=${"Trilha " + t.n + " · " + t.nome}
+              class=${cx("rounded-xl border bg-card p-4 text-left transition hover:border-brand/40", fTrilha === String(t.n) ? "border-brand/50 ring-1 ring-brand/30" : "border-line")}>
+              <div class="flex items-center gap-1.5 text-xs uppercase tracking-wide text-muted">
+                <span class="inline-block h-2 w-2 rounded-full" style=${"background:" + t.cor}></span>T${t.n} · ${t.nome}
+              </div>
+              <div class="mt-1 text-2xl font-semibold text-ink">${nf(dash.porTrilha[t.n])}</div>
+              <div class="flex items-center gap-2 text-xs text-muted">
+                <span class="tabular-nums">${pctVac(dash.porTrilha[t.n], total)}</span>
+                <div class="h-1.5 flex-1 overflow-hidden rounded bg-black/[0.05]">
+                  <div class="h-full rounded" style=${`width:${total ? ((dash.porTrilha[t.n] / total) * 100).toFixed(1) : 0}%;background:${t.cor}`}></div>
+                </div>
+              </div>
+            </button>`)}
+        </div>
+
+        <div class="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div class="rounded-xl border border-line bg-card p-4">
+            <div class="text-xs uppercase tracking-wide text-muted">Média das notas</div>
+            <div class="mt-1 text-2xl font-semibold text-ink">${fmtNota(dash.media)}<span class="text-sm font-normal text-muted"> /10</span></div>
+            <div class="mt-2 space-y-1">
+              ${NIV_AREAS.map((a) => html`<div class="flex items-center gap-2 text-xs">
+                <span class="w-20 shrink-0 text-muted">${a.nome}</span>
+                <div class="h-1.5 flex-1 overflow-hidden rounded bg-black/[0.05]">
+                  <div class="h-full rounded bg-[#9aa7b8]" style=${`width:${dash.mediaArea[a.id] == null ? 0 : dash.mediaArea[a.id] * 10}%`}></div>
+                </div>
+                <span class="w-7 shrink-0 text-right tabular-nums text-ink/80">${fmtNota(dash.mediaArea[a.id])}</span>
+              </div>`)}
+            </div>
+          </div>
+          <div class="rounded-xl border border-line bg-card p-4">
+            <div class="text-xs uppercase tracking-wide text-muted">Área mais fraca</div>
+            <div class="mt-1 text-sm text-muted">Quantas alunas têm a menor nota em cada área (clique para filtrar)</div>
+            <div class="mt-2 space-y-1">
+              ${NIV_AREAS.map((a) => html`<button type="button" onClick=${() => setFFraca(fFraca === a.id ? "" : a.id)}
+                class=${cx("flex w-full items-center gap-2 rounded px-1 text-left text-xs hover:bg-black/[0.03]", fFraca === a.id && "bg-[#fbf1ef]")}>
+                <span class="w-20 shrink-0 text-muted">${a.nome}</span>
+                <div class="h-1.5 flex-1 overflow-hidden rounded bg-black/[0.05]">
+                  <div class="h-full rounded bg-[#d98a7f]" style=${`width:${(dash.fraca[a.id] / maxFraca) * 100}%`}></div>
+                </div>
+                <span class="w-7 shrink-0 text-right tabular-nums text-ink/80">${dash.fraca[a.id]}</span>
+              </button>`)}
+            </div>
+          </div>
+          <div class="rounded-xl border border-line bg-card p-4">
+            <div class="text-xs uppercase tracking-wide text-muted">Autoavaliação</div>
+            <div class="mt-1 text-2xl font-semibold text-ink">${fmtNota(dash.autoMedia)}<span class="text-sm font-normal text-muted"> /5 em média</span></div>
+            <div class="mt-2 flex h-14 items-end gap-1.5">
+              ${[1, 2, 3, 4, 5].map((n) => html`<button type="button" onClick=${() => setFAuto(fAuto === String(n) ? "" : String(n))}
+                title=${`${dash.auto[n]} aluna(s) com autoavaliação ${n}`} class="flex flex-1 flex-col items-center gap-0.5">
+                <div class=${cx("w-full rounded-t", fAuto === String(n) ? "bg-brand" : "bg-[#b9c3cf]")} style=${`height:${Math.max(3, (dash.auto[n] / maxAuto) * 40)}px`}></div>
+                <span class="text-[11px] tabular-nums text-muted">${n}</span>
+              </button>`)}
+            </div>
+          </div>
+          <div class="rounded-xl border border-line bg-card p-4">
+            <div class="text-xs uppercase tracking-wide text-muted">Na Lista de Mentorados</div>
+            <div class="mt-1 text-2xl font-semibold text-ink">${nf(dash.naLista)}<span class="text-sm font-normal text-muted"> de ${nf(total)}</span></div>
+            <div class="text-xs text-muted">${pctVac(dash.naLista, total)} encontradas pelo e-mail ou WhatsApp</div>
+            <div class="mt-3 text-xs uppercase tracking-wide text-muted">Último teste</div>
+            <div class="mt-0.5 text-sm text-ink">${dash.ultimo ? dataHoraNiv({ enviado_em: dash.ultimo }) : "—"}</div>
+          </div>
+        </div>
+
+        <div class="mt-4 flex flex-wrap items-end gap-2">
+          <label class="block w-full sm:w-auto sm:min-w-[240px] sm:flex-1 lg:max-w-xs">
+            <span class="mb-1 block text-xs text-muted">Buscar</span>
+            <input class=${inputCls} type="search" placeholder="Nome, e-mail ou WhatsApp" value=${busca} onInput=${(e) => setBusca(e.target.value)} />
+          </label>
+          <label class="block">
+            <span class="mb-1 block text-xs text-muted">Trilha</span>
+            <select class=${selCls} value=${fTrilha} onChange=${(e) => setFTrilha(e.target.value)}>
+              <option value="">Todas</option>
+              ${NIV_TRILHAS.map((t) => html`<option value=${String(t.n)}>T${t.n} · ${t.nome}</option>`)}
+              <option value="sem">Sem trilha reconhecida</option>
+            </select>
+          </label>
+          <label class="block">
+            <span class="mb-1 block text-xs text-muted">Lista de Mentorados</span>
+            <select class=${selCls} value=${fLista} onChange=${(e) => setFLista(e.target.value)}>
+              <option value="">Todas</option>
+              <option value="sim">Na lista</option>
+              <option value="nao">Fora da lista</option>
+            </select>
+          </label>
+          <label class="block">
+            <span class="mb-1 block text-xs text-muted">Média</span>
+            <select class=${selCls} value=${fMedia} onChange=${(e) => setFMedia(e.target.value)}>
+              <option value="">Todas</option>
+              ${NIV_MEDIAS.map((m) => html`<option value=${m.id}>${m.nome}</option>`)}
+            </select>
+          </label>
+          <label class="block">
+            <span class="mb-1 block text-xs text-muted">Área mais fraca</span>
+            <select class=${selCls} value=${fFraca} onChange=${(e) => setFFraca(e.target.value)}>
+              <option value="">Todas</option>
+              ${NIV_AREAS.map((a) => html`<option value=${a.id}>${a.nome}</option>`)}
+            </select>
+          </label>
+          <label class="block">
+            <span class="mb-1 block text-xs text-muted">Autoavaliação</span>
+            <select class=${selCls} value=${fAuto} onChange=${(e) => setFAuto(e.target.value)}>
+              <option value="">Todas</option>
+              ${[1, 2, 3, 4, 5].map((n) => html`<option value=${String(n)}>${n}</option>`)}
+            </select>
+          </label>
+          <label class="block">
+            <span class="mb-1 block text-xs text-muted">De</span>
+            <input class=${selCls} type="date" value=${de} max=${ate || undefined} onInput=${(e) => setDe(e.target.value)} />
+          </label>
+          <label class="block">
+            <span class="mb-1 block text-xs text-muted">Até</span>
+            <input class=${selCls} type="date" value=${ate} min=${de || undefined} onInput=${(e) => setAte(e.target.value)} />
+          </label>
+          <label class="block">
+            <span class="mb-1 block text-xs text-muted">Ordenar</span>
+            <select class=${selCls} value=${ordem} onChange=${(e) => setOrdem(e.target.value)}>
+              <option value="recentes">Mais recentes</option>
+              <option value="antigos">Mais antigos</option>
+              <option value="maior">Maior média</option>
+              <option value="menor">Menor média</option>
+              <option value="nome">Nome (A-Z)</option>
+            </select>
+          </label>
+          ${temFiltro ? html`<${Btn} variant="subtle" type="button" onClick=${limpar}>Limpar filtros<//>` : null}
+        </div>
+
+        <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted">
+          <span class="font-medium text-ink">${nf(filtrados.length)} ${filtrados.length === 1 ? "teste" : "testes"}</span>
+          ${atualizadoEm ? html`<span>· ${atualizadoEm}</span>` : null}
+          <div class="ml-auto flex items-center gap-2">
+            <${Btn} variant="ghost" type="button" disabled=${!filtrados.length} onClick=${() => exportarCsvNivelamento(filtrados)}>Exportar CSV<//>
+            <${Btn} variant="ghost" type="button" loading=${sincronizando} onClick=${() => atualizar(true)}>↻ Atualizar<//>
+          </div>
+        </div>
+
+        <div class="mt-3 hidden overflow-x-auto rounded-2xl border border-line bg-card md:block">
+          <table class="w-full min-w-[960px] text-sm">
+            <thead>
+              <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
+                <th class="px-3 py-2.5">Enviado</th>
+                <th class="px-3 py-2.5">Nome</th>
+                <th class="px-3 py-2.5">Contato</th>
+                <th class="px-3 py-2.5">Trilha</th>
+                <th class="px-3 py-2.5">Notas</th>
+                <th class="px-3 py-2.5 text-right">Média</th>
+                <th class="px-3 py-2.5 text-right" title="Autoavaliação (1-5)">Auto</th>
+                <th class="px-3 py-2.5">Lista</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filtrados.length === 0 ? html`<tr><td colspan="8" class="px-4 py-8 text-center text-sm text-muted">
+                  ${lista.length ? "Nenhum teste com esses filtros." : "Nenhum teste de nivelamento ainda."}</td></tr>` :
+                filtrados.map((r) => html`
+                  <tr key=${r.linha} class="cursor-pointer border-b border-line align-top last:border-0 hover:bg-black/[0.02]"
+                    onClick=${() => setAberta(r)} tabindex="0" onKeyDown=${(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), setAberta(r))}>
+                    <td class="whitespace-nowrap px-3 py-2.5 text-xs tabular-nums">${dataHoraNiv(r).split(" ")[0]}
+                      ${r.enviado_em ? html`<div class="text-[11px] text-muted">${dataHoraNiv(r).split(" ")[1]}</div>` : null}</td>
+                    <td class="min-w-[150px] px-3 py-2.5 font-medium text-ink">${r.nome || "—"}</td>
+                    <td class="min-w-[170px] px-3 py-2.5 text-xs"><div class="break-all text-muted">${r.email || "—"}</div>
+                      ${r.whatsapp ? html`<div class="mt-0.5">${r.whatsapp}</div>` : null}</td>
+                    <td class="px-3 py-2.5"><${PillTrilha} r=${r} /></td>
+                    <td class="px-3 py-2.5"><${NotasNiv} r=${r} /></td>
+                    <td class="px-3 py-2.5 text-right font-semibold tabular-nums text-ink">${fmtNota(r.media)}</td>
+                    <td class="px-3 py-2.5 text-right tabular-nums">${r.autoavaliacao ?? "—"}</td>
+                    <td class="px-3 py-2.5"><${PillListaMentorados} r=${r} /></td>
+                  </tr>`)}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="mt-3 space-y-2 md:hidden">
+          ${filtrados.length === 0 ? html`<div class="rounded-xl border border-line bg-card px-4 py-8 text-center text-sm text-muted">
+              ${lista.length ? "Nenhum teste com esses filtros." : "Nenhum teste de nivelamento ainda."}</div>` :
+            filtrados.map((r) => html`
+              <button type="button" key=${r.linha} onClick=${() => setAberta(r)} class="block w-full rounded-xl border border-line bg-card p-4 text-left">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="min-w-0">
+                    <div class="font-medium text-ink">${r.nome || "—"}</div>
+                    <div class="break-all text-xs text-muted">${r.email || "—"}</div>
+                  </div>
+                  <span class="shrink-0"><${PillTrilha} r=${r} /></span>
+                </div>
+                <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
+                  <${PillListaMentorados} r=${r} /><span>${dataHoraNiv(r)}</span><span>· Média ${fmtNota(r.media)}</span>
+                </div>
+                <div class="mt-2"><${NotasNiv} r=${r} /></div>
+              </button>`)}
+        </div>
+      `}
+      ${aberta ? html`<${DetalheNivelamento} r=${aberta} onClose=${() => setAberta(null)} />` : null}
+    </div>`;
+}
+
 /* ============================ Conteúdo · Métricas Instagram ============================ */
 
 const nf = (n) => (n == null ? "—" : Number(n).toLocaleString("pt-BR"));
@@ -5559,35 +6079,508 @@ function mdToHtml(text) {
   catch (_) { return "<pre>" + (text || "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) + "</pre>"; }
 }
 
+// Pesquisas de Alunos em duas partes (pedido da Tia, 17/10/2026): Mentorados (Pesquisa da Mentoria e PNL
+// Mentoria) e Outros (Método, Decole, Memorização e PNL Método). As respostas individuais ficam no cache
+// cs_pesquisa_respostas (Edge Function "pesquisas-respostas": lê as planilhas ao abrir a aba se o último
+// sync tiver mais de 10 min, pelo botão Atualizar e pelo cron os-pesquisas-respostas-30min). A tela inicial
+// usa a RPC cs_pesquisa_painel (contagens prontas, sem baixar as respostas); o detalhe
+// (#/cs/pesquisas/<grupo>) baixa as respostas do grupo e filtra no navegador. "Perguntar" manda as linhas
+// filtradas para a mesma Edge Function (op "perguntar", IA). Pergunta de múltipla escolha (vira pizza e
+// filtro) = ehCategoricaPesq, mesma regra da Edge Function e da RPC.
+const PESQ_GRUPOS = {
+  mentorados: { nome: "Mentorados", desc: "Quem faz parte da Mentoria Fluent Mind", chaves: ["mentoria-fluent-mind", "pnl-mentoria"] },
+  outros: { nome: "Outros", desc: "Método Tia do Inglês, Decole com a Tia, Memorização e PNL do Método",
+    chaves: ["metodo-tia-do-ingles", "decole-com-a-tia", "memorizacao", "pnl-metodo"] },
+};
+const PESQ_TITULO = {
+  "mentoria-fluent-mind": "Pesquisa da Mentoria", "pnl-mentoria": "Módulo PNL · Mentoria",
+  "metodo-tia-do-ingles": "Método Tia do Inglês", "decole-com-a-tia": "Decole com a Tia",
+  "memorizacao": "Memorização", "pnl-metodo": "Módulo PNL · Método",
+};
+const PESQ_CORES = ["#ea5167", "#7d97bd", "#d0955a", "#9cb88f", "#a882b5", "#c9b458", "#6fb0b0", "#c98a9b", "#8d8d8d"];
+// Perguntas que aparecem primeiro nas pizzas (por trecho do título).
+const PESQ_PRIORIDADE = ["nivel", "renda", "quantos anos", "maior dificuldade", "tenta aprender", "conhece a tia", "urgencia",
+  "forma de trabalho", "investir", "comecar", "classificacao", "sonho", "viajar", "pnl", "genero", "sexo"];
+const prioridadePesq = (p) => { const n = semAcentoMin(p); const i = PESQ_PRIORIDADE.findIndex((k) => n.includes(k)); return i < 0 ? 99 : i; };
+
+function ehCategoricaPesq(valores) {
+  if (!valores.length) return false;
+  const dist = new Set(valores);
+  const media = valores.reduce((a, v) => a + v.length, 0) / valores.length;
+  return dist.size <= 15 && media <= 80 && (dist.size <= 6 || dist.size <= valores.length / 3);
+}
+const fmtDataHoraPesq = (iso) => (iso ? new Date(iso).toLocaleDateString("pt-BR") + " às " +
+  new Date(iso).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) : "—");
+
+async function fetchPainelPesquisas() {
+  const { data, error } = await sb.rpc("cs_pesquisa_painel");
+  if (error) throw error;
+  return data || [];
+}
+async function fetchRespostasPesquisa(grupo) {
+  const todas = [];
+  for (let de = 0; ; de += 1000) { // o PostgREST devolve no máximo 1000 linhas por vez
+    const { data, error } = await sb.from("cs_pesquisa_respostas")
+      .select("chave,linha,respondido_em,nome,email,telefone,na_lista,dados").eq("grupo", grupo)
+      .order("respondido_em", { ascending: false, nullsFirst: false }).order("linha", { ascending: false })
+      .range(de, de + 999);
+    if (error) throw error;
+    todas.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  return todas;
+}
+async function fetchStatusPesquisas() {
+  const { data } = await sb.from("sync_status").select("*").eq("chave", "pesquisas-respostas").maybeSingle();
+  return data || null;
+}
+async function chamarPesquisas(body) {
+  const { data, error } = await sb.functions.invoke("pesquisas-respostas", { body });
+  if (error) {
+    let msg = error.message;
+    try { const j = await error.context.json(); if (j && j.error) msg = j.error; } catch (_) { /* ignore */ }
+    return { ok: false, error: msg };
+  }
+  return data || { ok: false, error: "sem resposta" };
+}
+function textoAtualizadoPesq(status) {
+  if (!status || !status.ultima_execucao_em) return null;
+  return "Atualizado em " + fmtDataHoraPesq(status.ultima_execucao_em);
+}
+
+// Pizza (rosca) em SVG: itens = [[rótulo, quantidade], ...]; os além de `max` viram "Outras respostas".
+function PizzaPesq({ titulo, itens, total, max = 5, tamanho = 112, compacta, filtroAtivo, onFatia }) {
+  const ord = [...itens].sort((a, b) => b[1] - a[1]);
+  const fatias = ord.slice(0, max);
+  const resto = ord.slice(max).reduce((a, x) => a + x[1], 0);
+  if (resto) fatias.push(["Outras respostas", resto, true]);
+  const soma = fatias.reduce((a, x) => a + x[1], 0) || 1;
+  const r = 15.9155, c = 2 * Math.PI * r;
+  let acum = 0;
+  return html`<div class=${cx("min-w-0 rounded-xl border border-line bg-card", compacta ? "p-3" : "p-4")}>
+    <div class=${cx("font-medium leading-snug text-ink", compacta ? "text-xs" : "text-sm")} title=${titulo}>${titulo}</div>
+    <div class="mt-0.5 text-[11px] text-muted">${nf(total ?? soma)} respostas</div>
+    <div class="mt-2 flex items-center gap-3">
+      <svg viewBox="0 0 42 42" width=${tamanho} height=${tamanho} class="shrink-0 -rotate-90" role="img" aria-label=${titulo}>
+        <circle cx="21" cy="21" r=${r} fill="none" stroke="rgba(0,0,0,0.05)" stroke-width="7"></circle>
+        ${fatias.map(([rot, n, ehResto], i) => {
+          const len = (n / soma) * c;
+          const el = html`<circle cx="21" cy="21" r=${r} fill="none" stroke=${ehResto ? "#cfcac2" : PESQ_CORES[i % PESQ_CORES.length]}
+            stroke-width="7" stroke-dasharray=${`${len} ${c - len}`} stroke-dashoffset=${-acum}
+            class=${onFatia && !ehResto ? "cursor-pointer" : ""} onClick=${onFatia && !ehResto ? () => onFatia(rot) : undefined}>
+            <title>${rot}: ${n} (${Math.round((n / soma) * 100)}%)</title></circle>`;
+          acum += len;
+          return el;
+        })}
+      </svg>
+      <ul class="min-w-0 flex-1 space-y-0.5">
+        ${fatias.map(([rot, n, ehResto], i) => html`<li>
+          <button type="button" disabled=${!onFatia || ehResto} onClick=${() => onFatia && onFatia(rot)}
+            class=${cx("flex w-full items-start gap-1.5 rounded px-1 text-left text-[11px] leading-4", onFatia && !ehResto && "hover:bg-black/[0.04]",
+              filtroAtivo === rot && "bg-brand-light")} title=${rot}>
+            <span class="mt-1 inline-block h-2 w-2 shrink-0 rounded-full" style=${"background:" + (ehResto ? "#cfcac2" : PESQ_CORES[i % PESQ_CORES.length])}></span>
+            <span class="min-w-0 flex-1 truncate text-ink/80">${rot}</span>
+            <span class="shrink-0 tabular-nums text-muted">${Math.round((n / soma) * 100)}%</span>
+          </button>
+        </li>`)}
+      </ul>
+    </div>
+  </div>`;
+}
+
 function PesquisasPage() {
-  const [rows, setRows] = useState(null);
-  const recarregar = () => fetchPesquisas().then(setRows).catch((e) => { notify(errMsg(e), "err"); setRows([]); });
-  useEffect(() => { recarregar(); }, []);
+  const [painel, setPainel] = useState(null);
+  const [status, setStatus] = useState(null);
+  const [sinc, setSinc] = useState(false);
+  async function carregar() {
+    const [p, s] = await Promise.all([fetchPainelPesquisas(), fetchStatusPesquisas()]);
+    setPainel(p); setStatus(s);
+  }
+  async function atualizar(force) {
+    setSinc(true);
+    const r = await chamarPesquisas({ force: !!force });
+    try { await carregar(); } catch (e) { notify(errMsg(e), "err"); }
+    setSinc(false);
+    if (force) {
+      if (r.ok && r.pulado) notify("As respostas acabaram de ser atualizadas; tente de novo em alguns segundos.", "info");
+      else if (r.ok) notify("Respostas atualizadas das planilhas.", "ok");
+      else notify(r.error || r.detalhe || "Não foi possível ler as planilhas.", "err");
+    }
+  }
+  useEffect(() => {
+    carregar().catch((e) => { notify(errMsg(e), "err"); setPainel([]); }).then(() => atualizar(false));
+  }, []);
 
-  if (!rows) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
-
-  const ativos = rows.filter((r) => r.total_respostas && (r.ativo || (r.ultima_resposta_em && Date.now() - new Date(r.ultima_resposta_em).getTime() < (r.janela_dias || 30) * 86400000))).length;
-  const totalResp = rows.reduce((a, r) => a + (r.total_respostas || 0), 0);
-  const ult = rows.map((r) => r.resumo_atualizado_em).filter(Boolean).sort().pop();
+  const porChave = Object.fromEntries((painel || []).map((x) => [x.chave, x]));
+  const ultimaGeral = (painel || []).map((x) => x.ultima).filter(Boolean).sort().pop();
+  const erro = status && status.ultimo_status === "erro";
 
   return html`
     <div>
       <div class="text-sm text-muted">🤝 CS / Suporte</div>
       <h1 class="mt-1 text-2xl font-semibold text-ink">Pesquisas de Alunos</h1>
-      <p class="mt-1 text-xs text-muted">
-        Avatar por curso, com sinal de atividade e data da última resposta ·
-        ${ativos}/${rows.length} pesquisas ativas · ${nf(totalResp)} respostas no total${ult ? " · resumos atualizados " + fmtDate(ult) : ""}
-      </p>
+      <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
+        <span>Última resposta: <span class="font-medium text-ink">${fmtDataHoraPesq(ultimaGeral)}</span></span>
+        ${textoAtualizadoPesq(status) ? html`<span>· ${textoAtualizadoPesq(status)}</span>` : null}
+        <${Btn} variant="ghost" type="button" class="ml-auto" loading=${sinc} onClick=${() => atualizar(true)}>↻ Atualizar<//>
+      </div>
+      ${erro ? html`<div class="mt-3 rounded-lg border border-[#efe0b5] bg-[#faf5e4] px-3 py-2 text-sm text-[#7c6a2a]">
+        ${status.ultimo_detalhe || "Não foi possível ler as planilhas."} Mostrando a última versão salva no OS.</div>` : null}
 
-      <div class="mt-5 grid gap-4 lg:grid-cols-2">
-        ${rows.map((p) => html`<${PesquisaCard} key=${p.chave} p=${p} onRegen=${recarregar} />`)}
+      ${painel === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
+        <div class="mt-5 grid gap-4 xl:grid-cols-2">
+          ${Object.entries(PESQ_GRUPOS).map(([id, g]) => {
+            const itens = g.chaves.map((k) => porChave[k]).filter(Boolean);
+            const total = itens.reduce((a, x) => a + x.n, 0);
+            const ult = itens.map((x) => x.ultima).filter(Boolean).sort().pop();
+            return html`<section class="rounded-2xl border border-line bg-card p-5">
+              <div class="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 class="text-lg font-semibold text-ink">${g.nome}</h2>
+                  <div class="text-xs text-muted">${g.desc}</div>
+                </div>
+                <a href=${"#/cs/pesquisas/" + id} class="inline-flex items-center gap-1 rounded-lg bg-brand px-3.5 py-2 text-sm font-medium text-white shadow-sm hover:bg-brand-dark">Ver detalhes →</a>
+              </div>
+              <div class="mt-3 grid grid-cols-3 gap-2">
+                <div class="rounded-lg border border-line px-3 py-2"><div class="text-[11px] uppercase tracking-wide text-muted">Respostas</div>
+                  <div class="text-xl font-semibold text-ink">${nf(total)}</div></div>
+                <div class="rounded-lg border border-line px-3 py-2"><div class="text-[11px] uppercase tracking-wide text-muted">Pesquisas</div>
+                  <div class="text-xl font-semibold text-ink">${itens.length}</div></div>
+                <div class="rounded-lg border border-line px-3 py-2"><div class="text-[11px] uppercase tracking-wide text-muted">Última resposta</div>
+                  <div class="text-sm font-medium text-ink">${ult ? new Date(ult).toLocaleDateString("pt-BR") : "—"}</div>
+                  <div class="text-[11px] text-muted">${ult ? tempoDesde(ult) : ""}</div></div>
+              </div>
+              <div class="mt-4 space-y-4">
+                ${itens.map((x) => {
+                  const pergs = [...(x.perguntas || [])].sort((a, b) => prioridadePesq(a.p) - prioridadePesq(b.p) || b.n - a.n).slice(0, 2);
+                  return html`<div>
+                    <div class="flex flex-wrap items-baseline justify-between gap-2 text-sm">
+                      <span class="font-medium text-ink">${PESQ_TITULO[x.chave] || x.chave}</span>
+                      <span class="text-xs text-muted">${nf(x.n)} respostas · última ${x.ultima ? fmtDataHoraPesq(x.ultima) : "—"}</span>
+                    </div>
+                    ${pergs.length ? html`<div class="mt-2 grid gap-2 sm:grid-cols-2">
+                      ${pergs.map((q) => html`<${PizzaPesq} compacta tamanho=${84} titulo=${q.p} total=${q.n} itens=${q.itens} max=${4} />`)}
+                    </div>` : html`<div class="mt-1 text-xs text-muted">Só perguntas abertas: veja os temas em Ver detalhes ou pergunte à IA.</div>`}
+                  </div>`;
+                })}
+                ${!itens.length ? html`<div class="text-sm text-muted">Nenhuma resposta sincronizada ainda.</div>` : null}
+              </div>
+            </section>`;
+          })}
+        </div>
+        <p class="mt-4 text-xs text-muted">As respostas são lidas das planilhas das pesquisas (somente leitura) a cada 30 min, ao abrir esta aba e pelo botão Atualizar.</p>
+      `}
+    </div>`;
+}
+
+function DetalheRespostaPesq({ r, onClose }) {
+  const tel = linksWhats(r.telefone);
+  return html`<${Modal} title=${r.nome || r.email || "Resposta"} onClose=${onClose} wide>
+    <div class="flex flex-wrap items-center gap-2 text-xs text-muted">
+      <${Badge} class=${PILL_NEUTRAL}>${PESQ_TITULO[r.chave] || r.chave}<//>
+      ${r.na_lista ? html`<${Badge} class="bg-brand-light text-brand-dark">Na Lista de Mentorados<//>` : null}
+      <span>Respondido em ${fmtDataHoraPesq(r.respondido_em)}</span>
+    </div>
+    <div class="mt-3 grid gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+      <div><div class="text-xs text-muted">E-mail</div><div class="break-all">${r.email || "—"}</div></div>
+      <div><div class="text-xs text-muted">Telefone</div><div>${tel.length ? tel.map((t, i) => html`${i ? " / " : ""}${t.url
+        ? html`<a class="text-[#3d7a45] hover:underline" href=${t.url} target="_blank" rel="noopener">${t.texto}</a>` : t.texto}`) : "—"}</div></div>
+    </div>
+    <dl class="mt-4 divide-y divide-line rounded-lg border border-line">
+      ${(r.dados || []).map((d) => html`<div class="px-3 py-2 text-sm">
+        <dt class="text-xs font-medium text-muted">${d.p}</dt>
+        <dd class="mt-0.5 whitespace-pre-line text-ink">${d.r}</dd>
+      </div>`)}
+    </dl>
+    <p class="mt-3 text-xs text-muted">Linha ${r.linha} da planilha.</p>
+  <//>`;
+}
+
+function exportarCsvPesq(linhas, grupo) {
+  const esc = (v) => { const s = v == null ? "" : String(v); return /[";\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const perguntas = [];
+  linhas.forEach((r) => (r.dados || []).forEach((d) => { if (!perguntas.includes(d.p)) perguntas.push(d.p); }));
+  const cab = ["Pesquisa", "Respondido em", "Nome", "E-mail", "Telefone", "Na Lista de Mentorados", ...perguntas];
+  const corpo = linhas.map((r) => {
+    const m = Object.fromEntries((r.dados || []).map((d) => [d.p, d.r]));
+    return [PESQ_TITULO[r.chave] || r.chave, fmtDataHoraPesq(r.respondido_em), r.nome, r.email, r.telefone, r.na_lista ? "Sim" : "Não",
+      ...perguntas.map((p) => m[p] || "")].map(esc).join(";");
+  });
+  const blob = new Blob(["﻿" + [cab.map(esc).join(";"), ...corpo].join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `pesquisas-${grupo}-${hojeISO()}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+const PESQ_SUGESTOES = {
+  mentorados: ["Quais são as maiores dificuldades das mentoradas?", "O que mais fez as alunas decidirem entrar na Mentoria?",
+    "Que crenças limitantes aparecem com mais frequência no módulo de PNL?"],
+  outros: ["Qual o perfil de quem tem urgência 9 ou 10?", "Quais dores aparecem mais na Memorização?",
+    "Como as respostas mudam entre quem está disposta a investir e quem não está?"],
+};
+
+function PesquisaGrupoPage({ grupo }) {
+  const g = PESQ_GRUPOS[grupo];
+  const [lista, setLista] = useState(null);
+  const [status, setStatus] = useState(null);
+  const [resumos, setResumos] = useState([]);
+  const [sinc, setSinc] = useState(false);
+  const [fChaves, setFChaves] = useState([]);
+  const [busca, setBusca] = useState("");
+  const [de, setDe] = useState("");
+  const [ate, setAte] = useState("");
+  const [fLista, setFLista] = useState("");
+  const [filtros, setFiltros] = useState([]); // [{ p, v }]
+  const [novoP, setNovoP] = useState("");
+  const [todasPizzas, setTodasPizzas] = useState(false);
+  const [pagina, setPagina] = useState(1);
+  const [aberta, setAberta] = useState(null);
+  const [pergunta, setPergunta] = useState("");
+  const [perguntando, setPerguntando] = useState(false);
+  const [respostaIa, setRespostaIa] = useState(null); // { pergunta, texto, base }
+
+  async function carregar() {
+    const [l, s, p] = await Promise.all([fetchRespostasPesquisa(grupo), fetchStatusPesquisas(), fetchPesquisas().catch(() => [])]);
+    setLista(l); setStatus(s); setResumos(p.filter((x) => g.chaves.includes(x.chave)));
+  }
+  async function atualizar(force) {
+    setSinc(true);
+    const r = await chamarPesquisas({ force: !!force });
+    try { await carregar(); } catch (e) { notify(errMsg(e), "err"); }
+    setSinc(false);
+    if (force) {
+      if (r.ok && r.pulado) notify("As respostas acabaram de ser atualizadas; tente de novo em alguns segundos.", "info");
+      else if (r.ok) notify("Respostas atualizadas das planilhas.", "ok");
+      else notify(r.error || r.detalhe || "Não foi possível ler as planilhas.", "err");
+    }
+  }
+  useEffect(() => {
+    setLista(null); setFChaves([]); setFiltros([]); setRespostaIa(null);
+    carregar().catch((e) => { notify(errMsg(e), "err"); setLista([]); }).then(() => atualizar(false));
+  }, [grupo]);
+  useEffect(() => setPagina(1), [fChaves, busca, de, ate, fLista, filtros]);
+
+  const filtrados = useMemo(() => {
+    const q = semAcentoMin(busca);
+    return (lista || []).filter((r) => {
+      if (fChaves.length && !fChaves.includes(r.chave)) return false;
+      if (fLista === "sim" && !r.na_lista) return false;
+      if (fLista === "nao" && r.na_lista) return false;
+      const dia = r.respondido_em ? isoDia(new Date(r.respondido_em)) : null;
+      if (de && (!dia || dia < de)) return false;
+      if (ate && (!dia || dia > ate)) return false;
+      for (const f of filtros) if (!(r.dados || []).some((d) => d.p === f.p && d.r === f.v)) return false;
+      if (!q) return true;
+      return semAcentoMin(r.nome).includes(q) || semAcentoMin(r.email).includes(q)
+        || (r.dados || []).some((d) => semAcentoMin(d.r).includes(q));
+    });
+  }, [lista, fChaves, busca, de, ate, fLista, filtros]);
+
+  // Perguntas de múltipla escolha nas respostas filtradas (mesmo título em pesquisas diferentes soma junto).
+  // Opções do "Filtrar por resposta" (sobre o grupo inteiro, para não sumirem ao filtrar).
+  const opcoesFiltro = useMemo(() => {
+    const por = new Map();
+    (lista || []).forEach((r) => (r.dados || []).forEach((d) => { if (!por.has(d.p)) por.set(d.p, []); por.get(d.p).push(d.r); }));
+    const out = [];
+    for (const [p, vals] of por) if (ehCategoricaPesq(vals)) out.push({ p, valores: [...new Set(vals)].sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true })) });
+    return out.sort((a, b) => prioridadePesq(a.p) - prioridadePesq(b.p));
+  }, [lista]);
+
+  // Quais perguntas são de múltipla escolha é decidido sobre o grupo inteiro (opcoesFiltro); só a contagem usa o filtro.
+  const pizzas = useMemo(() => {
+    const cat = new Set(opcoesFiltro.map((o) => o.p));
+    const por = new Map();
+    filtrados.forEach((r) => (r.dados || []).forEach((d) => { if (!cat.has(d.p)) return; if (!por.has(d.p)) por.set(d.p, []); por.get(d.p).push(d.r); }));
+    const out = [];
+    for (const [p, vals] of por) {
+      const cont = new Map();
+      vals.forEach((v) => cont.set(v, (cont.get(v) || 0) + 1));
+      out.push({ p, n: vals.length, itens: [...cont.entries()] });
+    }
+    return out.sort((a, b) => prioridadePesq(a.p) - prioridadePesq(b.p) || b.n - a.n);
+  }, [filtrados, opcoesFiltro]);
+  const addFiltro = (p, v) => setFiltros((fs) => [...fs.filter((f) => f.p !== p), { p, v }]);
+  const tirarFiltro = (p) => setFiltros((fs) => fs.filter((f) => f.p !== p));
+  const temFiltro = fChaves.length || busca || de || ate || fLista || filtros.length;
+  const limpar = () => { setFChaves([]); setBusca(""); setDe(""); setAte(""); setFLista(""); setFiltros([]); };
+
+  async function perguntar(texto) {
+    const q = (texto ?? pergunta).trim();
+    if (q.length < 3 || perguntando) return;
+    setPergunta(q); setPerguntando(true);
+    const r = await chamarPesquisas({ op: "perguntar", grupo, pergunta: q, linhas: filtrados.map((x) => [x.chave, x.linha]) });
+    setPerguntando(false);
+    if (r.ok) setRespostaIa({ pergunta: q, texto: r.resposta, base: r.base });
+    else notify(r.error || "Não foi possível responder agora.", "err");
+  }
+
+  const porChave = useMemo(() => {
+    const c = {}; filtrados.forEach((r) => { c[r.chave] = (c[r.chave] || 0) + 1; }); return c;
+  }, [filtrados]);
+  const ultimaResp = (lista || []).map((r) => r.respondido_em).filter(Boolean).sort().pop();
+  const naLista = filtrados.filter((r) => r.na_lista).length;
+  const POR_PAG = 50;
+  const paginaRows = filtrados.slice((pagina - 1) * POR_PAG, pagina * POR_PAG);
+  const nPags = Math.max(1, Math.ceil(filtrados.length / POR_PAG));
+  const selCls = cx(inputCls, "w-auto");
+  const filtroDe = (p) => (filtros.find((f) => f.p === p) || {}).v;
+
+  return html`
+    <div>
+      <div class="text-sm text-muted"><a href="#/cs/pesquisas" class="hover:underline">🤝 CS / Suporte · Pesquisas de Alunos</a></div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">${g.nome}</h1>
+      <p class="mt-0.5 text-sm text-muted">${g.desc}</p>
+      <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
+        <span>Última resposta: <span class="font-medium text-ink">${fmtDataHoraPesq(ultimaResp)}</span></span>
+        ${textoAtualizadoPesq(status) ? html`<span>· ${textoAtualizadoPesq(status)}</span>` : null}
+        <div class="ml-auto flex gap-2">
+          <a href="#/cs/pesquisas" class="inline-flex items-center rounded-lg bg-white px-3.5 py-2 text-sm font-medium text-ink ring-1 ring-line hover:bg-black/[0.04]">← Voltar</a>
+          <${Btn} variant="ghost" type="button" loading=${sinc} onClick=${() => atualizar(true)}>↻ Atualizar<//>
+        </div>
       </div>
 
-      <p class="mt-4 text-xs text-muted">
-        Fonte: formulários de pesquisa no Google Drive. Contagem, data da última resposta e o sinal ATIVO são
-        atualizados sozinhos a cada 30&nbsp;min (sync no servidor). O <strong>resumo do avatar (IA)</strong> só é
-        gerado quando você clica em “↻ Atualizar resumo (IA)” no card.
-      </p>
+      ${lista === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando respostas…</div>` : html`
+        <div class="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+          <div class="rounded-xl border border-line bg-card p-4">
+            <div class="text-xs uppercase tracking-wide text-muted">Respostas</div>
+            <div class="mt-1 text-2xl font-semibold text-ink">${nf(filtrados.length)}</div>
+            <div class="text-xs text-muted">${temFiltro ? "de " + nf(lista.length) + " no total" : "no total"}</div>
+          </div>
+          <div class="col-span-2 rounded-xl border border-line bg-card p-4">
+            <div class="text-xs uppercase tracking-wide text-muted">Por pesquisa (clique para filtrar)</div>
+            <div class="mt-2 space-y-1">
+              ${g.chaves.map((k) => html`<button type="button" onClick=${() => setFChaves((cs) => cs.includes(k) ? cs.filter((x) => x !== k) : [...cs, k])}
+                class=${cx("flex w-full items-center gap-2 rounded px-1 text-left text-xs hover:bg-black/[0.03]", fChaves.includes(k) && "bg-brand-light")}>
+                <span class="w-40 shrink-0 truncate text-ink/80">${PESQ_TITULO[k]}</span>
+                <div class="h-1.5 flex-1 overflow-hidden rounded bg-black/[0.05]">
+                  <div class="h-full rounded bg-brand/70" style=${`width:${filtrados.length ? ((porChave[k] || 0) / filtrados.length) * 100 : 0}%`}></div>
+                </div>
+                <span class="w-12 shrink-0 text-right tabular-nums text-muted">${nf(porChave[k] || 0)}</span>
+              </button>`)}
+            </div>
+          </div>
+          <div class="rounded-xl border border-line bg-card p-4">
+            <div class="text-xs uppercase tracking-wide text-muted">Na Lista de Mentorados</div>
+            <div class="mt-1 text-2xl font-semibold text-ink">${nf(naLista)}</div>
+            <div class="text-xs text-muted">${pctVac(naLista, filtrados.length)} das respostas filtradas (por e-mail ou telefone)</div>
+          </div>
+        </div>
+
+        <div class="mt-4 rounded-2xl border border-line bg-card p-4">
+          <div class="flex flex-wrap items-end gap-2">
+            <label class="block w-full sm:w-auto sm:min-w-[240px] sm:flex-1 lg:max-w-xs">
+              <span class="mb-1 block text-xs text-muted">Buscar</span>
+              <input class=${inputCls} type="search" placeholder="Nome, e-mail ou palavra nas respostas" value=${busca} onInput=${(e) => setBusca(e.target.value)} />
+            </label>
+            <label class="block">
+              <span class="mb-1 block text-xs text-muted">Pesquisa</span>
+              <select class=${selCls} value=${fChaves.length === 1 ? fChaves[0] : fChaves.length ? "_varias" : ""} onChange=${(e) => setFChaves(e.target.value ? [e.target.value] : [])}>
+                <option value="">Todas</option>
+                ${fChaves.length > 1 ? html`<option value="_varias" disabled>${fChaves.length} selecionadas</option>` : null}
+                ${g.chaves.map((k) => html`<option value=${k}>${PESQ_TITULO[k]}</option>`)}
+              </select>
+            </label>
+            <label class="block">
+              <span class="mb-1 block text-xs text-muted">Lista de Mentorados</span>
+              <select class=${selCls} value=${fLista} onChange=${(e) => setFLista(e.target.value)}>
+                <option value="">Todas</option><option value="sim">Na lista</option><option value="nao">Fora da lista</option>
+              </select>
+            </label>
+            <label class="block">
+              <span class="mb-1 block text-xs text-muted">De</span>
+              <input class=${selCls} type="date" value=${de} max=${ate || undefined} onInput=${(e) => setDe(e.target.value)} />
+            </label>
+            <label class="block">
+              <span class="mb-1 block text-xs text-muted">Até</span>
+              <input class=${selCls} type="date" value=${ate} min=${de || undefined} onInput=${(e) => setAte(e.target.value)} />
+            </label>
+            ${temFiltro ? html`<${Btn} variant="subtle" type="button" onClick=${limpar}>Limpar filtros<//>` : null}
+          </div>
+          ${opcoesFiltro.length ? html`<div class="mt-3 flex flex-wrap items-end gap-2 border-t border-line pt-3">
+            <label class="block min-w-0 max-w-full">
+              <span class="mb-1 block text-xs text-muted">Filtrar por resposta</span>
+              <select class=${cx(inputCls, "w-auto max-w-[min(420px,100%)]")} value=${novoP} onChange=${(e) => setNovoP(e.target.value)}>
+                <option value="">Escolha a pergunta…</option>
+                ${opcoesFiltro.map((o) => html`<option value=${o.p}>${o.p}</option>`)}
+              </select>
+            </label>
+            ${novoP ? html`<label class="block min-w-0 max-w-full">
+              <span class="mb-1 block text-xs text-muted">Resposta</span>
+              <select class=${cx(inputCls, "w-auto max-w-[min(320px,100%)]")} value="" onChange=${(e) => { if (e.target.value) { addFiltro(novoP, e.target.value); setNovoP(""); } }}>
+                <option value="">Escolha…</option>
+                ${(opcoesFiltro.find((o) => o.p === novoP) || { valores: [] }).valores.map((v) => html`<option value=${v}>${v}</option>`)}
+              </select>
+            </label>` : null}
+            ${filtros.map((f) => html`<span class="inline-flex max-w-full items-center gap-1 rounded-full bg-brand-light px-2.5 py-1 text-xs text-brand-dark">
+              <span class="truncate" title=${f.p + ": " + f.v}><span class="opacity-70">${f.p.length > 40 ? f.p.slice(0, 40) + "…" : f.p}:</span> ${f.v}</span>
+              <button type="button" class="ml-0.5 font-semibold" onClick=${() => tirarFiltro(f.p)} aria-label="Tirar filtro">×</button>
+            </span>`)}
+          </div>` : null}
+        </div>
+
+        <div class="mt-4 rounded-2xl border border-brand/30 bg-brand-light/30 p-4">
+          <div class="text-sm font-semibold text-ink">Pergunte sobre estas respostas</div>
+          <div class="text-xs text-muted">A IA analisa as ${nf(filtrados.length)} respostas filtradas: números exatos nas perguntas de múltipla escolha e uma leitura das respostas abertas.</div>
+          <form class="mt-2 flex flex-col gap-2 sm:flex-row" onSubmit=${(e) => { e.preventDefault(); perguntar(); }}>
+            <input class=${cx(inputCls, "flex-1")} placeholder="Ex.: O que as alunas de 45 a 54 anos mais citam como dificuldade?"
+              value=${pergunta} onInput=${(e) => setPergunta(e.target.value)} maxlength="1000" />
+            <${Btn} type="submit" loading=${perguntando} disabled=${pergunta.trim().length < 3 || !filtrados.length}>Perguntar<//>
+          </form>
+          ${!respostaIa && !perguntando ? html`<div class="mt-2 flex flex-wrap gap-1.5">
+            ${PESQ_SUGESTOES[grupo].map((s) => html`<button type="button" onClick=${() => perguntar(s)}
+              class="rounded-full border border-line bg-white px-2.5 py-1 text-xs text-ink/80 hover:border-brand/40">${s}</button>`)}
+          </div>` : null}
+          ${perguntando ? html`<div class="mt-3 text-sm text-muted"><span class="spinner mr-2"></span>Analisando as respostas…</div>` : null}
+          ${respostaIa && !perguntando ? html`<div class="mt-3 rounded-xl border border-line bg-white p-4">
+            <div class="text-xs text-muted">${respostaIa.pergunta} · base: ${nf(respostaIa.base)} respostas</div>
+            <div class="prose-doc mt-2 min-w-0 text-sm" dangerouslySetInnerHTML=${{ __html: mdToHtml(respostaIa.texto) }}></div>
+          </div>` : null}
+        </div>
+
+        <div class="mt-5 flex items-baseline justify-between gap-2">
+          <h2 class="text-base font-semibold text-ink">Principais respostas</h2>
+          <span class="text-xs text-muted">Clique numa fatia para filtrar</span>
+        </div>
+        ${pizzas.length ? html`<div class="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          ${(todasPizzas ? pizzas : pizzas.slice(0, 6)).map((q) => html`<${PizzaPesq} key=${q.p} titulo=${q.p} total=${q.n} itens=${q.itens}
+            max=${6} filtroAtivo=${filtroDe(q.p)} onFatia=${(v) => (filtroDe(q.p) === v ? tirarFiltro(q.p) : addFiltro(q.p, v))} />`)}
+        </div>
+        ${pizzas.length > 6 ? html`<div class="mt-2 text-center"><${Btn} variant="ghost" type="button" onClick=${() => setTodasPizzas(!todasPizzas)}>
+          ${todasPizzas ? "Mostrar menos" : `Mostrar todas (${pizzas.length})`}<//></div>` : null}`
+        : html`<div class="mt-2 rounded-xl border border-line bg-card px-4 py-6 text-center text-sm text-muted">
+            ${filtrados.length ? "Estas respostas só têm perguntas abertas. Use a busca, a lista abaixo ou pergunte à IA." : "Nenhuma resposta com esses filtros."}</div>`}
+
+        <div class="mt-5 flex flex-wrap items-center gap-2">
+          <h2 class="text-base font-semibold text-ink">Respostas</h2>
+          <span class="text-xs text-muted">${nf(filtrados.length)} ${filtrados.length === 1 ? "resposta" : "respostas"}</span>
+          <${Btn} variant="ghost" type="button" class="ml-auto" disabled=${!filtrados.length} onClick=${() => exportarCsvPesq(filtrados, grupo)}>Exportar CSV<//>
+        </div>
+        <div class="mt-2 divide-y divide-line overflow-hidden rounded-2xl border border-line bg-card">
+          ${paginaRows.length ? paginaRows.map((r) => html`<button type="button" key=${r.chave + r.linha} onClick=${() => setAberta(r)}
+            class="block w-full px-4 py-3 text-left hover:bg-black/[0.02]">
+            <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <span class="font-medium text-ink">${r.nome || r.email || "Sem nome"}</span>
+              ${r.na_lista ? html`<${Badge} class="bg-brand-light text-brand-dark">Na lista<//>` : null}
+              <span class="text-xs text-muted">${PESQ_TITULO[r.chave]} · ${fmtDataHoraPesq(r.respondido_em)}</span>
+            </div>
+            <div class="mt-0.5 line-clamp-2 text-xs text-muted">${(r.dados || []).filter((d) => d.r.length > 20).slice(0, 2).map((d) => d.r).join(" · ") || (r.dados || []).slice(0, 3).map((d) => d.r).join(" · ")}</div>
+          </button>`) : html`<div class="px-4 py-8 text-center text-sm text-muted">Nenhuma resposta com esses filtros.</div>`}
+        </div>
+        ${nPags > 1 ? html`<div class="mt-2 flex items-center justify-center gap-2 text-sm">
+          <${Btn} variant="ghost" type="button" disabled=${pagina <= 1} onClick=${() => setPagina(pagina - 1)}>←<//>
+          <span class="text-muted">Página ${pagina} de ${nPags}</span>
+          <${Btn} variant="ghost" type="button" disabled=${pagina >= nPags} onClick=${() => setPagina(pagina + 1)}>→<//>
+        </div>` : null}
+
+        ${resumos.length ? html`
+          <h2 class="mt-8 text-base font-semibold text-ink">Resumo do avatar (IA) por pesquisa</h2>
+          <div class="mt-2 grid gap-4 lg:grid-cols-2">
+            ${resumos.map((p) => html`<${PesquisaCard} key=${p.chave} p=${p} onRegen=${() => fetchPesquisas().then((x) => setResumos(x.filter((y) => g.chaves.includes(y.chave))))} />`)}
+          </div>` : null}
+      `}
+      ${aberta ? html`<${DetalheRespostaPesq} r=${aberta} onClose=${() => setAberta(null)} />` : null}
     </div>`;
 }
 
@@ -9106,6 +10099,8 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "cs" && p1 === "metas") return html`<${MetasPage} me=${me} />`;
   if (p0 === "cs" && p1 === "mentorados") return html`<${MentoradosPage} />`;
   if (p0 === "cs" && p1 === "teste-vac") return html`<${TesteVacPage} />`;
+  if (p0 === "cs" && p1 === "nivelamento") return html`<${NivelamentoPage} />`;
+  if (p0 === "cs" && p1 === "pesquisas" && PESQ_GRUPOS[route.parts[2]]) return html`<${PesquisaGrupoPage} grupo=${route.parts[2]} />`;
   if (p0 === "cs" && p1 === "pesquisas") return html`<${PesquisasPage} />`;
   if (p0 === "cs" && p1 === "chat-cademi") return html`<${ChatCademiPage} />`;
   if (p0 === "pedagogico" && p1 === "aulas-praticas") return html`<${AulasPraticasPage} />`;

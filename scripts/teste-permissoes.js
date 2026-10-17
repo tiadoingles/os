@@ -96,6 +96,18 @@ function executar(src) {
     for (const r of todasRotas) confere(nome + " escreve " + r, m.podeEscreverRota(u, r), false);
   }
 
+  // --- subrotas declaradas no item do menu (Pesquisas de Alunos: mentorados / outros) ---
+  const soCs = equipe("cs");
+  for (const r of ["/cs/pesquisas/mentorados", "/cs/pesquisas/outros"]) {
+    confere("cs " + r, m.rotaPermitida(soCs, r), true);
+    confere("adm " + r, m.rotaPermitida(ADM, r), true);
+    confere("conteudo " + r, m.rotaPermitida(equipe("conteudo"), r), false);
+    confere("sem aba " + r, m.rotaPermitida(equipe(), r), false);
+    confere("cs escreve " + r, m.podeEscreverRota(soCs, r), true);
+  }
+  for (const r of ["/cs/pesquisas/xyz", "/cs/pesquisas/mentorados/extra", "/cs/metas/mentorados", "/cs/faq/outros", "/conteudo/metricas/outros"])
+    confere("cs subrota inválida " + r, m.rotaPermitida(soCs, r), false);
+
   // --- rota → aba ---
   confere("aba /base", m.areaDaRota("/base"), "bc");
   confere("aba /doc/x", m.areaDaRota("/doc/x"), "bc");

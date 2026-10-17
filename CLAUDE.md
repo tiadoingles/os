@@ -20,7 +20,8 @@ como backend.
   (`GUEST_EMAIL/GUEST_PASSWORD`), só para testes e desligado.
 - **Backend** — Supabase projeto `hmvlkltyvyhlxfyaovpe` (região `sa-east-1`).
   Edge Functions (`ai`, `public-chat`, `sync`, `planilha`, `admin-users`,
-  `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet`, `teste-vac-sheet`, entre outras)
+  `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet`, `teste-vac-sheet`, `nivelamento-sheet`,
+  `pesquisas-respostas`, entre outras)
   vivem no Supabase, não neste repo — leia/edite via MCP do Supabase
   (`get_edge_function`/`deploy_edge_function`).
 
@@ -74,9 +75,10 @@ como backend.
   - `pedagogico`: `aulas_agenda`, `materiais_pedidos`, `slides_pedidos`, `arena_regras` (escrita só `origem='aprendida'`),
     storage `gerados` (escrita; leitura segue pública).
   - `cs`: `livros_envios`, `faq_interacoes` (só `secao_slug='cs-suporte'`; ADM todas), `cs_diagnosticos`, `cs_metas`
-    (delete só manual), `cs_mentorados`, `cs_teste_vac`, `chat_widget_logs`, `pesquisa_avatar`, `nivelamento_respostas`
+    (delete só manual), `cs_mentorados`, `cs_teste_vac`, `cs_nivelamento`, `cs_pesquisa_respostas` (+ RPC `cs_pesquisa_painel`),
+    `chat_widget_logs`, `pesquisa_avatar`, `nivelamento_respostas`
     (leitura; o insert público do teste continua) e `sync_status` (leitura das chaves `metas-planilha`,
-    `mentorados-planilha`, `teste-vac-planilha`); RPCs `os_restaurar_cs_metas`/`os_restaurar_diagnostico`.
+    `mentorados-planilha`, `teste-vac-planilha`, `nivelamento-planilha`, `pesquisas-respostas`); RPCs `os_restaurar_cs_metas`/`os_restaurar_diagnostico`.
   - `conteudo`: `conteudo_calendario`, `conteudo_objetivo_resumo`, `conteudo_insights`, `ig_dia`, `ig_perfil`, `ig_post`,
     `linkedin_posts`; RPC `linkedin_conexao_status`.
   - `comercial`, `financeiro`: nenhuma tabela ainda.
@@ -89,7 +91,8 @@ como backend.
 - **Edge Functions e área** (checagem no servidor, `role === 'admin' || areas.includes(...)`): `admin-users` (só ADM;
   ações `list`/`create {admin, areas}`/`setAcesso {userId, admin, areas}` (devolve `antes`/`depois` para o DESFAZER;
   recusa tirar o próprio ADM)/`resetPassword`/`delete`); `planilha`, `diagnostico-drive`, `metas-sheet-sync`,
-  `mentorados-sheet`, `teste-vac-sheet` = `cs` (os crons continuam pelo `x-sync-token`); `ai`: `classify` = `bc`,
+  `mentorados-sheet`, `teste-vac-sheet`, `nivelamento-sheet`, `pesquisas-respostas` = `cs` (os crons continuam pelo
+  `x-sync-token`; a op `perguntar` da `pesquisas-respostas` exige usuário com `cs`, nunca o token); `ai`: `classify` = `bc`,
   `ask` com `secao_slug=cs-suporte` = `cs`, com outra seção = `bc`, sem seção (Gerador de conteúdos; Pedir a IA é só do
   ADM na interface) = `conteudo`, `linkedin_*` = `conteudo` (o guia editorial é lido com service_role depois da
   checagem), `arena_*` = `pedagogico`, `status` só pede login; `linkedin`: `status`/`auth_url` = `conteudo`,
@@ -99,6 +102,29 @@ como backend.
   `sync@os.tiadoingles.com.br` (conta de serviço do `scripts/sync_skills.py`, que só lê `kb_sections` e lê/grava
   `kb_documents`/`kb_document_versions`) = `{bc}`; `teste@os.tiadoingles.com.br` (editor legado do modo aberto) = as 7
   abas, aguardando a Tia decidir se exclui.
+- **Testes de Nivelamento** (`#/cs/nivelamento`, `NivelamentoPage`; SQL `scripts/migrations/20261017_cs_nivelamento.sql`):
+  cache somente leitura `cs_nivelamento` da planilha `1YhlAuX3PqsJ1o0StPPe8GW4zEXsJjYqBY7yjSZhETO8`, SÓ a aba **Novo**
+  (respostas do teste da Mentoria avaliadas pela IA da Edge Function pública `nivelamento`). Edge Function
+  `nivelamento-sheet` (verify_jwt=false; mesmo molde da `teste-vac-sheet`): ao abrir a aba (>5 min), botão Atualizar e
+  cron `os-nivelamento-planilha-30min`. O cabeçalho da aba Novo tem 21 colunas vazias no meio (títulos deslocados): a
+  função alinha os títulos não vazios com a largura dos dados. "Na Lista de Mentorados" = e-mail/WhatsApp em `cs_mentorados`.
+  Trilha = número de "Trilha indicada" (`SPRINT → Trilha 2 · Básico II` → 2). Mesmo layout do Teste VAC (cards por trilha,
+  média por área, área mais fraca, autoavaliação, filtros, CSV).
+- **Pesquisas de Alunos** (`#/cs/pesquisas` + `#/cs/pesquisas/mentorados|outros`; SQL
+  `scripts/migrations/20261017_cs_pesquisa_respostas.sql`): **Mentorados** = `mentoria-fluent-mind` + `pnl-mentoria`;
+  **Outros** = `metodo-tia-do-ingles`, `decole-com-a-tia`, `memorizacao` + `pnl-metodo` (`PESQ_GRUPOS` em `app.js`).
+  Respostas individuais em `cs_pesquisa_respostas` (`dados` = `[{p, r}]` na ordem da planilha); `pesquisa_avatar` segue
+  com totais e o resumo da IA (cards no fim do detalhe). Edge Function `pesquisas-respostas`: sync (mesmas fontes da op
+  `pesquisas` da `sync`; ao abrir a aba >10 min, botão e cron `os-pesquisas-respostas-30min` aos 15/45 min) e op
+  `perguntar` (IA com contagens exatas das perguntas de múltipla escolha + amostra das abertas; respeita a pausa de IA;
+  custo em `ai_usage_log`, origem `pesquisas:perguntar`; teto de R$ 5/dia somando todas as contas, `TETO_DIA_BRL` na função). Tela inicial usa a RPC `cs_pesquisa_painel` (security invoker,
+  sem baixar respostas); o detalhe baixa o grupo em páginas de 1000 (limite do PostgREST). Pergunta de múltipla escolha
+  (pizza/filtro): ≤15 respostas distintas, média ≤80 caracteres e (≤6 distintas ou ≤1/3 das respostas) — regra repetida
+  em `ehCategoricaPesq` (app.js), `ehCategorica` (Edge Function) e na RPC; mantenha as três iguais.
+  `sanitizeHtml` (usado por `Markdown`/`mdToHtml`) remove svg/math, atributos com `:` (xlink), `style`, `formaction`,
+  `srcdoc` e URLs que não sejam http(s)/mailto/tel/âncora/relativas: a resposta da IA vem de texto de formulário público.
+  **Subrotas**: item do `NAV` com `subrotas: [...]` libera `#/<aba>/<item>/<subrota>` em `rotaPermitida` (só as listadas).
+  Teste de RLS das duas tabelas: `scripts/migrations/teste_rls_cs_nivelamento_pesquisas.sql`.
 - **LinkedIn da Tia** (`#/conteudo/linkedin`, `LinkedinPage`/`LinkedinCard`): fila de posts em
   `public.linkedin_posts` (RLS: aba `conteudo` via `app.tem_area`; SQL em
   `scripts/migrations/20261014_linkedin_*.sql`). Ações da Edge Function `ai` (arquivo
