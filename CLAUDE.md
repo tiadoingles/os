@@ -76,6 +76,7 @@ como backend.
     storage `gerados` (escrita; leitura segue pública).
   - `cs`: `livros_envios`, `faq_interacoes` (só `secao_slug='cs-suporte'`; ADM todas), `cs_diagnosticos`, `cs_metas`
     (delete só manual), `cs_mentorados`, `cs_teste_vac`, `cs_nivelamento`, `cs_pesquisa_respostas` (+ RPC `cs_pesquisa_painel`),
+    `cs_mentorado_notas`, `cs_mentorado_vinculos`, `cs_mentorado_eventos` (só leitura) + RPCs `cs_ficha_mentorado`/`cs_mentorados_resumo`,
     `chat_widget_logs`, `pesquisa_avatar`, `nivelamento_respostas`
     (leitura; o insert público do teste continua) e `sync_status` (leitura das chaves `metas-planilha`,
     `mentorados-planilha`, `teste-vac-planilha`, `nivelamento-planilha`, `pesquisas-respostas`); RPCs `os_restaurar_cs_metas`/`os_restaurar_diagnostico`.
@@ -102,6 +103,21 @@ como backend.
   `sync@os.tiadoingles.com.br` (conta de serviço do `scripts/sync_skills.py`, que só lê `kb_sections` e lê/grava
   `kb_documents`/`kb_document_versions`) = `{bc}`; `teste@os.tiadoingles.com.br` (editor legado do modo aberto) = as 7
   abas, aguardando a Tia decidir se exclui.
+- **Ficha do Mentorado** (`#/cs/mentorados?ficha=<email>`, `FichaMentoradoPage`; SQL
+  `scripts/migrations/20261017_cs_ficha_mentorado.sql`; teste `scripts/migrations/teste_rls_ficha_mentorado.sql`). Tudo sobre a
+  pessoa num lugar: cabeçalho da Lista de Mentorados, alertas da jornada (calculados no front), **anotações da equipe**,
+  Diagnóstico, Metas, Teste VAC, Nivelamento, Pesquisas, Chat da Cademí, Envio de livros, linha do tempo e vínculos.
+  **Chave** = e-mail da Lista de Mentorados (`lower(trim)`); as outras abas entram por e-mail OU telefone (`app.tel10` = últimos
+  10 dígitos) OU vínculo manual (`cs_mentorado_vinculos`, único por tipo+valor, normalizado por trigger). Dados pela RPC
+  `cs_ficha_mentorado(email)` e, na lista, `cs_mentorados_resumo()` (pílulas e filtro "dados da ficha"; junções em
+  conjunto, ~0,07 s — não volte a fazer uma busca por mentorado). Ambas `security invoker`. `livros_envios` sai sem CPF.
+  **Anotações** (`cs_mentorado_notas`): trigger `app.cs_mentorado_notas_guarda` fixa `autor_id`/`autor_nome`/`created_at`
+  (o cliente não consegue assinar como outra pessoa nem mudar autor/pessoa ao editar); editar/excluir só o autor ou ADM;
+  DESFAZER (escopo `cs/mentorados`) reinsere com o mesmo id e o trigger restaura autor e data da cópia em
+  `os_desfazer_snapshots` (só para o próprio autor ou ADM). **Integrações futuras** (Clint, Zoom/presença, Cademí,
+  Hotmart): gravar em `cs_mentorado_eventos` (service_role; `(fonte, chave_externa)` único; `mentorado_email` e/ou
+  `email`/`telefone`) que a linha do tempo já mostra. Ao conectar ferramenta nova com dados de alunos, perguntar à Tia
+  se quer integrar à ficha.
 - **Testes de Nivelamento** (`#/cs/nivelamento`, `NivelamentoPage`; SQL `scripts/migrations/20261017_cs_nivelamento.sql`):
   cache somente leitura `cs_nivelamento` da planilha `1YhlAuX3PqsJ1o0StPPe8GW4zEXsJjYqBY7yjSZhETO8`, SÓ a aba **Novo**
   (respostas do teste da Mentoria avaliadas pela IA da Edge Function pública `nivelamento`). Edge Function

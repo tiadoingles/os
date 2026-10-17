@@ -679,7 +679,7 @@ let desfazendoAgora = false;
 // Rota -> escopo (aba) da pilha. Telas sem escrita desfazível retornam null.
 function escopoDesfazer(route) {
   const [p0, p1] = route.parts;
-  if (p0 === "cs" && ["metas", "diagnostico", "envios-livros"].includes(p1)) return "cs/" + p1;
+  if (p0 === "cs" && ["metas", "diagnostico", "envios-livros", "mentorados"].includes(p1)) return "cs/" + p1;
   if (p0 === "agenda") return "agenda";
   if (p0 === "farol") return "farol";
   if (p0 === "ferramentas") return "ferramentas";
@@ -4541,10 +4541,16 @@ function pillStatusMentorado(st) {
   return PILL_NEUTRAL;
 }
 
-function MentoradosPage() {
+function MentoradosPage({ query, me }) {
+  const ficha = query && query.ficha ? String(query.ficha).trim().toLowerCase() : "";
+  return ficha ? html`<${FichaMentoradoPage} email=${ficha} me=${me} />` : html`<${ListaMentoradosPage} />`;
+}
+
+function ListaMentoradosPage() {
   const [lista, setLista] = useState(null);
   const [status, setStatus] = useState(null);
-  const [diagPorEmail, setDiagPorEmail] = useState({});
+  const [resumo, setResumo] = useState({});
+  const [fFicha, setFFicha] = useState("");
   const [busca, setBusca] = useState("");
   const [fStatus, setFStatus] = useState("");
   const [fGuardiao, setFGuardiao] = useState("");
@@ -4570,12 +4576,8 @@ function MentoradosPage() {
   useEffect(() => {
     carregar().catch((e) => { notify(errMsg(e), "err"); setLista([]); })
       .then(() => atualizar(false)); // o servidor pula se o cache tiver menos de 10 min
-    sb.from("cs_diagnosticos").select("id, email").then(({ data, error }) => {
-      if (error) return; // atalho opcional: sem ele a lista funciona igual
-      const m = {};
-      (data || []).forEach((d) => { const e = (d.email || "").trim().toLowerCase(); if (e) m[e] = d.id; });
-      setDiagPorEmail(m);
-    });
+    // ícones da ficha: opcionais, a lista funciona sem eles (o filtro "dados da ficha" some se falhar)
+    fetchResumoMentorados().then(setResumo).catch(() => setResumo(null));
   }, []);
 
   const opcoesStatus = useMemo(() => [...new Set((lista || []).map((m) => m.status).filter(Boolean))].sort(), [lista]);
@@ -4587,6 +4589,12 @@ function MentoradosPage() {
     let ls = (lista || []).filter((m) => {
       if (fStatus && m.status !== fStatus) return false;
       if (fGuardiao === SEM_GUARDIAO ? !!m.guardiao : fGuardiao && m.guardiao !== fGuardiao) return false;
+      if (fFicha) {
+        const r = (resumo || {})[(m.email || "").trim().toLowerCase()] || {};
+        const ok = { "com-diag": r.diag > 0, "sem-diag": !r.diag, atrasadas: r.metas_atrasadas > 0, "sem-vac": !r.vac,
+          "sem-nivel": !r.nivel, "com-notas": r.notas > 0, "sem-notas": !r.notas }[fFicha];
+        if (!ok) return false;
+      }
       if (!q) return true;
       if (semAcentoMin(m.nome).includes(q) || semAcentoMin(m.email).includes(q)) return true;
       return qDig.length >= 3 && (m.telefone_digitos || "").includes(qDig);
@@ -4600,10 +4608,10 @@ function MentoradosPage() {
     };
     ls = [...ls].sort(ordem === "final-asc" ? porFinal(1) : ordem === "final-desc" ? porFinal(-1) : ordem === "nome-desc" ? (a, b) => porNome(b, a) : porNome);
     return ls;
-  }, [lista, busca, fStatus, fGuardiao, ordem]);
+  }, [lista, busca, fStatus, fGuardiao, ordem, fFicha, resumo]);
 
   const dataBR = (iso, txt) => (iso ? iso.split("-").reverse().join("/") : txt || "—");
-  const temFiltro = busca || fStatus || fGuardiao;
+  const temFiltro = busca || fStatus || fGuardiao || fFicha;
   const erro = status && status.ultimo_status === "erro";
   const atualizadoEm = (() => {
     if (!status || !status.ultima_execucao_em || status.ultimo_status !== "ok") return null;
@@ -4635,10 +4643,10 @@ function MentoradosPage() {
       ${longa ? html`<button type="button" class="block text-[11px] text-brand hover:underline"
         onClick=${() => setAbertas((x) => ({ ...x, [m.linha]: !x[m.linha] }))}>${aberta ? "ver menos" : "ver mais"}</button>` : null}`;
   };
-  const diag = (m) => {
-    const id = diagPorEmail[(m.email || "").toLowerCase()];
-    return id ? html`<a class="text-xs text-brand hover:underline" href=${"#/cs/diagnostico?id=" + id}>Diagnóstico</a>` : null;
-  };
+  const sinais = (m) => html`<${SinaisFicha} r=${(resumo || {})[(m.email || "").trim().toLowerCase()]} />`;
+  const nomeLink = (m) => (m.email
+    ? html`<a class="font-medium text-ink hover:text-brand hover:underline" href=${linkFicha(m.email)} title="Abrir a ficha">${m.nome || m.email}</a>`
+    : html`<span class="font-medium text-ink">${m.nome || "—"}</span>`);
 
   return html`
     <div>
@@ -4671,7 +4679,17 @@ function MentoradosPage() {
             <option value="final-asc">Data final (mais próxima)</option>
             <option value="final-desc">Data final (mais distante)</option>
           </select>
-          ${temFiltro ? html`<button type="button" class="text-xs text-muted underline" onClick=${() => { setBusca(""); setFStatus(""); setFGuardiao(""); }}>limpar</button>` : null}
+          ${resumo ? html`<select class=${cx(inputCls, "w-auto")} value=${fFicha} onChange=${(e) => setFFicha(e.target.value)} aria-label="Dados da ficha">
+            <option value="">Todos os dados da ficha</option>
+            <option value="com-diag">Com diagnóstico</option>
+            <option value="sem-diag">Sem diagnóstico</option>
+            <option value="atrasadas">Com metas atrasadas</option>
+            <option value="sem-vac">Sem Teste VAC</option>
+            <option value="sem-nivel">Sem Nivelamento</option>
+            <option value="com-notas">Com anotações</option>
+            <option value="sem-notas">Sem anotações</option>
+          </select>` : null}
+          ${temFiltro ? html`<button type="button" class="text-xs text-muted underline" onClick=${() => { setBusca(""); setFStatus(""); setFGuardiao(""); setFFicha(""); }}>limpar</button>` : null}
           <div class="ml-auto flex items-center gap-2 text-xs text-muted">
             <span>${filtrados.length} de ${lista.length}</span>
             ${atualizadoEm ? html`<span>· ${atualizadoEm}</span>` : null}
@@ -4698,7 +4716,7 @@ function MentoradosPage() {
               ${filtrados.length === 0 ? html`<tr><td colspan="9" class="px-4 py-8 text-center text-sm text-muted">Nenhum mentorado encontrado.</td></tr>` :
                 filtrados.map((m) => html`
                   <tr key=${m.linha} class="border-b border-line align-top last:border-0 hover:bg-black/[0.02]">
-                    <td class="min-w-[190px] px-3 py-2.5"><div class="font-medium text-ink">${m.nome || "—"}</div>${diag(m)}</td>
+                    <td class="min-w-[190px] px-3 py-2.5"><div>${nomeLink(m)}</div>${sinais(m)}</td>
                     <td class="min-w-[210px] px-3 py-2.5 text-xs text-muted break-words">${m.email || "—"}</td>
                     <td class="px-3 py-2.5 text-xs whitespace-nowrap">${telefones(m)}</td>
                     <td class="px-3 py-2.5 text-xs">${m.guardiao || html`<span class="text-muted">—</span>`}</td>
@@ -4718,8 +4736,9 @@ function MentoradosPage() {
               <div key=${m.linha} class="rounded-xl border border-line bg-card p-4">
                 <div class="flex items-start justify-between gap-2">
                   <div class="min-w-0">
-                    <div class="font-medium text-ink">${m.nome || "—"}</div>
+                    <div>${nomeLink(m)}</div>
                     <div class="break-all text-xs text-muted">${m.email || "—"}</div>
+                    ${sinais(m)}
                   </div>
                   ${m.status ? html`<${Badge} class=${cx("shrink-0", pillStatusMentorado(m.status))}>${m.status}<//>` : null}
                 </div>
@@ -4729,12 +4748,358 @@ function MentoradosPage() {
                   <div><span class="text-muted">Início</span><div>${dataBR(m.data_inicio, m.data_inicio_txt)}</div></div>
                   <div><span class="text-muted">Data final</span><div>${dataBR(m.data_final, m.data_final_txt)}</div></div>
                   <div><span class="text-muted">Renovou</span><div>${m.renovou || "—"}</div></div>
-                  <div>${diag(m)}</div>
+                  <div>${m.email ? html`<a class="text-xs font-medium text-brand hover:underline" href=${linkFicha(m.email)}>Abrir ficha →</a>` : null}</div>
                 </div>
                 ${m.observacoes ? html`<div class="mt-2 text-xs"><span class="text-muted">Observações</span><div>${obs(m)}</div></div>` : null}
               </div>`)}
         </div>
       `}
+    </div>`;
+}
+
+/* ============================ CS · Ficha do Mentorado ============================ */
+// #/cs/mentorados?ficha=<email>. Tudo sobre a pessoa num lugar (pedido da Tia, 17/10/2026). Chave = e-mail
+// da Lista de Mentorados; as outras abas entram por e-mail OU telefone (últimos 10 dígitos) OU vínculo
+// manual (cs_mentorado_vinculos). Dados pela RPC cs_ficha_mentorado (security invoker); anotações em
+// cs_mentorado_notas (autor e data travados por trigger; DESFAZER restaura o autor original).
+// Integrações futuras (Clint, Zoom, Cademí, Hotmart) gravam em cs_mentorado_eventos e aparecem na Linha do tempo.
+const FICHA_ESCOPO = "cs/mentorados";
+const linkFicha = (email) => "#/cs/mentorados?ficha=" + encodeURIComponent(String(email || "").trim().toLowerCase());
+
+async function fetchFichaMentorado(email) {
+  const { data, error } = await sb.rpc("cs_ficha_mentorado", { p_email: email });
+  if (error) throw error;
+  return data;
+}
+async function fetchResumoMentorados() {
+  const { data, error } = await sb.rpc("cs_mentorados_resumo");
+  if (error) throw error;
+  return Object.fromEntries((data || []).map((x) => [x.email, x]));
+}
+
+// "2026-10-08" (date) vira 08/10/2026 sem fuso; timestamptz usa o fuso do navegador (não corta em UTC).
+const dataBRFicha = (iso) => (!iso ? "—" : String(iso).length <= 10 ? String(iso).split("-").reverse().join("/")
+  : new Date(iso).toLocaleDateString("pt-BR"));
+const dataHoraFicha = (v) => (v && String(v).length <= 10 ? dataBRFicha(v) : fmtDataHoraPesq(v));
+const textoDiag = (v) => (Array.isArray(v) ? v.join(", ") : v == null ? "" : String(v));
+
+// Ícones (pílulas de texto) do que a pessoa tem; usados na lista.
+function SinaisFicha({ r }) {
+  if (!r) return null;
+  const itens = [
+    r.diag && ["Diagnóstico", PILL_OK],
+    (r.metas_abertas || r.metas_atrasadas) && [`Metas ${r.metas_abertas}${r.metas_atrasadas ? " · " + r.metas_atrasadas + " atrasada" + (r.metas_atrasadas > 1 ? "s" : "") : ""}`, r.metas_atrasadas ? PILL_ERR : PILL_NEUTRAL],
+    r.vac && ["VAC", "bg-[#e1e8f2] text-[#4a6286]"],
+    r.nivel && ["Nivelamento", "bg-[#ece3f0] text-[#7a4f86]"],
+    r.pesq && [`Pesquisas ${r.pesq}`, PILL_NEUTRAL],
+    r.notas && [`Notas ${r.notas}`, "bg-brand-light text-brand-dark"],
+  ].filter(Boolean);
+  if (!itens.length) return null;
+  return html`<div class="mt-1 flex flex-wrap gap-1">${itens.map(([t, c]) => html`<span class=${cx("rounded-full px-1.5 py-px text-[10px] font-medium", c)}>${t}</span>`)}</div>`;
+}
+
+function SecaoFicha({ titulo, n, acao, children, id }) {
+  return html`<section id=${id} class="rounded-2xl border border-line bg-card p-4 sm:p-5">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <h2 class="text-base font-semibold text-ink">${titulo}${n != null ? html` <span class="text-sm font-normal text-muted">(${n})</span>` : null}</h2>
+      ${acao || null}
+    </div>
+    <div class="mt-3">${children}</div>
+  </section>`;
+}
+const VazioFicha = ({ children }) => html`<p class="text-sm text-muted">${children}</p>`;
+
+function NotasFicha({ email, notas, me, onMudou }) {
+  const [texto, setTexto] = useState("");
+  const [salvando, setSalvando] = useState(false);
+  const [editando, setEditando] = useState(null); // { id, texto }
+  const podeMexer = (n) => ehAdmin(me) || (me && n.autor_id === me.id);
+
+  async function salvar(e) {
+    e.preventDefault();
+    if (!texto.trim() || salvando) return;
+    setSalvando(true);
+    try {
+      const { data, error } = await sb.from("cs_mentorado_notas").insert({ mentorado_email: email, texto: texto.trim() }).select().single();
+      if (error) throw error;
+      registrarDesfazer(FICHA_ESCOPO, "nova anotação", desfazerCriacao("cs_mentorado_notas", data, "nova anotação"), { mensagem: "Anotação salva" });
+      setTexto("");
+      await onMudou();
+    } catch (err) { notify(errMsg(err), "err"); }
+    setSalvando(false);
+  }
+  async function salvarEdicao() {
+    if (!editando || !editando.texto.trim()) return;
+    try {
+      const antes = await linhaAtual("cs_mentorado_notas", editando.id);
+      const { data, error } = await sb.from("cs_mentorado_notas").update({ texto: editando.texto.trim() }).eq("id", editando.id).select().single();
+      if (error) throw error;
+      registrarDesfazer(FICHA_ESCOPO, "edição de anotação", desfazerEdicao("cs_mentorado_notas", antes, data, "edição de anotação"), { mensagem: "Anotação atualizada" });
+      setEditando(null);
+      await onMudou();
+    } catch (err) { notify(errMsg(err), "err"); }
+  }
+  async function excluir(n) {
+    if (!confirm("Excluir esta anotação?")) return;
+    try {
+      const antes = await linhaAtual("cs_mentorado_notas", n.id);
+      const { data, error } = await sb.from("cs_mentorado_notas").delete().eq("id", n.id).select("id");
+      if (error) throw error;
+      if (!data || !data.length) throw new Error("sem permissão para excluir esta anotação");
+      registrarDesfazer(FICHA_ESCOPO, "exclusão de anotação", desfazerExclusao("cs_mentorado_notas", antes, "exclusão de anotação"), { mensagem: "Anotação excluída" });
+      await onMudou();
+    } catch (err) { notify(errMsg(err), "err"); }
+  }
+
+  return html`
+    <form onSubmit=${salvar} class="flex flex-col gap-2">
+      <textarea class=${cx(inputCls, "min-h-[84px]")} maxlength="5000" placeholder="Escreva uma anotação sobre a pessoa (atendimento, combinado, observação...)"
+        value=${texto} onInput=${(e) => setTexto(e.target.value)}></textarea>
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-xs text-muted">Fica registrada com o seu nome, a data e a hora.</span>
+        <${Btn} type="submit" loading=${salvando} disabled=${!texto.trim()}>Salvar anotação<//>
+      </div>
+    </form>
+    ${notas.length ? html`<ul class="mt-4 space-y-3">
+      ${notas.map((n) => html`<li key=${n.id} class="rounded-xl border border-line bg-white px-3 py-2.5">
+        <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted">
+          <span class="font-semibold text-ink">${n.autor_nome || "Sem nome"}</span>
+          <span>${fmtDataHoraPesq(n.created_at)}</span>
+          ${n.updated_at && new Date(n.updated_at) - new Date(n.created_at) > 60000 ? html`<span>· editada ${fmtDataHoraPesq(n.updated_at)}</span>` : null}
+          ${podeMexer(n) && (!editando || editando.id !== n.id) ? html`<span class="ml-auto flex gap-3">
+            <button type="button" class="text-brand hover:underline" onClick=${() => setEditando({ id: n.id, texto: n.texto })}>editar</button>
+            <button type="button" class="text-[#a44b43] hover:underline" onClick=${() => excluir(n)}>excluir</button>
+          </span>` : null}
+        </div>
+        ${editando && editando.id === n.id ? html`<div class="mt-2">
+          <textarea class=${cx(inputCls, "min-h-[72px]")} maxlength="5000" value=${editando.texto} onInput=${(e) => setEditando({ ...editando, texto: e.target.value })}></textarea>
+          <div class="mt-2 flex justify-end gap-2">
+            <${Btn} variant="subtle" type="button" onClick=${() => setEditando(null)}>Cancelar<//>
+            <${Btn} type="button" disabled=${!editando.texto.trim()} onClick=${salvarEdicao}>Salvar<//>
+          </div>
+        </div>` : html`<div class="mt-1 whitespace-pre-line text-sm text-ink">${n.texto}</div>`}
+      </li>`)}
+    </ul>` : html`<p class="mt-3 text-sm text-muted">Nenhuma anotação ainda.</p>`}`;
+}
+
+function VinculosFicha({ email, vinculos, chaves, onMudou }) {
+  const [tipo, setTipo] = useState("email");
+  const [valor, setValor] = useState("");
+  const [salvando, setSalvando] = useState(false);
+  async function vincular(e) {
+    e.preventDefault();
+    if (!valor.trim() || salvando) return;
+    setSalvando(true);
+    try {
+      const { data, error } = await sb.from("cs_mentorado_vinculos").insert({ mentorado_email: email, tipo, valor: valor.trim() }).select().single();
+      if (error) throw error.code === "23505" ? new Error("este " + (tipo === "email" ? "e-mail" : "telefone") + " já está vinculado a uma ficha") : error;
+      registrarDesfazer(FICHA_ESCOPO, "vínculo", desfazerCriacao("cs_mentorado_vinculos", data, "vínculo"), { mensagem: "Vinculado à ficha" });
+      setValor("");
+      await onMudou();
+    } catch (err) { notify(errMsg(err), "err"); }
+    setSalvando(false);
+  }
+  async function remover(v) {
+    try {
+      const antes = await linhaAtual("cs_mentorado_vinculos", v.id);
+      const { error } = await sb.from("cs_mentorado_vinculos").delete().eq("id", v.id);
+      if (error) throw error;
+      registrarDesfazer(FICHA_ESCOPO, "remoção de vínculo", desfazerExclusao("cs_mentorado_vinculos", antes, "remoção de vínculo"), { mensagem: "Vínculo removido" });
+      await onMudou();
+    } catch (err) { notify(errMsg(err), "err"); }
+  }
+  const tels = (chaves && chaves.telefones) || [];
+  return html`
+    <p class="text-xs text-muted">A ficha junta os dados das outras abas pelo e-mail ${html`<span class="font-medium text-ink">${email}</span>`}${tels.length
+      ? html` e pelo${tels.length > 1 ? "s" : ""} telefone${tels.length > 1 ? "s" : ""} ${tels.map((t) => `(${t.slice(0, 2)}) ${t.slice(2)}`).join(", ")}` : ""}.
+      Se a pessoa usou outro e-mail ou telefone num teste ou pesquisa, vincule aqui.</p>
+    ${vinculos.length ? html`<ul class="mt-3 divide-y divide-line rounded-lg border border-line">
+      ${vinculos.map((v) => html`<li key=${v.id} class="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
+        <${Badge} class=${PILL_NEUTRAL}>${v.tipo === "email" ? "E-mail" : "Telefone"}<//>
+        <span class="break-all text-ink">${v.tipo === "telefone" ? `(${v.valor.slice(0, 2)}) ${v.valor.slice(2)}` : v.valor}</span>
+        <span class="text-xs text-muted">por ${v.criado_por_nome || "—"} em ${dataBRFicha(v.created_at)}</span>
+        <button type="button" class="ml-auto text-xs text-[#a44b43] hover:underline" onClick=${() => remover(v)}>remover</button>
+      </li>`)}
+    </ul>` : null}
+    <form onSubmit=${vincular} class="mt-3 flex flex-wrap items-end gap-2">
+      <select class=${cx(inputCls, "w-auto")} value=${tipo} onChange=${(e) => setTipo(e.target.value)} aria-label="Tipo">
+        <option value="email">E-mail</option><option value="telefone">Telefone</option>
+      </select>
+      <input class=${cx(inputCls, "min-w-[200px] flex-1")} placeholder=${tipo === "email" ? "outro@email.com" : "(11) 99999-9999"} value=${valor} onInput=${(e) => setValor(e.target.value)} />
+      <${Btn} variant="ghost" type="submit" loading=${salvando} disabled=${!valor.trim()}>Vincular<//>
+    </form>`;
+}
+
+function FichaMentoradoPage({ email, me }) {
+  const [f, setF] = useState(null);
+  const [erro, setErro] = useState(null);
+  const [aberto, setAberto] = useState(null); // { tipo, r }
+  const carregar = () => fetchFichaMentorado(email).then((d) => { setF(d || {}); setErro(null); }).catch((e) => setErro(errMsg(e)));
+  useEffect(() => { setF(null); carregar(); }, [email]);
+  useAoDesfazer(FICHA_ESCOPO, carregar);
+
+  if (erro) return html`<div class="text-sm text-[#a44b43]">${erro}</div>`;
+  if (!f) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando a ficha…</div>`;
+
+  const m = f.mentorado || null;
+  const diags = f.diagnosticos || [], metas = f.metas || [], vacs = f.teste_vac || [], nivs = f.nivelamento || [];
+  const pesqs = f.pesquisas || [], chat = f.chat || [], livros = f.livros || [], notas = f.notas || [], eventos = f.eventos || [];
+  const hoje = hojeISO();
+  const metasAbertas = metas.filter((x) => !x.concluida_em && !x.removida_da_ficha);
+  const atrasadas = metasAbertas.filter((x) => x.vencimento && x.vencimento < hoje);
+  const dias = m ? diasAte(m.data_final, hoje) : null;
+  const ultimaNota = notas[0] && notas[0].created_at;
+  const nome = (m && m.nome) || (diags[0] && diags[0].nome) || (nivs[0] && nivs[0].nome) || email;
+  const tel = linksWhats(m && m.telefone);
+  const d0 = diags[0];
+
+  const alertas = [
+    !m && ["Este e-mail não está na Lista de Mentorados (aba Mentoria 2026). A ficha mostra o que existe nas outras abas.", PILL_WARN],
+    m && dias != null && dias < 0 && ["O acesso terminou em " + dataBRFicha(m.data_final) + ".", PILL_ERR],
+    m && dias != null && dias >= 0 && dias <= 60 && [`O acesso termina em ${dias} dia${dias === 1 ? "" : "s"} (${dataBRFicha(m.data_final)}).`, dias <= 30 ? PILL_ERR : PILL_WARN],
+    !diags.length && ["Ainda não tem Diagnóstico do Mentorado.", PILL_WARN],
+    atrasadas.length && [`${atrasadas.length} meta${atrasadas.length > 1 ? "s" : ""} atrasada${atrasadas.length > 1 ? "s" : ""}.`, PILL_ERR],
+    !vacs.length && ["Ainda não fez o Teste VAC.", PILL_NEUTRAL],
+    !nivs.length && ["Ainda não fez o Teste de Nivelamento.", PILL_NEUTRAL],
+    (!ultimaNota || Date.now() - new Date(ultimaNota).getTime() > 30 * 86400000) && [ultimaNota ? "Sem anotação da equipe há mais de 30 dias." : "Nenhuma anotação da equipe ainda.", PILL_NEUTRAL],
+  ].filter(Boolean);
+
+  // Linha do tempo: tudo com data, do mais novo para o mais antigo.
+  const tempo = [
+    ...diags.map((d) => ({ q: d.data_diagnostico || d.created_at, f: "Diagnóstico", t: "Diagnóstico do Mentorado" + (d.status === "concluido" ? " concluído" : " em andamento") })),
+    ...metas.filter((x) => x.concluida_em).map((x) => ({ q: x.concluida_em, f: "Metas", t: "Meta concluída: " + x.descricao })),
+    ...vacs.map((x) => ({ q: x.respondido_em || x.data, f: "Teste VAC", t: "Teste VAC: " + (x.resultado || "sem resultado") })),
+    ...nivs.map((x) => ({ q: x.enviado_em || x.data, f: "Nivelamento", t: "Teste de Nivelamento: " + (x.trilha_txt || "trilha não informada") })),
+    ...pesqs.map((x) => ({ q: x.respondido_em, f: "Pesquisa", t: "Respondeu a pesquisa " + (PESQ_TITULO[x.chave] || x.chave) })),
+    ...chat.map((x) => ({ q: x.created_at, f: "Chat da Cademí", t: "Perguntou no chat: " + String(x.pergunta || "").slice(0, 120) })),
+    ...livros.map((x) => ({ q: x.enviado_em || x.data_venda || x.data_cadastro, f: "Livros", t: "Envio de " + ((x.produtos || []).join(" e ") || "material") + (x.status ? " · " + x.status : "") })),
+    ...notas.map((n) => ({ q: n.created_at, f: "Anotação", t: (n.autor_nome || "Equipe") + ": " + String(n.texto).slice(0, 140) })),
+    ...eventos.map((x) => ({ q: x.ocorrido_em, f: x.fonte, t: x.titulo })),
+  ].filter((x) => x.q).sort((a, b) => String(b.q).localeCompare(String(a.q)));
+
+  const campo = (rot, val) => (val ? html`<div><div class="text-[11px] uppercase tracking-wide text-muted">${rot}</div><div class="text-sm text-ink">${val}</div></div>` : null);
+
+  return html`
+    <div>
+      <div class="text-sm text-muted"><a href="#/cs/mentorados" class="hover:underline">🤝 CS / Suporte · Lista de Mentorados</a></div>
+      <div class="mt-1 flex flex-wrap items-start justify-between gap-3">
+        <div class="min-w-0">
+          <h1 class="text-2xl font-semibold text-ink">${nome}</h1>
+          <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
+            ${m && m.status ? html`<${Badge} class=${pillStatusMentorado(m.status)}>${m.status}<//>` : null}
+            ${m && m.guardiao ? html`<span>Guardião: <span class="text-ink">${m.guardiao}</span></span>` : null}
+            ${m && m.turma ? html`<span>· Turma: <span class="text-ink">${m.turma}</span></span>` : null}
+          </div>
+        </div>
+        <a href="#/cs/mentorados" class="inline-flex items-center rounded-lg bg-white px-3.5 py-2 text-sm font-medium text-ink ring-1 ring-line hover:bg-black/[0.04]">← Voltar para a lista</a>
+      </div>
+
+      <div class="mt-4 grid gap-3 rounded-2xl border border-line bg-card p-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div><div class="text-[11px] uppercase tracking-wide text-muted">E-mail</div><div class="break-all text-sm text-ink">${email}</div></div>
+        <div><div class="text-[11px] uppercase tracking-wide text-muted">WhatsApp</div><div class="text-sm">${tel.length ? tel.map((t, i) => html`${i ? " / " : ""}${t.url
+          ? html`<a class="text-[#3d7a45] hover:underline" href=${t.url} target="_blank" rel="noopener">${t.texto}</a>` : t.texto}`) : "—"}</div></div>
+        <div><div class="text-[11px] uppercase tracking-wide text-muted">Início · Final</div>
+          <div class="text-sm text-ink">${m ? dataBRFicha(m.data_inicio) + " · " + dataBRFicha(m.data_final) : "—"}</div>
+          ${dias != null ? html`<div class="text-xs text-muted">${dias >= 0 ? `faltam ${dias} dias` : `terminou há ${-dias} dias`}</div>` : null}</div>
+        <div><div class="text-[11px] uppercase tracking-wide text-muted">Renovou</div><div class="text-sm text-ink">${(m && m.renovou) || "—"}</div>
+          ${m && m.tempo_acesso ? html`<div class="text-xs text-muted">Acesso: ${m.tempo_acesso}</div>` : null}</div>
+        ${m && m.observacoes ? html`<div class="sm:col-span-2 lg:col-span-4"><div class="text-[11px] uppercase tracking-wide text-muted">Observações da planilha</div>
+          <div class="whitespace-pre-line text-sm text-ink">${m.observacoes}</div></div>` : null}
+      </div>
+
+      ${alertas.length ? html`<div class="mt-3 flex flex-wrap gap-2">
+        ${alertas.map(([t, c]) => html`<span class=${cx("rounded-lg px-2.5 py-1 text-xs font-medium", c)}>${t}</span>`)}
+      </div>` : null}
+
+      <div class="mt-4 grid gap-4 lg:grid-cols-2">
+        <div class="space-y-4">
+          <${SecaoFicha} titulo="Anotações da equipe" n=${notas.length}>
+            <${NotasFicha} email=${email} notas=${notas} me=${me} onMudou=${carregar} />
+          <//>
+          <${SecaoFicha} titulo="Diagnóstico do Mentorado" n=${diags.length || null}
+            acao=${d0 ? html`<a class="text-sm font-medium text-brand hover:underline" href=${"#/cs/diagnostico?id=" + d0.id}>Abrir diagnóstico →</a>`
+              : html`<a class="text-sm font-medium text-brand hover:underline" href="#/cs/diagnostico?novo=1">Criar diagnóstico →</a>`}>
+            ${d0 ? html`<div class="grid gap-3 sm:grid-cols-2">
+              ${campo("Data", dataBRFicha(d0.data_diagnostico) + (d0.status === "concluido" ? " · concluído" : " · em andamento"))}
+              ${campo("Trilha", [textoDiag(d0.dados && d0.dados.trilha), textoDiag(d0.dados && d0.dados.trilha_obs)].filter(Boolean).join(" · "))}
+              ${campo("Objetivo", [textoDiag(d0.dados && d0.dados.objetivo), textoDiag(d0.dados && d0.dados.objetivo_detalhe)].filter(Boolean).join(" — "))}
+              ${campo("Profissão · idade", [textoDiag(d0.dados && d0.dados.profissao), d0.dados && d0.dados.idade ? d0.dados.idade + " anos" : ""].filter(Boolean).join(" · "))}
+              ${campo("VAC predominante", [textoDiag(d0.dados && d0.dados.vac_predominante), textoDiag(d0.dados && d0.dados.vac_observacoes)].filter(Boolean).join(" · "))}
+              ${campo("Notas (listening · speaking)", d0.dados && (d0.dados.nota_listening || d0.dados.nota_speaking) ? `${d0.dados.nota_listening || "—"} · ${d0.dados.nota_speaking || "—"}` : "")}
+              ${campo("Nível da Arena", textoDiag(d0.dados && d0.dados.arena_nivel))}
+              ${campo("Horário de prática", textoDiag(d0.dados && d0.dados.horario_pratica))}
+              ${campo("Rotina", d0.dados ? [["Trilha", d0.dados.rotina_trilha], ["Arena", d0.dados.rotina_arena], ["Labs", d0.dados.rotina_labs], ["Vídeo semanal", d0.dados.rotina_video], ["Sessão prática", d0.dados.rotina_pratica]]
+                .filter(([, v]) => v).map(([k, v]) => k + ": " + textoDiag(v)).join(" · ") : "")}
+              <div class="sm:col-span-2">${campo("Dificuldades", textoDiag(d0.dados && d0.dados.dificuldades))}</div>
+              <div class="sm:col-span-2">${campo("O que já fez", textoDiag(d0.dados && d0.dados.o_que_fez))}</div>
+              <div class="sm:col-span-2">${campo("Observações", textoDiag(d0.dados && d0.dados.observacoes))}</div>
+            </div>
+            ${d0.drive_url && /^https:\/\//.test(d0.drive_url) ? html`<a class="mt-3 inline-block text-xs text-brand hover:underline" href=${d0.drive_url} target="_blank" rel="noopener">Planilha do diagnóstico no Drive ↗</a>` : null}`
+            : html`<${VazioFicha}>Ainda não tem diagnóstico.<//>`}
+          <//>
+          <${SecaoFicha} titulo="Metas" n=${metas.length || null} acao=${metas.length ? html`<a class="text-sm font-medium text-brand hover:underline" href="#/cs/metas">Ver em Metas →</a>` : null}>
+            ${metas.length ? html`<ul class="divide-y divide-line">
+              ${metas.filter((x) => !x.removida_da_ficha || x.concluida_em).map((x) => {
+                const atrasada = !x.concluida_em && x.vencimento && x.vencimento < hoje;
+                return html`<li key=${x.id} class="flex items-start gap-2 py-2 text-sm">
+                  <${Badge} class=${cx("shrink-0", x.concluida_em ? PILL_OK : atrasada ? PILL_ERR : PILL_NEUTRAL)}>${x.concluida_em ? "FEITO" : atrasada ? "Atrasada" : "Aberta"}<//>
+                  <span class="flex-1 text-ink">${x.descricao}</span>
+                  <span class="shrink-0 text-xs text-muted">${x.concluida_em ? "feita " + dataBRFicha(x.concluida_em) : x.vencimento ? "até " + dataBRFicha(x.vencimento) : ""}</span>
+                </li>`;
+              })}
+            </ul>` : html`<${VazioFicha}>Nenhuma meta registrada.<//>`}
+          <//>
+          <${SecaoFicha} titulo="Outros e-mails e telefones">
+            <${VinculosFicha} email=${email} vinculos=${f.vinculos || []} chaves=${f.chaves} onMudou=${carregar} />
+          <//>
+        </div>
+
+        <div class="space-y-4">
+          <${SecaoFicha} titulo="Teste VAC" n=${vacs.length || null}>
+            ${vacs.length ? html`<div class="space-y-2">${vacs.map((r) => html`<button type="button" key=${r.linha} onClick=${() => setAberto({ tipo: "vac", r })}
+              class="flex w-full flex-wrap items-center gap-3 rounded-lg border border-line px-3 py-2 text-left hover:bg-black/[0.02]">
+              <${PillVac} r=${r} /><${TotaisVac} r=${r} /><span class="ml-auto text-xs text-muted">${dataHoraVac(r)}</span>
+            </button>`)}</div>` : html`<${VazioFicha}>Ainda não fez o Teste VAC.<//>`}
+          <//>
+          <${SecaoFicha} titulo="Teste de Nivelamento" n=${nivs.length || null}>
+            ${nivs.length ? html`<div class="space-y-2">${nivs.map((r) => html`<button type="button" key=${r.linha} onClick=${() => setAberto({ tipo: "niv", r })}
+              class="flex w-full flex-wrap items-center gap-3 rounded-lg border border-line px-3 py-2 text-left hover:bg-black/[0.02]">
+              <${PillTrilha} r=${r} /><${NotasNiv} r=${r} />
+              <span class="ml-auto text-right text-xs text-muted">Média <span class="font-semibold text-ink">${fmtNota(r.media)}</span><br />${dataHoraNiv(r)}</span>
+            </button>`)}</div>` : html`<${VazioFicha}>Ainda não fez o Teste de Nivelamento.<//>`}
+          <//>
+          <${SecaoFicha} titulo="Pesquisas" n=${pesqs.length || null}>
+            ${pesqs.length ? html`<ul class="divide-y divide-line">${pesqs.map((r) => html`<li key=${r.chave + r.linha}>
+              <button type="button" onClick=${() => setAberto({ tipo: "pesq", r })} class="w-full py-2 text-left hover:bg-black/[0.02]">
+                <div class="text-sm font-medium text-ink">${PESQ_TITULO[r.chave] || r.chave}</div>
+                <div class="text-xs text-muted">${fmtDataHoraPesq(r.respondido_em)} · ${(r.dados || []).length} respostas</div>
+              </button></li>`)}</ul>` : html`<${VazioFicha}>Nenhuma pesquisa respondida com este e-mail ou telefone.<//>`}
+          <//>
+          <${SecaoFicha} titulo="Chat da Cademí" n=${chat.length || null}>
+            ${chat.length ? html`<ul class="max-h-[360px] space-y-2 overflow-y-auto">${chat.map((c) => html`<li key=${c.id} class="rounded-lg border border-line px-3 py-2">
+              <div class="text-xs text-muted">${fmtDataHoraPesq(c.created_at)}${c.categoria ? " · " + c.categoria : ""}</div>
+              <div class="mt-0.5 text-sm font-medium text-ink">${c.pergunta}</div>
+              ${c.resposta ? html`<div class="mt-0.5 line-clamp-3 text-xs text-muted">${c.resposta}</div>` : null}
+            </li>`)}</ul>` : html`<${VazioFicha}>Nenhuma pergunta no chat com este e-mail.<//>`}
+          <//>
+          <${SecaoFicha} titulo="Envio de livros" n=${livros.length || null}>
+            ${livros.length ? html`<ul class="divide-y divide-line">${livros.map((x) => html`<li key=${x.id} class="py-2 text-sm">
+              <div class="text-ink">${(x.produtos || []).join(" e ") || "Material"}</div>
+              <div class="text-xs text-muted">Venda ${dataBRFicha(x.data_venda)} · ${x.status || "sem status"}${x.enviado_em ? " · enviado " + dataBRFicha(x.enviado_em) : ""}${x.cidade ? " · " + x.cidade + "/" + (x.estado || "") : ""}</div>
+            </li>`)}</ul>` : html`<${VazioFicha}>Nenhum envio encontrado pelo e-mail, telefone ou nome.<//>`}
+          <//>
+          <${SecaoFicha} titulo="Linha do tempo" n=${tempo.length || null}>
+            ${tempo.length ? html`<ol class="max-h-[420px] space-y-2 overflow-y-auto border-l border-line pl-3">${tempo.map((x, i) => html`<li key=${i} class="relative text-sm">
+              <span class="absolute -left-[17px] top-1.5 h-2 w-2 rounded-full bg-brand/60"></span>
+              <div class="text-xs text-muted">${dataHoraFicha(x.q)} · ${x.f}</div>
+              <div class="text-ink">${x.t}</div>
+            </li>`)}</ol>` : html`<${VazioFicha}>Nada com data ainda.<//>`}
+          <//>
+        </div>
+      </div>
+      ${aberto && aberto.tipo === "vac" ? html`<${DetalheVac} r=${aberto.r} onClose=${() => setAberto(null)} />` : null}
+      ${aberto && aberto.tipo === "niv" ? html`<${DetalheNivelamento} r=${aberto.r} onClose=${() => setAberto(null)} />` : null}
+      ${aberto && aberto.tipo === "pesq" ? html`<${DetalheRespostaPesq} r=${aberto.r} onClose=${() => setAberto(null)} />` : null}
     </div>`;
 }
 
@@ -10097,7 +10462,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "cs" && p1 === "envios-livros") return html`<${EnviosLivrosPage} me=${me} />`;
   if (p0 === "cs" && p1 === "diagnostico") return html`<${DiagnosticoPage} me=${me} query=${route.query} />`;
   if (p0 === "cs" && p1 === "metas") return html`<${MetasPage} me=${me} />`;
-  if (p0 === "cs" && p1 === "mentorados") return html`<${MentoradosPage} />`;
+  if (p0 === "cs" && p1 === "mentorados") return html`<${MentoradosPage} query=${route.query} me=${me} />`;
   if (p0 === "cs" && p1 === "teste-vac") return html`<${TesteVacPage} />`;
   if (p0 === "cs" && p1 === "nivelamento") return html`<${NivelamentoPage} />`;
   if (p0 === "cs" && p1 === "pesquisas" && PESQ_GRUPOS[route.parts[2]]) return html`<${PesquisaGrupoPage} grupo=${route.parts[2]} />`;
