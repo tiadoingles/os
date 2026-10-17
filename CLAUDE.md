@@ -118,14 +118,19 @@ como backend.
   Hotmart): gravar em `cs_mentorado_eventos` (service_role; `(fonte, chave_externa)` único; `mentorado_email` e/ou
   `email`/`telefone`) que a linha do tempo já mostra. Ao conectar ferramenta nova com dados de alunos, perguntar à Tia
   se quer integrar à ficha.
-  **Clint (CRM + WhatsApp)** (SQL `scripts/migrations/20261017_cs_clint.sql`): Edge Function `clint-sync` (verify_jwt=false)
-  lê a API REST do Clint (`https://api.clint.digital`, header `api-token`, segredo **`CLINT_API_TOKEN`** nas Edge Functions;
-  a chave só existe no plano Elite, em Conta > API) e grava por mentorado o cache `cs_clint` (contatos com tags, negócios
-  com origem/etapa/dono/ganho/perda, conversas com as últimas 15 mensagens das 2 mais recentes) + marcos em
-  `cs_mentorado_eventos` (fonte `clint`). Busca o contato por e-mail (principal + vínculos) e, se não achar, por telefone.
-  Cron `os-clint-30min` (aos 20/50 min) faz lotes de 40 dos sincronizados há mais tempo; o botão "Atualizar do Clint" da
-  ficha busca só a pessoa (e só quem está na Lista de Mentorados: não puxa leads de vendas). Sem o segredo, responde `naoConfigurado`.
-  Chave dos eventos inclui o e-mail da ficha; eventos do Clint que sumiram no Clint são apagados a cada busca. Somente leitura: o OS nunca escreve no Clint.
+  **Clint (CRM + WhatsApp)** (SQL `scripts/migrations/20261017_cs_clint.sql` e `20261017_cs_clint_mcp.sql`): os dados vêm do
+  **conector MCP "clint" do Claude** (decisão da Tia, 17/10/2026: sem API com token, que exige plano Elite), pela tarefa
+  agendada local **`sync-clint-ficha-os`** (~/.claude/scheduled-tasks, todo dia 7h40; só roda com o app do Claude aberto).
+  Ela faz consultas em massa (`execute_indicator_query`) filtradas pelos e-mails da Lista de Mentorados + vínculos:
+  carga completa de 60 mentorados por dia (os nunca buscados/mais antigos) + tudo que mudou desde a última execução
+  (`Deal.updatedAt`, `Contact.updatedAt`, `Chat.lastMessageAt`). Grava pela RPC `cs_clint_carregar(tipo, tsv)` (security
+  definer, só service_role; texto com uma linha por registro e campos por TAB; ignora quem não é mentorado; junta por id;
+  refaz os marcos `cs_mentorado_eventos` fonte `clint`: negócio criado/ganho/perdido, compra, conversa). Cache `cs_clint`:
+  contatos (tags), negócios (funil, etapa, status, datas, valor, fonte, motivo de perda, `compra` do checkout: produto,
+  status, pagamento, parcelas, valor, data — **sem CPF/endereço/códigos de pagamento**), conversas (canal, atendente,
+  status, última mensagem, sem resposta; o texto das mensagens fica nos Docs do relatório diário de WhatsApp). Membros do
+  cubo que quebram a consulta: `Deal.lostStatus` e `DealUser.*` (use `DealLostStatus.name`; dono do negócio não vem).
+  A Edge Function `clint-sync` (API REST + segredo `CLINT_API_TOKEN`) continua publicada só como alternativa, sem cron.
 - **Testes de Nivelamento** (`#/cs/nivelamento`, `NivelamentoPage`; SQL `scripts/migrations/20261017_cs_nivelamento.sql`):
   cache somente leitura `cs_nivelamento` da planilha `1YhlAuX3PqsJ1o0StPPe8GW4zEXsJjYqBY7yjSZhETO8`, SÓ a aba **Novo**
   (respostas do teste da Mentoria avaliadas pela IA da Edge Function pública `nivelamento`). Edge Function

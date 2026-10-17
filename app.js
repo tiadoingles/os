@@ -4930,66 +4930,58 @@ function VinculosFicha({ email, vinculos, chaves, onMudou }) {
     </form>`;
 }
 
-// Bloco do Clint (CRM + WhatsApp) na ficha: cache cs_clint preenchido pela Edge Function "clint-sync" (cron em lotes
-// e botão "Atualizar do Clint", que busca só esta pessoa na hora). Somente leitura: o OS nunca escreve no Clint.
+// Bloco do Clint (CRM + WhatsApp) na ficha: cache cs_clint preenchido pela tarefa diária "sync-clint-ficha-os" (Claude +
+// conector MCP do Clint, só leitura; grava pela RPC cs_clint_carregar). Somente leitura: o OS nunca escreve no Clint.
 const CLINT_STATUS_NEG = { OPEN: ["Em aberto", PILL_WARN], WON: ["Ganho", PILL_OK], LOST: ["Perdido", PILL_ERR] };
-const CLINT_STATUS_CHAT = { OPEN: "Aberta", CLOSED: "Encerrada", WAITING: "Aguardando", SNOOZED: "Adiada", REOPENED: "Reaberta" };
-function ClintFicha({ email, clint, onMudou }) {
-  const [busy, setBusy] = useState(false);
-  const [aviso, setAviso] = useState(null);
-  const [abertas, setAbertas] = useState({});
-  async function atualizar() {
-    setBusy(true); setAviso(null);
-    try {
-      const { data, error } = await sb.functions.invoke("clint-sync", { body: { email } });
-      let r = data;
-      if (error) { try { r = await error.context.json(); } catch (_) { r = { ok: false, error: error.message }; } }
-      if (r && r.naoConfigurado) setAviso(r.error);
-      else if (r && r.ok === false) notify(r.error || "Não foi possível ler o Clint.", "err");
-      else { if (!r || !r.pulado) notify("Dados do Clint atualizados.", "ok"); await onMudou(); }
-    } catch (e) { notify(errMsg(e), "err"); }
-    setBusy(false);
-  }
+const fmtBRLClint = (v) => (v == null || v === "" || Number.isNaN(Number(v)) ? null
+  : Number(v).toLocaleString("pt-BR", { style: "currency", currency: "BRL" }));
+function ClintFicha({ clint }) {
   const negs = (clint && clint.negocios) || [], convs = (clint && clint.conversas) || [], conts = (clint && clint.contatos) || [];
   const tags = [...new Set(conts.flatMap((c) => c.tags || []))];
-  return html`<${SecaoFicha} titulo="Clint (CRM e WhatsApp)"
-    acao=${html`<${Btn} variant="ghost" type="button" loading=${busy} onClick=${atualizar}>Atualizar do Clint<//>`}>
-    ${aviso ? html`<div class="mb-3 rounded-lg border border-[#efe0b5] bg-[#faf5e4] px-3 py-2 text-xs text-[#6f5f24]">${aviso}</div>` : null}
-    ${!clint ? html`<${VazioFicha}>Ainda não buscado no Clint. Clique em "Atualizar do Clint" (a busca automática passa por todos os mentorados aos poucos).<//>`
-      : !clint.encontrado ? html`<${VazioFicha}>${clint.erro ? "Erro na última busca: " + clint.erro : "Nenhum contato no Clint com o e-mail ou telefone desta ficha (dá para vincular outro e-mail ou telefone abaixo, em Outros e-mails e telefones)."}<//>`
+  const compras = negs.filter((n) => n.compra && n.compra.produto);
+  return html`<${SecaoFicha} titulo="Clint (CRM e WhatsApp)">
+    ${!clint ? html`<${VazioFicha}>Ainda não buscado no Clint. A tarefa diária "Ficha do Mentorado · dados do Clint" (7h40) passa por todos os mentorados aos poucos.<//>`
+      : !clint.encontrado ? html`<${VazioFicha}>Nenhum contato no Clint com o e-mail desta ficha. Se a pessoa usa outro e-mail no Clint, vincule em Outros e-mails e telefones (entra na próxima atualização).<//>`
       : html`
-        ${clint.erro ? html`<div class="mb-2 rounded-lg border border-[#efe0b5] bg-[#faf5e4] px-3 py-2 text-xs text-[#6f5f24]">A última busca falhou (${clint.erro}). Mostrando os dados salvos antes.</div>` : null}
         ${tags.length ? html`<div class="flex flex-wrap gap-1">${tags.map((t) => html`<span class="rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] text-ink/80">${t}</span>`)}</div>` : null}
+        ${compras.length ? html`<div class="mt-3 text-xs font-semibold uppercase tracking-wide text-muted">Compras (${compras.length})</div>
+          <ul class="mt-1 divide-y divide-line">${compras.map((n) => html`<li key=${"c" + n.id} class="py-2 text-sm">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-medium text-ink">${n.compra.produto}</span>
+              ${n.compra.status ? html`<${Badge} class=${/aprovad|complet/i.test(n.compra.status) ? PILL_OK : /reembols|cancel|recusad|chargeback|expirad/i.test(n.compra.status) ? PILL_ERR : PILL_WARN}>${n.compra.status}<//>` : null}
+            </div>
+            <div class="mt-0.5 text-xs text-muted">${[fmtBRLClint(n.compra.valor), n.compra.pagamento, n.compra.parcelas && n.compra.parcelas + "x",
+              n.compra.data && "em " + dataBRFicha(String(n.compra.data).slice(0, 10)), n.compra.assinatura && "assinatura: " + n.compra.assinatura].filter(Boolean).join(" · ")}</div>
+          </li>`)}</ul>` : null}
         <div class="mt-3 text-xs font-semibold uppercase tracking-wide text-muted">Negócios (${negs.length})</div>
-        ${negs.length ? html`<ul class="mt-1 divide-y divide-line">${negs.map((n) => {
+        ${negs.length ? html`<ul class="mt-1 max-h-[360px] divide-y divide-line overflow-y-auto">${negs.map((n) => {
           const [rot, cls] = CLINT_STATUS_NEG[n.status] || [n.status || "—", PILL_NEUTRAL];
           return html`<li key=${n.id} class="py-2 text-sm">
             <div class="flex flex-wrap items-center gap-2">
               <${Badge} class=${cls}>${rot}<//>
-              <span class="text-ink">${[n.grupo, n.origem].filter(Boolean).join(" · ") || "Negócio"}</span>
+              <span class="text-ink">${n.origem || "Negócio"}</span>
               ${n.etapa ? html`<span class="text-xs text-muted">› ${n.etapa}</span>` : null}
+              ${n.arquivado ? html`<${Badge} class=${PILL_NEUTRAL}>arquivado<//>` : null}
             </div>
-            <div class="mt-0.5 text-xs text-muted">${[n.dono && "Responsável: " + n.dono, n.created_at && "criado " + dataBRFicha(n.created_at),
-              n.won_at && "ganho " + dataBRFicha(n.won_at), n.lost_at && "perdido " + dataBRFicha(n.lost_at) + (n.motivo_perda ? " (" + n.motivo_perda + ")" : "")].filter(Boolean).join(" · ")}</div>
+            <div class="mt-0.5 text-xs text-muted">${[n.created_at && "criado " + dataBRFicha(n.created_at), n.won_at && "ganho " + dataBRFicha(n.won_at),
+              n.lost_at && "perdido " + dataBRFicha(n.lost_at) + (n.motivo_perda ? " (" + n.motivo_perda + ")" : ""),
+              !n.won_at && !n.lost_at && n.updated_stage_at && "na etapa desde " + dataBRFicha(n.updated_stage_at),
+              fmtBRLClint(n.valor), n.fonte && "fonte: " + n.fonte].filter(Boolean).join(" · ")}</div>
           </li>`;
         })}</ul>` : html`<p class="mt-1 text-sm text-muted">Nenhum negócio.</p>`}
         <div class="mt-3 text-xs font-semibold uppercase tracking-wide text-muted">Conversas no WhatsApp (${convs.length})</div>
-        ${convs.length ? html`<ul class="mt-1 space-y-2">${convs.map((c) => html`<li key=${c.id} class="rounded-lg border border-line px-3 py-2">
-          <div class="flex flex-wrap items-center gap-2 text-xs text-muted">
-            <span class="font-medium text-ink">${CLINT_STATUS_CHAT[c.status] || c.status || "Conversa"}</span>
-            ${c.dono ? html`<span>· ${c.dono}</span>` : null}
-            <span>· última mensagem ${fmtDataHoraPesq(c.last_message_at)}</span>
-            ${c.unread ? html`<${Badge} class=${PILL_WARN}>não lida<//>` : null}
-            ${(c.mensagens || []).length ? html`<button type="button" class="ml-auto text-brand hover:underline"
-              onClick=${() => setAbertas((x) => ({ ...x, [c.id]: !x[c.id] }))}>${abertas[c.id] ? "esconder mensagens" : "ver últimas mensagens"}</button>` : null}
+        ${convs.length ? html`<ul class="mt-1 divide-y divide-line">${convs.map((c) => html`<li key=${c.id} class="py-2 text-sm">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="font-medium text-ink">${c.canal || "Conversa"}</span>
+            ${c.status ? html`<span class="text-xs text-muted">· ${c.status}</span>` : null}
+            ${c.unread ? html`<${Badge} class=${PILL_WARN}>sem resposta<//>` : null}
           </div>
-          ${abertas[c.id] ? html`<ol class="mt-2 space-y-1.5">${[...(c.mensagens || [])].reverse().map((m) => html`<li
-            class=${cx("rounded-lg px-2.5 py-1.5 text-sm", m.type === "CUSTOMER" ? "mr-8 bg-black/[0.04]" : m.type === "NOTE" ? "bg-[#faf5e4]" : "ml-8 bg-brand-light/60")}>
-            <div class="text-[11px] text-muted">${m.type === "CUSTOMER" ? "Aluna" : m.type === "NOTE" ? "Nota interna" : m.autor || "Equipe"} · ${fmtDataHoraPesq(m.created_at)}</div>
-            <div class="whitespace-pre-line text-ink">${m.content || (m.content_type ? "[" + m.content_type.toLowerCase() + "]" : "")}</div>
-          </li>`)}</ol>` : null}
-        </li>`)}</ul>` : html`<p class="mt-1 text-sm text-muted">Nenhuma conversa.</p>`}
-        <p class="mt-3 text-[11px] text-muted">Buscado no Clint em ${fmtDataHoraPesq(clint.sincronizado_em)}.</p>`}
+          <div class="mt-0.5 text-xs text-muted">${[c.dono && "Atendente: " + c.dono, c.last_message_at && "última mensagem " + fmtDataHoraPesq(c.last_message_at),
+            c.created_at && "aberta " + dataBRFicha(c.created_at)].filter(Boolean).join(" · ")}</div>
+        </li>`)}</ul>
+        <p class="mt-1 text-[11px] text-muted">O histórico das conversas de Guardiões e Suporte fica nos Docs diários da pasta CS:Suporte (relatório de WhatsApp).</p>`
+        : html`<p class="mt-1 text-sm text-muted">Nenhuma conversa.</p>`}
+        <p class="mt-3 text-[11px] text-muted">Atualizado do Clint em ${fmtDataHoraPesq(clint.sincronizado_em)} (tarefa diária às 7h40).</p>`}
   <//>`;
 }
 
@@ -5118,7 +5110,7 @@ function FichaMentoradoPage({ email, me }) {
         </div>
 
         <div class="space-y-4">
-          <${ClintFicha} email=${email} clint=${f.clint || null} onMudou=${carregar} />
+          <${ClintFicha} clint=${f.clint || null} />
           <${SecaoFicha} titulo="Teste VAC" n=${vacs.length || null}>
             ${vacs.length ? html`<div class="space-y-2">${vacs.map((r) => html`<button type="button" key=${r.linha} onClick=${() => setAberto({ tipo: "vac", r })}
               class="flex w-full flex-wrap items-center gap-3 rounded-lg border border-line px-3 py-2 text-left hover:bg-black/[0.02]">
