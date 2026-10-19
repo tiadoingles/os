@@ -77,6 +77,7 @@ como backend.
   - `cs`: `livros_envios`, `faq_interacoes` (só `secao_slug='cs-suporte'`; ADM todas), `cs_diagnosticos`, `cs_metas`
     (delete só manual), `cs_mentorados`, `cs_teste_vac`, `cs_nivelamento`, `cs_pesquisa_respostas` (+ RPC `cs_pesquisa_painel`),
     `cs_mentorado_notas`, `cs_mentorado_vinculos`, `cs_mentorado_eventos` (só leitura) + RPCs `cs_ficha_mentorado`/`cs_mentorados_resumo`,
+    `cs_clint`, `cs_whatsapp_dia` (só leitura) + RPC `cs_ativacoes`,
     `chat_widget_logs`, `pesquisa_avatar`, `nivelamento_respostas`
     (leitura; o insert público do teste continua) e `sync_status` (leitura das chaves `metas-planilha`,
     `mentorados-planilha`, `teste-vac-planilha`, `nivelamento-planilha`, `pesquisas-respostas`); RPCs `os_restaurar_cs_metas`/`os_restaurar_diagnostico`.
@@ -131,6 +132,15 @@ como backend.
   status, última mensagem, sem resposta; o texto das mensagens fica nos Docs do relatório diário de WhatsApp). Membros do
   cubo que quebram a consulta: `Deal.lostStatus` e `DealUser.*` (use `DealLostStatus.name`; dono do negócio não vem).
   A Edge Function `clint-sync` (API REST + segredo `CLINT_API_TOKEN`) continua publicada só como alternativa, sem cron.
+- **Controle de Ativações** (`#/cs/ativacoes`, `AtivacoesPage`; SQL `scripts/migrations/20261019_cs_ativacoes.sql`) e bloco
+  de WhatsApp na Ficha (`WhatsappFicha`) e na lista (`ContatoWhatsMini`). Último contato no WhatsApp por mentorado:
+  `cs_whatsapp_dia` (mensagens/dia da aluna e da equipe, só origem Chat/Fora da Clint: campanha e automação NÃO contam),
+  carregada pela mesma tarefa `sync-clint-ficha-os` (seção 3b; 31 dias na primeira vez, depois os últimos 3 dias) pela RPC
+  `cs_whatsapp_carregar` (só service_role). RPC `cs_ativacoes()` (security invoker; filtre com `.eq("email", ...)`):
+  `faixa` verde < 15 dias, amarelo 15 a 30 (símbolo de cuidado, `IconeCuidado`), vermelho > 30 ou sem contato
+  (`IconeUrgente`); `engajamento` = dias com mensagem da aluna nos últimos 30 (alto >= 4, médio 2-3, baixo 1,
+  sem_resposta 0). Antes de `cobertura_desde` (primeiro dia com contagem) usa a última conversa do `cs_clint` como
+  aproximação; depois dele só mensagem real conta (senão um disparo de campanha deixaria a pessoa verde).
 - **Testes de Nivelamento** (`#/cs/nivelamento`, `NivelamentoPage`; SQL `scripts/migrations/20261017_cs_nivelamento.sql`):
   cache somente leitura `cs_nivelamento` da planilha `1YhlAuX3PqsJ1o0StPPe8GW4zEXsJjYqBY7yjSZhETO8`, SÓ a aba **Novo**
   (respostas do teste da Mentoria avaliadas pela IA da Edge Function pública `nivelamento`). Edge Function

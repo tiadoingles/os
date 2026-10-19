@@ -92,6 +92,8 @@ const NAV = [
     { slug: "mentorados", nome: "Lista de Mentorados",
       desc: "Lista da planilha Lista de Mentorados [Oficial] (aba Mentoria 2026), com busca, filtros e WhatsApp.",
       links: [["Planilha de Mentorados", "https://docs.google.com/spreadsheets/d/1CZ4qfhjEhrxtnTMBITRjOUy9o_I8LEPRoD6nuSrLdvs/edit?gid=1320664660"]] },
+    { slug: "ativacoes", nome: "Controle de Ativações",
+      desc: "Mentorados por tempo sem contato no WhatsApp: vermelho (mais de 30 dias), amarelo (15 a 30) e verde (menos de 15), com a lista de cada um."},
     { slug: "teste-vac", nome: "Teste VAC",
       desc: "Resultados do Teste VAC (Visual, Auditivo, Cinestésico) da planilha Respostas Teste VAC, com filtros.",
       links: [["Planilha Respostas Teste VAC", "https://docs.google.com/spreadsheets/d/1oyj0QU4n49ZnbJ2ozPPxjaB0qo_Ou4NwaWPehGNvhYM/edit"]] },
@@ -4551,6 +4553,7 @@ function ListaMentoradosPage() {
   const [status, setStatus] = useState(null);
   const [resumo, setResumo] = useState({});
   const [fFicha, setFFicha] = useState("");
+  const [whatsPorEmail, setWhatsPorEmail] = useState({});
   const [busca, setBusca] = useState("");
   const [fStatus, setFStatus] = useState("");
   const [fGuardiao, setFGuardiao] = useState("");
@@ -4578,6 +4581,7 @@ function ListaMentoradosPage() {
       .then(() => atualizar(false)); // o servidor pula se o cache tiver menos de 10 min
     // ícones da ficha: opcionais, a lista funciona sem eles (o filtro "dados da ficha" some se falhar)
     fetchResumoMentorados().then(setResumo).catch(() => setResumo(null));
+    fetchAtivacoes().then((l) => setWhatsPorEmail(Object.fromEntries(l.map((a) => [a.email, a])))).catch(() => {});
   }, []);
 
   const opcoesStatus = useMemo(() => [...new Set((lista || []).map((m) => m.status).filter(Boolean))].sort(), [lista]);
@@ -4643,7 +4647,8 @@ function ListaMentoradosPage() {
       ${longa ? html`<button type="button" class="block text-[11px] text-brand hover:underline"
         onClick=${() => setAbertas((x) => ({ ...x, [m.linha]: !x[m.linha] }))}>${aberta ? "ver menos" : "ver mais"}</button>` : null}`;
   };
-  const sinais = (m) => html`<${SinaisFicha} r=${(resumo || {})[(m.email || "").trim().toLowerCase()]} />`;
+  const sinais = (m) => html`<${SinaisFicha} r=${(resumo || {})[(m.email || "").trim().toLowerCase()]} />
+    <${ContatoWhatsMini} a=${whatsPorEmail[(m.email || "").trim().toLowerCase()]} />`;
   const nomeLink = (m) => (m.email
     ? html`<a class="font-medium text-ink hover:text-brand hover:underline" href=${linkFicha(m.email)} title="Abrir a ficha">${m.nome || m.email}</a>`
     : html`<span class="font-medium text-ink">${m.nome || "—"}</span>`);
@@ -4989,7 +4994,9 @@ function FichaMentoradoPage({ email, me }) {
   const [f, setF] = useState(null);
   const [erro, setErro] = useState(null);
   const [aberto, setAberto] = useState(null); // { tipo, r }
-  const carregar = () => fetchFichaMentorado(email).then((d) => { setF(d || {}); setErro(null); }).catch((e) => setErro(errMsg(e)));
+  const [whats, setWhats] = useState(null);
+  const carregar = () => Promise.all([fetchFichaMentorado(email), fetchAtivacoes(email).catch(() => [])])
+    .then(([d, w]) => { setF(d || {}); setWhats(w[0] || null); setErro(null); }).catch((e) => setErro(errMsg(e)));
   useEffect(() => { setF(null); carregar(); }, [email]);
   useAoDesfazer(FICHA_ESCOPO, carregar);
 
@@ -5065,6 +5072,8 @@ function FichaMentoradoPage({ email, me }) {
       ${alertas.length ? html`<div class="mt-3 flex flex-wrap gap-2">
         ${alertas.map(([t, c]) => html`<span class=${cx("rounded-lg px-2.5 py-1 text-xs font-medium", c)}>${t}</span>`)}
       </div>` : null}
+
+      <${WhatsappFicha} a=${whats} />
 
       <div class="mt-4 grid gap-4 lg:grid-cols-2">
         <div class="space-y-4">
@@ -5156,6 +5165,213 @@ function FichaMentoradoPage({ email, me }) {
       ${aberto && aberto.tipo === "vac" ? html`<${DetalheVac} r=${aberto.r} onClose=${() => setAberto(null)} />` : null}
       ${aberto && aberto.tipo === "niv" ? html`<${DetalheNivelamento} r=${aberto.r} onClose=${() => setAberto(null)} />` : null}
       ${aberto && aberto.tipo === "pesq" ? html`<${DetalheRespostaPesq} r=${aberto.r} onClose=${() => setAberto(null)} />` : null}
+    </div>`;
+}
+
+/* ============================ CS · Contato no WhatsApp e Controle de Ativações ============================ */
+// Dados: RPC cs_ativacoes() (security invoker) sobre cs_whatsapp_dia (mensagens por dia da aluna e da equipe, só chat;
+// campanha/automação não conta) + cs_clint.conversas (aproximação antes do período com contagem diária). Atualizado pela
+// tarefa diária "sync-clint-ficha-os" (7h40). Faixas: verde < 15 dias, amarelo 15 a 30 (símbolo de cuidado), vermelho > 30
+// ou sem contato registrado (símbolo de urgente). Engajamento = dias com mensagem da aluna nos últimos 30.
+const FAIXAS_ATIV = {
+  vermelho: { nome: "Mais de 30 dias", curto: "Urgente", fundo: "bg-[#fbeeeb]", borda: "border-[#e9c3bd]", texto: "text-[#a44b43]", forte: "#c4544a" },
+  amarelo: { nome: "De 15 a 30 dias", curto: "Cuidado", fundo: "bg-[#faf5e4]", borda: "border-[#efe0b5]", texto: "text-[#7c6a2a]", forte: "#c9a227" },
+  verde: { nome: "Menos de 15 dias", curto: "Em dia", fundo: "bg-[#eef4ea]", borda: "border-[#cfe0c4]", texto: "text-[#4f6b44]", forte: "#6f9a5e" },
+};
+const ENGAJ = {
+  alto: ["Engajamento alto", PILL_OK], medio: ["Engajamento médio", "bg-[#e1e8f2] text-[#4a6286]"],
+  baixo: ["Engajamento baixo", PILL_WARN], sem_resposta: ["Sem resposta da aluna", PILL_ERR],
+};
+async function fetchAtivacoes(email) {
+  let q = sb.rpc("cs_ativacoes");
+  if (email) q = q.eq("email", String(email).trim().toLowerCase());
+  const { data, error } = await q;
+  if (error) throw error;
+  return data || [];
+}
+// Símbolos pedidos pela Tia: cuidado (triângulo âmbar) acima de 15 dias, urgente (círculo vermelho) acima de 30.
+function IconeCuidado({ size = 16 }) {
+  return html`<svg viewBox="0 0 20 20" width=${size} height=${size} class="inline-block shrink-0" role="img" aria-label="Cuidado">
+    <title>Cuidado: mais de 15 dias sem contato</title>
+    <path d="M10 2.5 1.8 17h16.4L10 2.5Z" fill="#f2b632" stroke="#b07d0c" stroke-width="1.2" stroke-linejoin="round"></path>
+    <rect x="9.1" y="7.2" width="1.8" height="5.4" rx=".9" fill="#5b4103"></rect><circle cx="10" cy="14.6" r="1.05" fill="#5b4103"></circle></svg>`;
+}
+function IconeUrgente({ size = 16 }) {
+  return html`<svg viewBox="0 0 20 20" width=${size} height=${size} class="inline-block shrink-0" role="img" aria-label="Urgente">
+    <title>Urgente: mais de 30 dias sem contato</title>
+    <circle cx="10" cy="10" r="8.6" fill="#d9483b"></circle>
+    <rect x="9" y="4.8" width="2" height="6.6" rx="1" fill="#fff"></rect><circle cx="10" cy="14.2" r="1.2" fill="#fff"></circle></svg>`;
+}
+const iconeFaixa = (faixa, size) => (faixa === "vermelho" ? html`<${IconeUrgente} size=${size} />` : faixa === "amarelo" ? html`<${IconeCuidado} size=${size} />` : null);
+function textoDiasContato(a) {
+  if (!a) return "—";
+  if (a.dias_sem_contato == null) return a.cobertura_desde ? "sem contato desde " + dataBRFicha(a.cobertura_desde) : "sem contato registrado";
+  if (a.dias_sem_contato <= 0) return "hoje";
+  if (a.dias_sem_contato === 1) return "há 1 dia";
+  return `há ${a.dias_sem_contato} dias`;
+}
+// Linha compacta "Último contato há X dias" + símbolo (usada na lista de mentorados).
+function ContatoWhatsMini({ a }) {
+  if (!a) return null;
+  const f = FAIXAS_ATIV[a.faixa];
+  return html`<div class=${cx("mt-1 flex items-center gap-1 text-[11px]", f ? f.texto : "text-muted")} title="Último contato no WhatsApp">
+    ${iconeFaixa(a.faixa, 13)}<span>WhatsApp ${textoDiasContato(a)}</span></div>`;
+}
+// Bloco da ficha.
+function WhatsappFicha({ a }) {
+  if (!a) return null;
+  const f = FAIXAS_ATIV[a.faixa] || FAIXAS_ATIV.vermelho;
+  const [rotEng, clsEng] = ENGAJ[a.engajamento] || ["—", PILL_NEUTRAL];
+  return html`<section class=${cx("mt-3 rounded-2xl border p-4", f.fundo, f.borda)}>
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+      <div class="flex items-center gap-2">
+        ${iconeFaixa(a.faixa, 22)}
+        <div>
+          <div class="text-[11px] uppercase tracking-wide text-muted">Último contato no WhatsApp</div>
+          <div class=${cx("text-lg font-semibold", f.texto)}>${textoDiasContato(a)}${a.ultimo_contato ? html`<span class="ml-1 text-xs font-normal text-muted">(${dataBRFicha(a.ultimo_contato)})</span>` : null}</div>
+        </div>
+      </div>
+      <div class="hidden h-8 w-px bg-black/10 sm:block"></div>
+      <div>
+        <div class="text-[11px] uppercase tracking-wide text-muted">Última mensagem da aluna</div>
+        <div class="text-sm font-medium text-ink">${a.ultima_msg_aluna ? (a.dias_sem_msg_aluna <= 0 ? "hoje" : "há " + a.dias_sem_msg_aluna + (a.dias_sem_msg_aluna === 1 ? " dia" : " dias")) : "nenhuma no período"}</div>
+      </div>
+      <div>
+        <div class="text-[11px] uppercase tracking-wide text-muted">Últimos 30 dias</div>
+        <div class="text-sm text-ink">${a.msgs_aluna_30d} da aluna · ${a.msgs_equipe_30d} da equipe · ${a.dias_ativos_aluna_30d} ${a.dias_ativos_aluna_30d === 1 ? "dia" : "dias"} com resposta</div>
+      </div>
+      <${Badge} class=${cx("ml-auto", clsEng)}>${rotEng}<//>
+    </div>
+    <p class="mt-2 text-[11px] text-muted">Conta só conversa de verdade no WhatsApp (chat da equipe e mensagens da aluna); disparos de campanha e automações não entram.${a.fonte_ultimo === "conversas" ? " Data aproximada pela última conversa no Clint." : ""}</p>
+  </section>`;
+}
+
+function AtivacoesPage() {
+  const [lista, setLista] = useState(null);
+  const [status, setStatus] = useState(null);
+  const [faixa, setFaixa] = useState("vermelho");
+  const [fStatus, setFStatus] = useState("ativos");
+  const [fGuardiao, setFGuardiao] = useState("");
+  const [fEng, setFEng] = useState("");
+  const [busca, setBusca] = useState("");
+  useEffect(() => {
+    Promise.all([fetchAtivacoes(), sb.from("sync_status").select("*").eq("chave", "clint").maybeSingle().then((r) => r.data)])
+      .then(([l, s]) => { setLista(l); setStatus(s); })
+      .catch((e) => { notify(errMsg(e), "err"); setLista([]); });
+  }, []);
+  const guardioes = useMemo(() => [...new Set((lista || []).map((a) => a.guardiao).filter(Boolean))].sort(), [lista]);
+  const statusOpc = useMemo(() => [...new Set((lista || []).map((a) => a.status).filter(Boolean))].sort(), [lista]);
+  // Filtros que valem para os quadrantes (tudo menos a faixa).
+  const base = useMemo(() => {
+    const q = semAcentoMin(busca);
+    return (lista || []).filter((a) => {
+      if (fStatus === "ativos" && /expirad|cancel/i.test(a.status || "")) return false;
+      if (fStatus && fStatus !== "ativos" && a.status !== fStatus) return false;
+      if (fGuardiao === SEM_GUARDIAO ? !!a.guardiao : fGuardiao && a.guardiao !== fGuardiao) return false;
+      if (fEng && a.engajamento !== fEng) return false;
+      if (q && !semAcentoMin(a.nome).includes(q) && !semAcentoMin(a.email).includes(q)) return false;
+      return true;
+    });
+  }, [lista, fStatus, fGuardiao, fEng, busca]);
+  const cont = useMemo(() => {
+    const c = { vermelho: 0, amarelo: 0, verde: 0, nunca: 0 };
+    base.forEach((a) => { c[a.faixa] = (c[a.faixa] || 0) + 1; if (a.dias_sem_contato == null) c.nunca++; });
+    return c;
+  }, [base]);
+  const linhas = useMemo(() => base.filter((a) => a.faixa === faixa)
+    .sort((x, y) => (y.dias_sem_contato ?? 9999) - (x.dias_sem_contato ?? 9999) || semAcentoMin(x.nome).localeCompare(semAcentoMin(y.nome))), [base, faixa]);
+  const selCls = cx(inputCls, "w-auto");
+  const f = FAIXAS_ATIV[faixa];
+
+  return html`
+    <div>
+      <div class="text-sm text-muted">🤝 CS / Suporte</div>
+      <h1 class="mt-1 text-2xl font-semibold text-ink">Controle de Ativações</h1>
+      <p class="mt-1 text-sm text-muted">Há quantos dias foi a última conversa no WhatsApp com cada mentorado (só conversa de verdade: campanhas e automações não contam).
+        ${status && status.ultima_execucao_em ? html` Dados do Clint de ${fmtDataHoraPesq(status.ultima_execucao_em)}; atualiza todo dia às 7h40.` : null}</p>
+
+      ${lista && lista.length && !lista[0].cobertura_desde ? html`<div class="mt-4 rounded-lg border border-[#efe0b5] bg-[#faf5e4] px-3 py-2 text-sm text-[#7c6a2a]">
+        A contagem diária de mensagens ainda não foi carregada: por enquanto o último contato vem da data da última conversa no Clint,
+        que inclui disparos de campanha. Os números ficam exatos depois da próxima atualização da tarefa diária.</div>` : null}
+      ${lista === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
+        <div class="mt-5 grid gap-3 sm:grid-cols-3">
+          ${["vermelho", "amarelo", "verde"].map((k) => {
+            const fx = FAIXAS_ATIV[k];
+            return html`<button type="button" onClick=${() => setFaixa(k)} aria-pressed=${faixa === k}
+              class=${cx("rounded-2xl border-2 p-5 text-left transition", fx.fundo, faixa === k ? "" : "border-transparent opacity-90 hover:opacity-100")}
+              style=${faixa === k ? "border-color:" + fx.forte : ""}>
+              <div class=${cx("flex items-center gap-2 text-sm font-semibold uppercase tracking-wide", fx.texto)}>
+                ${k === "verde" ? html`<span class="inline-block h-3.5 w-3.5 rounded-full" style=${"background:" + fx.forte}></span>` : iconeFaixa(k, 18)}${fx.curto}
+              </div>
+              <div class="mt-2 text-4xl font-bold text-ink">${nf(cont[k] || 0)}</div>
+              <div class="text-sm text-muted">${fx.nome} sem contato${k === "vermelho" && cont.nunca ? ` (inclui ${cont.nunca} sem contato registrado)` : ""}</div>
+            </button>`;
+          })}
+        </div>
+
+        <div class="mt-4 flex flex-wrap items-end gap-2">
+          <label class="block w-full sm:w-auto sm:min-w-[220px] sm:flex-1 lg:max-w-xs">
+            <span class="mb-1 block text-xs text-muted">Buscar</span>
+            <input class=${inputCls} type="search" placeholder="Nome ou e-mail" value=${busca} onInput=${(e) => setBusca(e.target.value)} />
+          </label>
+          <label class="block"><span class="mb-1 block text-xs text-muted">Status na planilha</span>
+            <select class=${selCls} value=${fStatus} onChange=${(e) => setFStatus(e.target.value)}>
+              <option value="ativos">Sem os expirados</option><option value="">Todos</option>
+              ${statusOpc.map((s) => html`<option value=${s}>${s}</option>`)}
+            </select></label>
+          <label class="block"><span class="mb-1 block text-xs text-muted">Guardião</span>
+            <select class=${selCls} value=${fGuardiao} onChange=${(e) => setFGuardiao(e.target.value)}>
+              <option value="">Todos</option>${guardioes.map((g) => html`<option value=${g}>${g}</option>`)}<option value=${SEM_GUARDIAO}>Sem guardião</option>
+            </select></label>
+          <label class="block"><span class="mb-1 block text-xs text-muted">Engajamento (30 dias)</span>
+            <select class=${selCls} value=${fEng} onChange=${(e) => setFEng(e.target.value)}>
+              <option value="">Todos</option>${Object.entries(ENGAJ).map(([k, [r]]) => html`<option value=${k}>${r}</option>`)}
+            </select></label>
+        </div>
+
+        <div class="mt-4 flex items-center gap-2">
+          <h2 class=${cx("text-base font-semibold", f.texto)}>${f.curto} · ${f.nome}</h2>
+          <span class="text-xs text-muted">${nf(linhas.length)} ${linhas.length === 1 ? "mentorado" : "mentorados"}</span>
+        </div>
+        <div class="mt-2 hidden overflow-x-auto rounded-2xl border border-line bg-card md:block">
+          <table class="w-full min-w-[880px] text-sm">
+            <thead><tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
+              <th class="px-3 py-2.5">Mentorado</th><th class="px-3 py-2.5">Último contato</th><th class="px-3 py-2.5">Última msg da aluna</th>
+              <th class="px-3 py-2.5">Engajamento</th><th class="px-3 py-2.5">30 dias</th><th class="px-3 py-2.5">Guardião</th><th class="px-3 py-2.5">WhatsApp</th>
+            </tr></thead>
+            <tbody>
+              ${linhas.length === 0 ? html`<tr><td colspan="7" class="px-4 py-8 text-center text-sm text-muted">Ninguém nesta faixa com esses filtros.</td></tr>`
+                : linhas.map((a) => {
+                  const [rotEng, clsEng] = ENGAJ[a.engajamento] || ["—", PILL_NEUTRAL];
+                  const tel = linksWhats(a.telefone)[0];
+                  return html`<tr key=${a.email} class="border-b border-line align-top last:border-0 hover:bg-black/[0.02]">
+                    <td class="px-3 py-2.5"><a class="font-medium text-ink hover:text-brand hover:underline" href=${linkFicha(a.email)}>${a.nome || a.email}</a>
+                      <div class="text-[11px] text-muted">${a.status || "—"}</div></td>
+                    <td class="whitespace-nowrap px-3 py-2.5"><span class=${cx("inline-flex items-center gap-1.5 font-medium", f.texto)}>${iconeFaixa(a.faixa, 15)}${textoDiasContato(a)}</span>
+                      ${a.ultimo_contato ? html`<div class="text-[11px] text-muted">${dataBRFicha(a.ultimo_contato)}</div>` : null}</td>
+                    <td class="whitespace-nowrap px-3 py-2.5 text-xs">${a.ultima_msg_aluna ? dataBRFicha(a.ultima_msg_aluna) + " (" + (a.dias_sem_msg_aluna <= 0 ? "hoje" : a.dias_sem_msg_aluna + "d") + ")" : html`<span class="text-muted">nenhuma no período</span>`}</td>
+                    <td class="px-3 py-2.5"><${Badge} class=${clsEng}>${rotEng}<//></td>
+                    <td class="whitespace-nowrap px-3 py-2.5 text-xs text-muted">${a.msgs_aluna_30d} aluna · ${a.msgs_equipe_30d} equipe</td>
+                    <td class="px-3 py-2.5 text-xs">${a.guardiao || html`<span class="text-muted">—</span>`}</td>
+                    <td class="px-3 py-2.5 text-xs">${tel && tel.url ? html`<a class="text-[#3d7a45] hover:underline" href=${tel.url} target="_blank" rel="noopener">Abrir conversa</a>` : html`<span class="text-muted">—</span>`}</td>
+                  </tr>`;
+                })}
+            </tbody>
+          </table>
+        </div>
+        <div class="mt-2 space-y-2 md:hidden">
+          ${linhas.length === 0 ? html`<div class="rounded-xl border border-line bg-card px-4 py-8 text-center text-sm text-muted">Ninguém nesta faixa com esses filtros.</div>`
+            : linhas.map((a) => {
+              const [rotEng, clsEng] = ENGAJ[a.engajamento] || ["—", PILL_NEUTRAL];
+              return html`<a key=${a.email} href=${linkFicha(a.email)} class="block rounded-xl border border-line bg-card p-4">
+                <div class="font-medium text-ink">${a.nome || a.email}</div>
+                <div class=${cx("mt-1 flex items-center gap-1.5 text-sm font-medium", f.texto)}>${iconeFaixa(a.faixa, 15)}${textoDiasContato(a)}</div>
+                <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted"><${Badge} class=${clsEng}>${rotEng}<//>
+                  <span>${a.guardiao || "Sem guardião"}</span><span>· ${a.status || "—"}</span></div>
+              </a>`;
+            })}
+        </div>
+      `}
     </div>`;
 }
 
@@ -10519,6 +10735,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "cs" && p1 === "diagnostico") return html`<${DiagnosticoPage} me=${me} query=${route.query} />`;
   if (p0 === "cs" && p1 === "metas") return html`<${MetasPage} me=${me} />`;
   if (p0 === "cs" && p1 === "mentorados") return html`<${MentoradosPage} query=${route.query} me=${me} />`;
+  if (p0 === "cs" && p1 === "ativacoes") return html`<${AtivacoesPage} />`;
   if (p0 === "cs" && p1 === "teste-vac") return html`<${TesteVacPage} />`;
   if (p0 === "cs" && p1 === "nivelamento") return html`<${NivelamentoPage} />`;
   if (p0 === "cs" && p1 === "pesquisas" && PESQ_GRUPOS[route.parts[2]]) return html`<${PesquisaGrupoPage} grupo=${route.parts[2]} />`;
