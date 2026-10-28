@@ -3,6 +3,8 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "preact/hooks"
 import { html } from "htm/preact";
 import { createClient } from "@supabase/supabase-js";
 import { marked } from "marked";
+// Aba Financeiro (cópia do Craft Green): módulos em ./financeiro/, versionados pelo importmap do index.html.
+import { FinanceiroPage, configurarFinanceiro } from "./financeiro/index.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -12,6 +14,17 @@ const cfg = window.__CONFIG__ || {};
 export const sb = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
 });
+
+// Link de acesso por e-mail (magic link / recuperação de senha): o Supabase devolve
+// #access_token=…&refresh_token=… na URL. Como o roteador usa o hash, a sessão é aplicada
+// aqui à mão e o hash limpo antes do app montar; depois é só trocar a senha em Meu perfil.
+const loginPorLink = (() => {
+  const h = new URLSearchParams(location.hash.replace(/^#/, ""));
+  const access_token = h.get("access_token"), refresh_token = h.get("refresh_token");
+  if (!access_token || !refresh_token) return Promise.resolve();
+  history.replaceState(null, "", location.pathname + location.search + "#/perfil");
+  return sb.auth.setSession({ access_token, refresh_token }).catch(() => {});
+})();
 
 const KINDS = [
   ["documento", "Documento"],
@@ -117,10 +130,16 @@ const NAV = [
     { slug: "ferramentas", nome: "Ferramentas", desc: "Análise de Calls e Apresentação do Closer." },
   ]},
 
+  // Financeiro = cópia do Craft Green (telas em ./financeiro/*.js; spec em docs/financeiro-spec.md).
   { id: "financeiro", nome: "Financeiro", icone: "💰", itens: [
-    { slug: "cobrancas", nome: "Cobranças", desc: "Inadimplentes e datas de pagamentos recorrentes." },
-    { slug: "fluxo-caixa", nome: "Fluxo de Caixa", desc: "Entradas e saídas ao longo do tempo." },
-    { slug: "dre", nome: "DRE", desc: "Demonstração de resultados." },
+    { slug: "visao-geral", nome: "Visão Geral", desc: "Resultado da empresa (DRE resumida, receita × despesas) e posição de caixa." },
+    { slug: "dre", nome: "DRE", desc: "DRE gerencial: 22 linhas × 12 meses, total, análise vertical e exportação." },
+    { slug: "fluxo-caixa", nome: "Fluxo de Caixa", desc: "Consolidado do ano, mensal e contas a pagar (previsão recorrente)." },
+    { slug: "vendas", nome: "Relatório de Vendas", desc: "Vendas por competência das plataformas (Hotmart, Eduzz e outras)." },
+    { slug: "conciliacao", nome: "Conciliação", desc: "Classificar extratos e cartões nas categorias da DRE." },
+    { slug: "importacao", nome: "Importação", desc: "Extrato bancário, fatura de cartão e relatórios das plataformas de vendas." },
+    { slug: "contas", nome: "Contas Bancárias", desc: "Bancos, apelidos e saldo base do fluxo de caixa." },
+    { slug: "estrutura-dre", nome: "Estrutura da DRE", desc: "Nomes das 22 linhas e categorias usadas na conciliação." },
   ]},
 
   { id: "conteudo", nome: "Conteúdo", icone: "✍️", itens: [
@@ -683,6 +702,7 @@ function escopoDesfazer(route) {
   const [p0, p1] = route.parts;
   if (p0 === "cs" && ["metas", "diagnostico", "envios-livros", "mentorados"].includes(p1)) return "cs/" + p1;
   if (p0 === "agenda") return "agenda";
+  if (p0 === "financeiro" && p1) return "financeiro/" + p1; // escopoFin(slug) em financeiro/comum.js
   if (p0 === "farol") return "farol";
   if (p0 === "ferramentas") return "ferramentas";
   if (p0 === "conteudo" && p1 === "linkedin") return LI_ESCOPO;
@@ -1023,6 +1043,7 @@ function Shell({ me, route, children }) {
   const bcActive = p0 === "base" || p0 === "secao" || p0 === "doc" || p0 === "novo";
   const homeActive = p0 === "";
   const fullBleed = EMBED_ROUTES.has(route.path);
+  const finWide = p0 === "financeiro"; // telas do Craft: largura total, fundo próprio (financeiro/comum.js)
   const escopoDesf = escopoDesfazer(route);
   const nav = navPara(me);
   const ok = (path) => rotaPermitida(me, path); // mesma regra da guarda do Router
@@ -1122,6 +1143,11 @@ function Shell({ me, route, children }) {
       <main class="min-w-0 flex-1">
         ${fullBleed
           ? children
+          : finWide
+          ? html`<div class="fin-shell">
+              ${escopoDesf && podeEscreverRota(me, route.path) ? html`<div class="fin-shell-desfazer"><${BotaoDesfazer} key=${escopoDesf} escopo=${escopoDesf} /></div>` : null}
+              ${children}
+            </div>`
           : html`<div class="mx-auto max-w-5xl px-4 py-7 sm:px-6 lg:px-10 lg:py-10">
               ${escopoDesf && podeEscreverRota(me, route.path) ? html`<div class="mb-3 flex justify-end"><${BotaoDesfazer} key=${escopoDesf} escopo=${escopoDesf} /></div>` : null}
               ${children}
@@ -10746,6 +10772,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "pedagogico" && p1 === "gerador-slides") return html`<${GeradorSlidesPage} me=${me} />`;
   if (p0 === "pedagogico" && p1 === "gerador-feedbacks")
     return html`<${EmbedExterno} titulo="Gerador de Feedbacks" icone="🎓" src="https://name-tia-ai-web.onrender.com/dashboard" />`;
+  if (p0 === "financeiro") return html`<${FinanceiroPage} me=${me} tela=${p1} query=${route.query} />`;
   if (p0 === "comercial" && p1 === "dash-fad")
     return html`<${EmbedExterno} titulo="Dash FAD" icone="📈" src="https://appdash.agenciafad.com.br/dashboard" />`;
   const grupo = NAV.find((g) => g.id === p0 && g.itens);
@@ -10836,5 +10863,11 @@ function App() {
     <//>
     <${Toaster} />`;
 }
+
+// Dependências do app que as telas do Financeiro usam (sem import circular de app.js).
+configurarFinanceiro({
+  sb, notify, errMsg, temArea, ehAdmin, Modal, Btn,
+  registrarDesfazer, useAoDesfazer, desfazerCriacao, desfazerEdicao, desfazerExclusao,
+});
 
 render(html`<${App} />`, document.getElementById("app"));

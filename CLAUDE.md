@@ -83,7 +83,10 @@ como backend.
     `mentorados-planilha`, `teste-vac-planilha`, `nivelamento-planilha`, `pesquisas-respostas`); RPCs `os_restaurar_cs_metas`/`os_restaurar_diagnostico`.
   - `conteudo`: `conteudo_calendario`, `conteudo_objetivo_resumo`, `conteudo_insights`, `ig_dia`, `ig_perfil`, `ig_post`,
     `linkedin_posts`; RPC `linkedin_conexao_status`.
-  - `comercial`, `financeiro`: nenhuma tabela ainda.
+  - `financeiro`: `fin_contas`, `fin_dre_grupos` (sem insert/delete; trigger só deixa mudar `nome`), `fin_dre_categorias`
+    (padrão protegidas por trigger; `fora_dre`), `fin_importacoes`, `fin_lancamentos` (remover = `cancelado_em`), `fin_vendas`;
+    RPCs `fin_saldos_ate`, `fin_restaurar_estrutura_padrao` (security invoker).
+  - `comercial`: nenhuma tabela ainda.
   - **Só ADM**: `app_config`, `ai_usage_log`, `farol_config`, `farol_indicadores`, `os_ferramentas`, `os_squad_agentes`,
     `sync_status` (escrita e demais chaves), `automacao_estado` (escrita; a leitura é de qualquer logado porque as Edge
     Functions conferem a pausa com o JWT de quem chamou), `profiles` (escrita de outros).
@@ -224,6 +227,14 @@ como backend.
   **Source Sans 3** (OFL, jsDelivr/@fontsource) porque a licença da Aller (Dalton Maag) não permite hospedá-la no
   repo público; reserva Montserrat. Se uma seção não cabe numa página, cai para leitura 12 / perguntas compactas /
   Glossary 22 → 20 (avisa na tela e no `log`).
+
+- **Financeiro** (cópia do Craft Green, 28/10/2026; spec em `docs/financeiro-spec.md`, SQL em
+  `scripts/migrations/20261028_financeiro_fundacao_craft.sql`). Telas em módulos ES na pasta `financeiro/` (um arquivo
+  por tela + `comum.js` com tokens, componentes, dados e cálculos de DRE/fluxo/previsão; `index.js` = mapa slug → tela),
+  importados por `app.js` (`FinanceiroPage`). Sem import de `app.js` (circular): o app injeta `sb`, `notify`, DESFAZER
+  etc. por `configurarFinanceiro()`. **Cache**: cada arquivo de `financeiro/` tem uma linha no importmap do
+  `index.html` com o mesmo `?v=N` do app.js — bump todas juntas; arquivo novo = linha nova. Rotas `#/financeiro/*`
+  usam largura total (`.fin-shell`) e o `.fin-page` aplica `zoom:.75` no desktop (o Craft usa html 12px).
 
 ## Convenções
 
