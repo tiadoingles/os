@@ -23,7 +23,7 @@ como backend.
   `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet`, `teste-vac-sheet`, `nivelamento-sheet`,
   `pesquisas-respostas`, entre outras)
   vivem no Supabase — leia/edite via MCP do Supabase (`get_edge_function`/`deploy_edge_function`). Exceções versionadas
-  aqui em `supabase/functions/` (`ai`, `hotmart`, `coproducao-sheet`): edite o arquivo, publique o conteúdo exato e
+  aqui em `supabase/functions/` (`ai`, `hotmart`, `coproducao-sheet`, `iuli`): edite o arquivo, publique o conteúdo exato e
   compare a cópia publicada com o disco. IA: Sonnet 5.5 padrão, Haiku 5.5 no `classify`, cache de prompt, respostas
   iguais reaproveitadas por 24 h (`ai_respostas_cache`), teto diário opcional `app_config.ia_teto_diario_brl_por_usuario`.
 
@@ -88,7 +88,7 @@ como backend.
   - `financeiro`: `fin_contas`, `fin_dre_grupos` (sem insert/delete; trigger só deixa mudar `nome`), `fin_dre_categorias`
     (padrão protegidas por trigger; `fora_dre`), `fin_importacoes`, `fin_lancamentos` (remover = `cancelado_em`), `fin_vendas`,
     `fin_cobrancas` (OS só cria/edita/apaga `origem='manual'`; Hotmart só `observacoes`, trigger); cobranças NUNCA entram sozinhas no Fluxo/DRE — botão "Fluxo/DRE" cria `fin_lancamentos` manual conciliado com `cobranca_ref` ('hotmart:<chave_externa>' | 'manual:<id>', índice único entre não cancelados), `fin_hotmart_pedidos`
-    (só leitura: histórico gravado pela Edge Function `hotmart`), `fin_coproducao` (só leitura, espelho da planilha);
+    (só leitura: histórico gravado pela Edge Function `hotmart`), `fin_coproducao` (só leitura, espelho da planilha), `fin_nfe` (só leitura, espelho do IULI; `fin_nfe_carga` sem acesso);
     RPCs `fin_saldos_ate`, `fin_restaurar_estrutura_padrao` (security invoker); `fin_hotmart_carregar`/`_finalizar` só
     service_role.
   - `comercial`: nenhuma tabela ainda.
@@ -241,7 +241,7 @@ como backend.
   `index.html` com o mesmo `?v=N` do app.js — bump todas juntas; arquivo novo = linha nova. Rotas `#/financeiro/*`
   usam largura total (`.fin-shell`) e o `.fin-page` aplica `zoom:.75` no desktop (o Craft usa html 12px).
   Abas extras (29/10/2026): **Cobrança** (Hotmart em aberto/vencido/a vencer + manuais), **Hotmart** (pergunta livre com IA
-  + 15 consultas + 6 ações confirmadas, nunca reembolso), **NF-e** (placeholder) e **Co-Produção** (espelho da planilha
+  + 15 consultas + 6 ações confirmadas, nunca reembolso), **NF-e** (situação da nota de cada venda do IULI, `financeiro/nfe.js`; Edge Function `iuli` (`supabase/functions/iuli`, segredo `IULI_API_KEY`) op `sync` grava `fin_nfe` (últimos 31 dias + `/updated` + histórico desde 01/2026 em `fin_nfe_carga`), cron `os-iuli-nfe-2h`, `sync_status` `iuli-nfe`; op `teste` sem dados pessoais. A API traz só `invoice.issued/status/scheduled_date`, sem número, PDF ou XML: a linha tem "Abrir no IULI" (`/dashboard/sales-invoices/<id>`). Status: EMITED, SPLIT_SERVICE_EMITED, FAILED, SPLIT_*_FAILED, PROCESSING, SCHEDULED_SALE, _NOT_REQUESTED_, SCHEDULED_CANCEL; mapa `NF` em nfe.js) e **Co-Produção** (espelho da planilha
   "Calculo Investimento", Edge Function `coproducao-sheet` + cron `os-coproducao-planilha-diario` 9h20). Hotmart = sob demanda
   pela Edge Function `hotmart` (`supabase/functions/hotmart`), cliente do **MCP remoto da Hotmart**
   (`https://developers.hotmart.com/mcp/v1`, o mesmo do conector do Claude) com um só secret `HOTMART_BASIC` (token Basic
