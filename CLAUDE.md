@@ -22,8 +22,10 @@ como backend.
   Edge Functions (`ai`, `public-chat`, `sync`, `planilha`, `admin-users`,
   `diagnostico-drive`, `metas-sheet-sync`, `mentorados-sheet`, `teste-vac-sheet`, `nivelamento-sheet`,
   `pesquisas-respostas`, entre outras)
-  vivem no Supabase, não neste repo — leia/edite via MCP do Supabase
-  (`get_edge_function`/`deploy_edge_function`).
+  vivem no Supabase — leia/edite via MCP do Supabase (`get_edge_function`/`deploy_edge_function`). Exceções versionadas
+  aqui em `supabase/functions/` (`ai`, `hotmart`, `coproducao-sheet`): edite o arquivo, publique o conteúdo exato e
+  compare a cópia publicada com o disco. IA: Sonnet 5.5 padrão, Haiku 5.5 no `classify`, cache de prompt, respostas
+  iguais reaproveitadas por 24 h (`ai_respostas_cache`), teto diário opcional `app_config.ia_teto_diario_brl_por_usuario`.
 
 ## Acesso, papéis e permissões
 
@@ -245,6 +247,38 @@ como backend.
   (`https://developers.hotmart.com/mcp/v1`, o mesmo do conector do Claude) com um só secret `HOTMART_BASIC` (token Basic
   da credencial); `hotmart_sale_refund` e `hotmart_batch_*` bloqueados no cliente; escrita só via op `acao` confirmada; `op` = consulta | acao | pergunta | sync_cobrancas (trava em
   `sync_status.solicitado_em` de `hotmart-cobrancas`; nunca apaga a lista se uma busca falhar).
+
+## Design (Craft Green em todo o OS, v84 — 29/10/2026)
+
+Decisão da Tia: o OS inteiro usa o design da aba Financeiro (Craft Green), verde e não o rosa da marca.
+- **Tokens** no `tailwind.config` do `index.html` (mesmos nomes, valores do Craft): `brand` `#064e3b` (dark `#022c22`,
+  light `#ecfdf5`), `bg` `#f5f7f6`, `ink` `#0F172A`, `muted` `#64748b`, `line` `#e2e8f0`, `card` `#fff`, `sidebar`/`tinta`
+  `#07110e`; raios `rounded-card/painel/modal`, sombras `shadow-card/painel/botao/modal`. Fonte Inter (Google Fonts) com
+  `font-feature-settings` do Craft (`styles.css`). Fonte dos valores: `FIN` em `financeiro/comum.js`.
+- **Classes globais** (`styles.css`): `os-eyebrow` (verde, caixa alta) + `os-titulo` (font-black, -0.045em) no topo das
+  telas; `os-btn-primario` (gradiente do Craft, usado pelo `Btn` primário); `os-input` (foco emerald-300 + anel
+  emerald-100, usado por `inputCls`). Pills `PILL_*` = emerald/amber/rose/slate do Craft. Cartões: `rounded-[1.35rem]`
+  ou `rounded-[1.6rem]` + `shadow-card`. Abas segmentadas: trilho `bg-slate-100 p-1 rounded-xl`, ativa `bg-[#07110e] text-white`.
+- **Shell** = layout do Craft (`app_layout`): menu escuro fixo (`w-72`, recolhe para ícones no desktop com o botão do
+  cabeçalho, preferência em `localStorage os.menuRecolhido`; gaveta no celular), seções Visão geral / Áreas / Conta,
+  ícones Lucide (`IconeOS`), item ativo emerald-500; cabeçalho branco com grupo + título da tela, DESFAZER e usuário.
+  O `.fin-page` (zoom .75) continua só no Financeiro.
+- **Cor da marca (rosa `#ea5167`) só onde é de propósito**: nome "Tia do Inglês" na tela de login, PDFs e prévias de
+  materiais para alunos (`montarPlanoAluno`, `montarDocArena`, `GlossarioArena`/`ConteudoArena`), slides e Inglês com
+  Música. Vermelho/rose = só erro, perigo e valores negativos.
+
+## Sessão (copiado do Craft, v84)
+Bloco "Segurança da sessão" no topo do `app.js`:
+- **Manter conectado** (login, desmarcado por padrão): adaptador `armazenamentoSessao` do supabase-js grava a sessão no
+  `localStorage` se `os.manterConectado = "1"`, senão no `sessionStorage` (some ao fechar a aba); lê dos dois.
+  Migração única: navegador que já tinha `sb-*-auth-token` no localStorage e nenhuma flag recebe `"1"` (ninguém foi
+  deslogado pelo deploy). O link de acesso por e-mail (`loginPorLink`) segue a flag atual.
+- **Validação**: ao abrir (INITIAL_SESSION) chama `sb.auth.getUser()`; erro 4xx = sai com "Sua sessão expirou. Entre
+  novamente." Todo request do cliente passa por `fetchComSessao` (`global.fetch`): 401 fora de `/auth/v1/` dispara a
+  mesma conferência (evento `os:session-expired`). SIGNED_OUT sem clique em "Sair" (refresh recusado) mostra a mesma mensagem.
+- **Inatividade**: `INATIVIDADE_MS` (8 h). Última interação em `localStorage os.ultimaAtividade` (todas as abas, grava a
+  cada 30 s); confere a cada minuto, no foco e ao voltar para a aba; também ao abrir. Sai com "Você saiu por inatividade
+  (8 h). Entre novamente." "Sair" = `sairDoSistema()` (marca `os.saidaIntencional` para as outras abas).
 
 ## Convenções
 

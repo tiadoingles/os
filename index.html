@@ -8,27 +8,40 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%9A%3C/text%3E%3C/svg%3E" />
 
   <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" />
   <script>
+    // Tema do OS = design do Craft Green (o mesmo da aba Financeiro; tokens em financeiro/comum.js > FIN).
+    // Os nomes semânticos ficam (brand/bg/ink...) para todas as telas mudarem juntas.
     tailwind.config = {
       theme: {
         extend: {
           colors: {
-            brand: { DEFAULT: "#ea5167", dark: "#d13c53", light: "#fbe7e4" },
-            bg: "#f6f3ee",        // fundo quente da aplicação
-            sidebar: "#ffffff",
+            brand: { DEFAULT: "#064e3b", dark: "#022c22", light: "#ecfdf5" }, // emerald-900 / 950 / 50
+            bg: "#f5f7f6",        // fundo das telas (Craft)
+            sidebar: "#07110e",   // menu lateral escuro (Craft)
             card: "#ffffff",
-            line: "#ece7de",      // bordas
-            ink: "#39352f",       // texto principal
-            muted: "#8f887d",     // texto secundário
+            line: "#e2e8f0",      // bordas (slate-200)
+            ink: "#0F172A",       // texto principal (slate-900)
+            muted: "#64748b",     // texto secundário (slate-500)
+            tinta: "#07110e",     // títulos, cards escuros, aba ativa
           },
           fontFamily: {
-            sans: ['ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'Helvetica', 'Arial', 'sans-serif'],
+            sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'Helvetica', 'Arial', 'sans-serif'],
+          },
+          borderRadius: { card: "1.35rem", painel: "1.6rem", modal: "2.5rem" },
+          boxShadow: {
+            card: "0 16px 40px -35px rgba(3,15,10,.6)",
+            painel: "0 20px 55px -42px rgba(3,15,10,.5)",
+            botao: "0 18px 38px -18px rgba(6,78,59,.75)",
+            modal: "0 32px 80px -20px rgba(0,0,0,.15)",
           },
         },
       },
     };
   </script>
-  <link rel="stylesheet" href="./styles.css?v=83" />
+  <link rel="stylesheet" href="./styles.css?v=84" />
 
   <script type="importmap">
   {
@@ -38,33 +51,33 @@
       "htm/preact": "https://esm.sh/htm@3.1.1/preact?deps=preact@10.24.3",
       "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2.45.4",
       "marked": "https://esm.sh/marked@14.1.3",
-      "./financeiro/index.js": "./financeiro/index.js?v=83",
-      "./financeiro/comum.js": "./financeiro/comum.js?v=83",
-      "./financeiro/visao-geral.js": "./financeiro/visao-geral.js?v=83",
-      "./financeiro/dre.js": "./financeiro/dre.js?v=83",
-      "./financeiro/fluxo.js": "./financeiro/fluxo.js?v=83",
-      "./financeiro/vendas.js": "./financeiro/vendas.js?v=83",
-      "./financeiro/conciliacao.js": "./financeiro/conciliacao.js?v=83",
-      "./financeiro/importacao.js": "./financeiro/importacao.js?v=83",
-      "./financeiro/contas.js": "./financeiro/contas.js?v=83",
-      "./financeiro/estrutura-dre.js": "./financeiro/estrutura-dre.js?v=83",
-      "./financeiro/hotmart.js": "./financeiro/hotmart.js?v=83",
-      "./financeiro/cobranca.js": "./financeiro/cobranca.js?v=83",
-      "./financeiro/nfe.js": "./financeiro/nfe.js?v=83",
-      "./financeiro/coproducao.js": "./financeiro/coproducao.js?v=83"
+      "./financeiro/index.js": "./financeiro/index.js?v=84",
+      "./financeiro/comum.js": "./financeiro/comum.js?v=84",
+      "./financeiro/visao-geral.js": "./financeiro/visao-geral.js?v=84",
+      "./financeiro/dre.js": "./financeiro/dre.js?v=84",
+      "./financeiro/fluxo.js": "./financeiro/fluxo.js?v=84",
+      "./financeiro/vendas.js": "./financeiro/vendas.js?v=84",
+      "./financeiro/conciliacao.js": "./financeiro/conciliacao.js?v=84",
+      "./financeiro/importacao.js": "./financeiro/importacao.js?v=84",
+      "./financeiro/contas.js": "./financeiro/contas.js?v=84",
+      "./financeiro/estrutura-dre.js": "./financeiro/estrutura-dre.js?v=84",
+      "./financeiro/hotmart.js": "./financeiro/hotmart.js?v=84",
+      "./financeiro/cobranca.js": "./financeiro/cobranca.js?v=84",
+      "./financeiro/nfe.js": "./financeiro/nfe.js?v=84",
+      "./financeiro/coproducao.js": "./financeiro/coproducao.js?v=84"
     }
   }
   </script>
 
-  <script src="./config.js?v=83"></script>
+  <script src="./config.js?v=84"></script>
 </head>
 <body class="bg-bg text-ink font-sans antialiased">
   <div id="app">
-    <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;color:#8f887d;font-size:14px;background:#f6f3ee">
+    <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;color:#64748b;font-size:14px;background:#f5f7f6;font-family:Inter,system-ui,sans-serif">
       Carregando…
     </div>
   </div>
   <noscript style="display:block;padding:24px;text-align:center">Este sistema precisa de JavaScript habilitado.</noscript>
-  <script type="module" src="./app.js?v=83"></script>
+  <script type="module" src="./app.js?v=84"></script>
 </body>
 </html>

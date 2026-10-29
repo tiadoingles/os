@@ -729,21 +729,30 @@ async function syncCobrancasTravado(sb: any): Promise<{ ok: boolean; pulado?: bo
 
 /* ============================ Pergunta livre (Claude + ferramentas) ============================ */
 const ANTHROPIC_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
-const MODEL = Deno.env.get("AI_MODEL") ?? "claude-sonnet-5";
+// Pergunta livre = raciocínio com ferramentas: fica no Sonnet atual (mesma constante/env da função "ai").
+const MODEL = Deno.env.get("AI_MODEL") ?? "claude-sonnet-5-5";
 const WORKSPACE_ID_ENV = Deno.env.get("ANTHROPIC_WORKSPACE_ID") ?? "";
 // Mesma tabela e câmbio de referência da função "ai" (estimativa de custo, não cotação ao vivo).
 const USD_BRL_REF = 5.15;
-const PRECOS_USD_POR_MTOK: Record<string, { input: number; output: number }> = {
-  "claude-sonnet-5": { input: 2.0, output: 10.0 },
-  "claude-haiku-4-5-20251001": { input: 1.0, output: 5.0 },
-  "claude-haiku-4-5": { input: 1.0, output: 5.0 },
+// US$ por milhão de tokens (preços da API Anthropic, 29/10/2026): entrada, saída, escrita de cache (5 min = 1,25x)
+// e leitura de cache. Haiku 5.5: tabela de prompts até 100K tokens (acima disso a API cobra 0,50/2,50).
+const PRECOS_USD_POR_MTOK: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
+  "claude-sonnet-5-5": { input: 2.0, output: 10.0, cacheWrite: 2.5, cacheRead: 0.2 },
+  "claude-sonnet-5": { input: 2.0, output: 10.0, cacheWrite: 2.5, cacheRead: 0.2 },
+  "claude-haiku-5-5": { input: 0.1, output: 0.5, cacheWrite: 0.125, cacheRead: 0.01 },
+  "claude-haiku-4-5-20251001": { input: 1.0, output: 5.0, cacheWrite: 1.25, cacheRead: 0.1 },
+  "claude-haiku-4-5": { input: 1.0, output: 5.0, cacheWrite: 1.25, cacheRead: 0.1 },
+  "claude-opus-5-5": { input: 4.0, output: 20.0, cacheWrite: 5.0, cacheRead: 0.2 },
 };
-const precoModelo = (m: string) => PRECOS_USD_POR_MTOK[m] || PRECOS_USD_POR_MTOK["claude-sonnet-5"];
-async function logAiUsage(sb: any, origem: string, modelo: string, usage: { input_tokens?: number; output_tokens?: number }) {
+const precoModelo = (m: string) => PRECOS_USD_POR_MTOK[m] || PRECOS_USD_POR_MTOK["claude-sonnet-5-5"];
+type Uso = { input_tokens: number; output_tokens: number; cache_creation_input_tokens: number; cache_read_input_tokens: number };
+async function logAiUsage(sb: any, origem: string, modelo: string, usage: Partial<Uso>, userId: string | null) {
   try {
     const i = usage?.input_tokens || 0, o = usage?.output_tokens || 0, p = precoModelo(modelo);
-    const usd = (i / 1e6) * p.input + (o / 1e6) * p.output;
+    const cw = usage?.cache_creation_input_tokens || 0, cr = usage?.cache_read_input_tokens || 0;
+    const usd = (i / 1e6) * p.input + (o / 1e6) * p.output + (cw / 1e6) * p.cacheWrite + (cr / 1e6) * p.cacheRead;
     await sb.from("ai_usage_log").insert({ origem, modelo, input_tokens: i, output_tokens: o,
+      cache_write_tokens: cw, cache_read_tokens: cr, user_id: userId,
       custo_usd: Math.round(usd * 10000) / 10000, custo_brl: Math.round(usd * USD_BRL_REF * 10000) / 10000 });
   } catch (e) { console.error("logAiUsage:", String((e as Error).message || e)); }
 }
@@ -762,16 +771,20 @@ As ferramentas recebem e devolvem datas em Unix ms (converta para DD/MM/AAAA no 
 Se faltar um dado obrigatório (ex.: e-mail, período, subdomínio da área de membros), peça esse dado. Hoje é ${"{HOJE}"} (fuso de Brasília).`;
 
 // usage é preenchido pelo chamador e acumulado aqui, para o custo ser registrado mesmo se uma rodada falhar no meio.
-async function responderPergunta(sb: any, pergunta: string, usage: { input_tokens: number; output_tokens: number }): Promise<{ resultado: Resultado }> {
+async function responderPergunta(sb: any, pergunta: string, usage: Uso): Promise<{ resultado: Resultado }> {
   // Só ferramentas de leitura do MCP (allowlist leitura()), com o inputSchema do próprio servidor.
   const tools = (await ferramentas()).filter((t) => leitura(t.name)).map((t) => {
     const { $schema: _x, ...schema } = (t.inputSchema && typeof t.inputSchema === "object" ? t.inputSchema : {}) as Record<string, unknown>;
-    return { name: t.name, description: String(t.description || t.name).slice(0, 1000), input_schema: { type: "object", properties: {}, ...schema } };
+    return { name: t.name, description: String(t.description || t.name).slice(0, 1000), input_schema: { type: "object", properties: {}, ...schema } } as Record<string, unknown>;
   });
+  // Cache do prompt (ordem tools -> system -> messages): breakpoint na última ferramenta (lista fixa por isolate, vale
+  // entre dias) e no system (muda só com {HOJE}). Os dois prefixos passam do mínimo cacheável (512 tokens).
+  if (tools.length) tools[tools.length - 1] = { ...tools[tools.length - 1], cache_control: { type: "ephemeral" } };
   const headers: Record<string, string> = { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" };
   const ws = await workspaceId(sb);
   if (ws) headers["anthropic-workspace-id"] = ws;
   const hoje = new Date().toLocaleDateString("pt-BR", { timeZone: FUSO });
+  const system = [{ type: "text", text: SYSTEM.replace("{HOJE}", hoje), cache_control: { type: "ephemeral" } }];
   const messages: any[] = [{ role: "user", content: pergunta }];
   let ultimaTabela: Tabela | null = null;
   for (let rodada = 0; rodada < 7; rodada++) {
@@ -780,11 +793,13 @@ async function responderPergunta(sb: any, pergunta: string, usage: { input_token
       method: "POST", headers,
       // Na última rodada as ferramentas continuam declaradas (a API recusa tool_use/tool_result no histórico sem tools),
       // mas tool_choice none obriga a responder em texto.
-      body: JSON.stringify({ model: MODEL, max_tokens: 1500, system: SYSTEM.replace("{HOJE}", hoje), messages, tools, ...(ultima ? { tool_choice: { type: "none" } } : {}) }),
+      body: JSON.stringify({ model: MODEL, max_tokens: 1500, system, messages, tools, ...(ultima ? { tool_choice: { type: "none" } } : {}) }),
     });
     const d = await r.json();
     if (!r.ok) throw new Error(`IA: ${d?.error?.message || `HTTP ${r.status}`}`);
     usage.input_tokens += d.usage?.input_tokens || 0; usage.output_tokens += d.usage?.output_tokens || 0;
+    usage.cache_creation_input_tokens += d.usage?.cache_creation_input_tokens || 0;
+    usage.cache_read_input_tokens += d.usage?.cache_read_input_tokens || 0;
     const blocos: any[] = d.content || [];
     const usos = blocos.filter((b) => b.type === "tool_use");
     if (d.stop_reason !== "tool_use" || !usos.length) {
@@ -804,8 +819,12 @@ async function responderPergunta(sb: any, pergunta: string, usage: { input_token
         if (e instanceof SemCredenciais) throw e;
         erro = true; conteudo = String((e as Error).message || e);
       }
-      resultados.push({ type: "tool_result", tool_use_id: u.id, content: conteudo, ...(erro ? { is_error: true } : {}) });
+      resultados.push({ type: "tool_result", tool_use_id: u.id, content: conteudo, ...(erro ? { is_error: true } : {}) } as Record<string, unknown>);
     }
+    // Breakpoint móvel no fim do histórico: a rodada seguinte lê do cache tudo até aqui (resultados grandes das
+    // ferramentas). Os breakpoints antigos saem para não passar de 4 (tools + system + este).
+    for (const m of messages) if (Array.isArray(m.content)) for (const b of m.content) if (b && typeof b === "object") delete b.cache_control;
+    resultados[resultados.length - 1].cache_control = { type: "ephemeral" };
     messages.push({ role: "user", content: resultados });
   }
   return { resultado: { resposta: "Não consegui concluir a resposta dentro do limite de consultas. Tente uma pergunta mais específica.", dados: ultimaTabela } };
@@ -888,10 +907,11 @@ Deno.serve(async (req: Request) => {
       if (!ANTHROPIC_KEY) return json({ ok: false, error: "IA não conectada: falta o segredo ANTHROPIC_API_KEY nas Edge Functions." }, 200, origin);
       if (await iaPausada(sb)) return json({ ok: false, pausado: true, error: MSG_PAUSADO }, 200, origin);
       const base = { tipo: "pergunta", pergunta, parametros: {} };
-      const usage = { input_tokens: 0, output_tokens: 0 };
+      const usage: Uso = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
       try {
         const { resultado } = await responderPergunta(sb, pergunta, usage)
-          .finally(() => (usage.input_tokens || usage.output_tokens ? logAiUsage(sb, "hotmart:pergunta", MODEL, usage) : undefined));
+          .finally(() => (usage.input_tokens || usage.output_tokens || usage.cache_read_input_tokens || usage.cache_creation_input_tokens
+            ? logAiUsage(sb, "hotmart:pergunta", MODEL, usage, u.id) : undefined));
         await registrar({ ...base, status: "concluido", resposta: resultado.resposta, resposta_dados: resultado.dados });
         return json({ ok: true, resposta: resultado.resposta, dados: resultado.dados }, 200, origin);
       } catch (e) {

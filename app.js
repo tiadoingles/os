@@ -11,9 +11,136 @@ marked.setOptions({ gfm: true, breaks: false });
 /* ============================ Setup ============================ */
 
 const cfg = window.__CONFIG__ || {};
+
+/* ---- Segurança da sessão (copiada do Craft Green: auth 357/981) ----
+ * 1) "Manter conectado": sem marcar, a sessão fica no sessionStorage (some ao fechar a aba/navegador);
+ *    marcado, fica no localStorage. A escolha fica na flag CHAVE_MANTER (localStorage).
+ * 2) Ao abrir, a sessão é conferida no servidor (getUser) e qualquer 401 confere de novo; inválida = sai.
+ * 3) Sai sozinho depois de INATIVIDADE_MS sem mexer no OS (última atividade compartilhada entre abas). */
+const INATIVIDADE_MS = 8 * 60 * 60 * 1000; // 8 h sem interação
+const CHAVE_MANTER = "os.manterConectado";      // "1" = localStorage, "0" = sessionStorage
+const CHAVE_ATIVIDADE = "os.ultimaAtividade";   // epoch ms da última interação (todas as abas)
+const CHAVE_SAIDA = "os.saidaIntencional";      // epoch ms do último clique em "Sair" (todas as abas)
+const MSG_SESSAO_EXPIROU = "Sua sessão expirou. Entre novamente.";
+const MSG_INATIVIDADE = "Você saiu por inatividade (8 h). Entre novamente.";
+
+function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch { /* sem storage */ } }
+function ssGet(k) { try { return sessionStorage.getItem(k); } catch { return null; } }
+
+// Migração única (deploy v84): quem já tinha sessão salva no localStorage continua como se tivesse
+// marcado "Manter conectado" — ninguém é deslogado pelo deploy. Navegador sem sessão começa desmarcado.
+if (lsGet(CHAVE_MANTER) === null) {
+  let tinhaSessao = false;
+  try { tinhaSessao = Object.keys(localStorage).some((k) => /^sb-.+-auth-token$/.test(k)); } catch { /* sem storage */ }
+  lsSet(CHAVE_MANTER, tinhaSessao ? "1" : "0");
+}
+function manterConectado() { return lsGet(CHAVE_MANTER) === "1"; }
+function definirManterConectado(v) { lsSet(CHAVE_MANTER, v ? "1" : "0"); }
+
+// Adaptador de storage do supabase-js: grava só no lugar escolhido, lê dos dois (a sessão antiga
+// no localStorage continua valendo) e apaga dos dois. Navegador com storage bloqueado (o acesso a
+// window.localStorage pode lançar erro) fica com a sessão só na memória da aba, como o supabase-js
+// fazia sozinho antes do adaptador.
+const memoriaSessao = new Map();
+const armazenamentoSessao = {
+  getItem(k) {
+    const prim = manterConectado() ? lsGet(k) : ssGet(k);
+    const v = prim !== null ? prim : (manterConectado() ? ssGet(k) : lsGet(k));
+    return v !== null ? v : (memoriaSessao.has(k) ? memoriaSessao.get(k) : null);
+  },
+  setItem(k, v) {
+    const local = manterConectado();
+    try { (local ? sessionStorage : localStorage).removeItem(k); } catch { /* sem storage */ }
+    try { (local ? localStorage : sessionStorage).setItem(k, v); memoriaSessao.delete(k); } catch { memoriaSessao.set(k, v); }
+  },
+  removeItem(k) {
+    memoriaSessao.delete(k);
+    try { localStorage.removeItem(k); } catch { /* sem storage */ }
+    try { sessionStorage.removeItem(k); } catch { /* sem storage */ }
+  },
+};
+
+// Todo request do cliente (PostgREST, Storage, Edge Functions) passa por aqui: um 401 fora do /auth
+// pede a conferência da sessão no servidor (não desloga por um 401 de outra causa).
+async function fetchComSessao(input, init) {
+  const r = await fetch(input, init);
+  if (r.status === 401) {
+    const url = typeof input === "string" ? input : (input && input.url) || "";
+    if (!/\/auth\/v1\//.test(url)) conferirSessao();
+  }
+  return r;
+}
+
 export const sb = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
-  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false, storage: armazenamentoSessao },
+  global: { fetch: fetchComSessao },
 });
+
+let sessaoAtiva = false;          // atualizado pelo onAuthStateChange do App
+let avisoSaida = "";              // mensagem mostrada na tela de login depois de uma saída forçada
+let saindoAgora = false;
+let conferindoSessao = false;
+
+// Erro do getUser que significa sessão inválida (rede fora do ar não conta).
+function erroDeSessao(error) {
+  if (!error) return false;
+  if (error.name === "AuthRetryableFetchError" || error.status === 0) return false;
+  if (error.status === 408 || error.status === 429) return false; // timeout / limite de requisições: não é sessão inválida
+  if (error.name === "AuthSessionMissingError") return true;
+  return error.status >= 400 && error.status < 500;
+}
+async function encerrarSessao(msg) {
+  if (saindoAgora) return;
+  saindoAgora = true;
+  avisoSaida = msg || "";
+  try { await sb.auth.signOut({ scope: "local" }); } catch { /* já saiu */ }
+  saindoAgora = false;
+}
+// "Sair" clicado pela pessoa (avisa as outras abas que não foi expiração).
+async function sairDoSistema() {
+  lsSet(CHAVE_SAIDA, String(Date.now()));
+  avisoSaida = "";
+  saindoAgora = true;
+  // signOut() não apaga a sessão local se o servidor não responder: nesse caso sai só localmente.
+  const r = await sb.auth.signOut().catch((e) => ({ error: e }));
+  if (r && r.error) await sb.auth.signOut({ scope: "local" }).catch(() => {});
+  saindoAgora = false;
+  location.hash = "/";
+}
+function conferirSessao() {
+  if (!sessaoAtiva || conferindoSessao) return;
+  conferindoSessao = true;
+  setTimeout(async () => {
+    try {
+      const { error } = await sb.auth.getUser();
+      if (erroDeSessao(error)) dispatchEvent(new CustomEvent("os:session-expired"));
+    } finally { conferindoSessao = false; }
+  }, 0);
+}
+addEventListener("os:session-expired", () => { if (sessaoAtiva) encerrarSessao(MSG_SESSAO_EXPIROU); });
+
+// Inatividade: última interação no localStorage (vale para todas as abas), gravada no máximo a cada 30 s.
+function ultimaAtividade() { return Number(lsGet(CHAVE_ATIVIDADE)) || 0; }
+function marcarAtividade(forcar) {
+  const agora = Date.now();
+  if (forcar || agora - ultimaAtividade() > 30 * 1000) lsSet(CHAVE_ATIVIDADE, String(agora));
+}
+function inativoDemais() { const u = ultimaAtividade(); return !!u && Date.now() - u > INATIVIDADE_MS; }
+function conferirInatividade() { if (sessaoAtiva && inativoDemais()) encerrarSessao(MSG_INATIVIDADE); }
+for (const ev of ["pointerdown", "mousemove", "keydown", "touchstart", "wheel", "scroll"]) {
+  addEventListener(ev, () => {
+    if (!sessaoAtiva) return;
+    if (inativoDemais()) conferirInatividade(); else marcarAtividade(false);
+  }, { passive: true, capture: true });
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  conferirInatividade();
+  if (sessaoAtiva && !inativoDemais()) marcarAtividade(false);
+});
+addEventListener("focus", conferirInatividade);
+setInterval(conferirInatividade, 60 * 1000);
 
 // Link de acesso por e-mail (magic link / recuperação de senha): o Supabase devolve
 // #access_token=…&refresh_token=… na URL. Como o roteador usa o hash, a sessão é aplicada
@@ -22,6 +149,9 @@ const loginPorLink = (() => {
   const h = new URLSearchParams(location.hash.replace(/^#/, ""));
   const access_token = h.get("access_token"), refresh_token = h.get("refresh_token");
   if (!access_token || !refresh_token) return Promise.resolve();
+  // Entrada nova: zera o relógio de inatividade antes do INITIAL_SESSION (senão uma atividade antiga,
+  // de mais de 8 h atrás neste navegador, derrubaria a sessão que acabou de chegar pelo link).
+  marcarAtividade(true);
   history.replaceState(null, "", location.pathname + location.search + "#/perfil");
   return sb.auth.setSession({ access_token, refresh_token }).catch(() => {});
 })();
@@ -45,10 +175,11 @@ const STATUSES = [
   ["rascunho", "Rascunho"],
   ["arquivado", "Arquivado"],
 ];
-const PILL_OK = "bg-[#e7efe1] text-[#5e7a52]";
-const PILL_WARN = "bg-[#efe9cf] text-[#7c7440]";
-const PILL_ERR = "bg-[#f4e0db] text-[#a44b43]";
-const PILL_NEUTRAL = "bg-black/[0.05] text-muted";
+// Pills do Craft (financeiro/comum.js > Pill): fundo 50, texto 700/800, contorno 100/200.
+const PILL_OK = "bg-emerald-50 text-emerald-800 ring-1 ring-inset ring-emerald-100";
+const PILL_WARN = "bg-amber-50 text-amber-800 ring-1 ring-inset ring-amber-200";
+const PILL_ERR = "bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-200";
+const PILL_NEUTRAL = "bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-200";
 
 const STATUS_STYLE = {
   publicado: PILL_OK,
@@ -278,9 +409,9 @@ function mensagemErroSenha(e) {
 // </permissoes>
 
 const FERRAMENTA_STATUS = {
-  conectada: { label: "Conectada", cls: PILL_OK, dot: "bg-[#7d9b6e]" },
-  erro: { label: "Erro", cls: PILL_ERR, dot: "bg-[#c56b5f]" },
-  desconectada: { label: "Desconectada", cls: PILL_NEUTRAL, dot: "bg-[#b3aca0]" },
+  conectada: { label: "Conectada", cls: PILL_OK, dot: "bg-[#10b981]" },
+  erro: { label: "Erro", cls: PILL_ERR, dot: "bg-[#e11d48]" },
+  desconectada: { label: "Desconectada", cls: PILL_NEUTRAL, dot: "bg-[#94a3b8]" },
   nao_configurada: { label: "Não configurada", cls: PILL_WARN, dot: "bg-[#bfa94e]" },
 };
 const FERRAMENTA_CATEGORIAS = [
@@ -486,7 +617,7 @@ function SquadPage() {
   return html`
     <div>
       <div>
-        <h1 class="flex items-center gap-2 text-2xl font-semibold text-ink">🤖 Squad de Agentes</h1>
+        <h1 class="flex items-center gap-2 os-titulo text-2xl sm:text-[1.75rem]">Squad de Agentes</h1>
         <p class="mt-1 max-w-2xl text-sm text-muted">
           Time de subagentes do Claude Code responsável por manter e melhorar cada aba do OS — um maestro por
           aba, um pool de especialistas compartilhados entre abas e especialistas exclusivos de uma única aba.
@@ -496,7 +627,7 @@ function SquadPage() {
       <div class="mt-4 flex flex-wrap gap-2 text-xs">
         <span class="inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 ring-1 ring-line">${agentes.length} agentes</span>
         <span class="inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 ring-1 ring-line">
-          <span class="inline-block h-1.5 w-1.5 rounded-full bg-[#7d9b6e]"></span>${ativos} ativos
+          <span class="inline-block h-1.5 w-1.5 rounded-full bg-[#10b981]"></span>${ativos} ativos
         </span>
         ${precisamAtualizar > 0 ? html`
           <span class="inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 ring-1 ring-line">
@@ -509,7 +640,7 @@ function SquadPage() {
           <h2 class="text-sm font-semibold uppercase tracking-wide text-muted">${SQUAD_GRUPO_LABEL[g]}</h2>
           <div class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
             ${lista.map((a) => html`
-              <div key=${a.id} class="rounded-xl border border-line bg-white p-4">
+              <div key=${a.id} class="rounded-[1.35rem] border border-line bg-white shadow-card p-4">
                 <div class="flex flex-wrap items-start justify-between gap-2">
                   <div class="min-w-0">
                     <div class="flex flex-wrap items-center gap-2">
@@ -532,7 +663,7 @@ function SquadPage() {
                     ? html`Última tarefa: ${a.ultima_tarefa || "—"} · ${fmtDate(a.ultima_execucao_em, true)}`
                     : "Nenhuma tarefa registrada ainda"}
                 </div>
-                ${a.precisa_atualizacao && a.motivo_atualizacao ? html`<p class="mt-1 text-xs text-[#7c7440]">${a.motivo_atualizacao}</p>` : null}
+                ${a.precisa_atualizacao && a.motivo_atualizacao ? html`<p class="mt-1 text-xs text-[#92400e]">${a.motivo_atualizacao}</p>` : null}
               </div>`)}
           </div>
         </div>`)}
@@ -802,9 +933,9 @@ function BotaoDesfazer({ escopo }) {
   return html`
     <button type="button" title=${dica} aria-label=${dica} disabled=${!topo || desfazendoAgora}
       onClick=${() => desfazerItem(escopo)}
-      class="inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-xs font-semibold tracking-wide text-ink ring-1 ring-line transition hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-40">
+      class="inline-flex h-10 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-black tracking-widest text-slate-700 shadow-sm transition hover:border-emerald-200 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">
       <svg viewBox="0 0 20 20" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M7 5 3 9l4 4"/><path d="M3 9h9a5 5 0 0 1 0 10h-2"/></svg>
-      DESFAZER${pilha.length > 1 ? html`<span class="font-normal text-muted">(${pilha.length})</span>` : null}
+      <span class="hidden sm:inline">DESFAZER</span>${pilha.length > 1 ? html`<span class="font-semibold text-slate-400">(${pilha.length})</span>` : null}
     </button>`;
 }
 
@@ -879,13 +1010,14 @@ async function restaurarMetas(linhas) {
 /* ============================ UI primitives ============================ */
 
 function Btn({ variant = "primary", as = "button", href, loading, disabled, children, class: cls, ...rest }) {
+  // Botões do Craft: principal = gradiente (premium-button-primary), demais = BotaoSecundario.
   const base =
-    "inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed";
+    "inline-flex items-center justify-center gap-2 px-4 py-2 text-sm font-bold transition disabled:opacity-50 disabled:cursor-not-allowed";
   const styles = {
-    primary: "bg-brand text-white hover:bg-brand-dark shadow-sm",
-    ghost: "bg-white text-ink ring-1 ring-line hover:bg-black/[0.04]",
-    subtle: "bg-black/[0.05] text-ink hover:bg-line",
-    danger: "bg-white text-red-600 ring-1 ring-red-200 hover:bg-red-50",
+    primary: "os-btn-primario rounded-2xl",
+    ghost: "rounded-xl border border-slate-200 bg-white text-slate-700 shadow-sm hover:border-emerald-200 hover:text-emerald-800",
+    subtle: "rounded-xl bg-slate-100 text-slate-700 hover:bg-slate-200",
+    danger: "rounded-xl border border-rose-200 bg-white text-rose-700 hover:bg-rose-50",
   };
   const c = cx(base, styles[variant], cls);
   const inner = html`${loading ? html`<span class="spinner"></span>` : null}${children}`;
@@ -897,8 +1029,8 @@ function Btn({ variant = "primary", as = "button", href, loading, disabled, chil
 function Field({ label, hint, children, required }) {
   return html`
     <label class="block">
-      <span class="mb-1 block text-sm font-medium text-ink">
-        ${label}${required ? html`<span class="text-brand"> *</span>` : null}
+      <span class="mb-1.5 block text-[13px] font-bold text-slate-700">
+        ${label}${required ? html`<span class="text-emerald-600"> *</span>` : null}
       </span>
       ${children}
       ${hint ? html`<span class="mt-1 block text-xs text-muted">${hint}</span>` : null}
@@ -906,24 +1038,24 @@ function Field({ label, hint, children, required }) {
 }
 
 const inputCls =
-  "w-full rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink placeholder-muted/70 focus:border-brand focus:ring-brand";
+  "os-input w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-800 placeholder-slate-400 shadow-sm";
 
 function Badge({ children, class: cls }) {
-  return html`<span class=${cx("inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium", cls)}>${children}</span>`;
+  return html`<span class=${cx("inline-flex items-center rounded-lg px-2 py-0.5 text-xs font-bold", cls)}>${children}</span>`;
 }
 
 function Empty({ icon = "🗂️", title, children }) {
   return html`
-    <div class="rounded-xl border border-dashed border-line bg-card/70 px-6 py-14 text-center">
-      <div class="text-4xl">${icon}</div>
-      <div class="mt-3 font-medium text-ink">${title}</div>
-      ${children ? html`<div class="mx-auto mt-1 max-w-md text-sm text-muted">${children}</div>` : null}
+    <div class="rounded-[1.6rem] border border-dashed border-slate-200 bg-white/80 px-6 py-14 text-center">
+      <div class="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-emerald-50 text-2xl ring-1 ring-emerald-100">${icon}</div>
+      <div class="mt-4 font-black tracking-tight text-[#07110e]">${title}</div>
+      ${children ? html`<div class="mx-auto mt-1 max-w-md text-sm font-medium text-slate-500">${children}</div>` : null}
     </div>`;
 }
 
 function Splash() {
-  return html`<div class="flex min-h-screen items-center justify-center text-muted text-sm">
-    <span class="spinner mr-2"></span> Carregando…
+  return html`<div class="flex min-h-screen items-center justify-center bg-[#f5f7f6] text-sm font-semibold text-slate-500">
+    <span class="spinner mr-2 text-emerald-600"></span> Carregando…
   </div>`;
 }
 
@@ -955,16 +1087,19 @@ function Modal({ title, onClose, children, wide }) {
     return () => removeEventListener("keydown", on);
   }, [onClose]);
   return html`
-    <div class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/30 p-4 sm:p-8" onClick=${onClose}>
-      <div
-        class=${cx("w-full rounded-2xl bg-white shadow-xl ring-1 ring-line", wide ? "max-w-2xl" : "max-w-lg")}
+    <div class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/40 p-4 backdrop-blur-sm sm:p-8" onClick=${onClose}>
+      <div role="dialog" aria-modal="true" aria-label=${typeof title === "string" ? title : undefined}
+        class=${cx("w-full overflow-hidden rounded-[2rem] border border-white/20 bg-white shadow-modal sm:rounded-[2.5rem]", wide ? "max-w-2xl" : "max-w-lg")}
+        style="border-top:4px solid #10b981"
         onClick=${(e) => e.stopPropagation()}
       >
-        <div class="flex items-center justify-between border-b border-line px-5 py-3.5">
-          <h3 class="font-semibold text-ink">${title}</h3>
-          <button class="rounded-md p-1 text-muted hover:bg-black/[0.06] hover:text-ink/75" onClick=${onClose}>✕</button>
+        <div class="flex items-center justify-between gap-3 px-6 pb-3 pt-6 sm:px-8">
+          <h3 class="text-lg font-black tracking-tight text-[#07110e]">${title}</h3>
+          <button type="button" aria-label="Fechar" class="rounded-xl p-2 text-slate-400 transition-colors hover:bg-slate-50 hover:text-slate-900" onClick=${onClose}>
+            <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          </button>
         </div>
-        <div class="px-5 py-4">${children}</div>
+        <div class="px-6 pb-7 pt-1 sm:px-8">${children}</div>
       </div>
     </div>`;
 }
@@ -975,8 +1110,11 @@ function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [verSenha, setVerSenha] = useState(false);
+  const [manter, setManter] = useState(false); // "Manter conectado": desmarcado por padrão (Craft)
   const [busy, setBusy] = useState(false);
   const [erro, setErro] = useState("");
+  // Motivo da última saída forçada (sessão expirada / inatividade), mostrado uma vez.
+  const [aviso] = useState(() => { const a = avisoSaida; avisoSaida = ""; return a; });
   const emailRef = useRef(null);
   useEffect(() => { emailRef.current && emailRef.current.focus(); }, []);
 
@@ -987,6 +1125,7 @@ function Login() {
     if (!email.trim() || !password) { setErro("Informe o e-mail e a senha."); return; }
     setBusy(true);
     try {
+      definirManterConectado(manter); // define onde o supabase-js vai gravar a sessão (local x session)
       const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password });
       if (error) throw error;
       // Entrou: o App recebe a sessão (onAuthStateChange) e leva cada papel para a sua tela inicial.
@@ -998,36 +1137,66 @@ function Login() {
     }
   }
 
+  // Layout do Craft: painel escuro #07110e com brilho esmeralda + formulário branco.
+  // O nome da marca ("Tia do Inglês") continua no rosa da marca de propósito.
   return html`
-    <div class="flex min-h-screen items-center justify-center bg-gradient-to-b from-card to-bg px-4">
-      <div class="w-full max-w-sm">
-        <div class="mb-7 text-center">
-          <h1 class="text-2xl font-semibold tracking-tight text-brand">Tia do Inglês</h1>
-          <p class="mt-1 text-sm text-muted">Sistema Operacional</p>
+    <div class="flex min-h-screen bg-[#f5f7f6] lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
+      <div class="relative hidden overflow-hidden bg-[#07110e] lg:flex lg:flex-col lg:justify-between lg:p-12">
+        <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_15%_0%,rgba(16,185,129,0.22),transparent_30rem)]"></div>
+        <div class="relative flex items-center gap-3">
+          <span class="grid h-11 w-11 place-items-center rounded-xl bg-emerald-500 text-sm font-black text-[#07110e]">TI</span>
+          <span class="text-[11px] font-black uppercase tracking-[0.2em] text-emerald-400">Sistema Operacional</span>
         </div>
-        <form onSubmit=${submit} class="space-y-4 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-line">
-          <h2 class="text-base font-semibold text-ink">Entrar</h2>
-          <${Field} label="E-mail" required>
-            <input ref=${emailRef} class=${inputCls} type="email" name="email" autocomplete="username" required
-              value=${email} onInput=${(e) => setEmail(e.target.value)} />
-          <//>
-          <${Field} label="Senha" required>
-            <div class="relative">
-              <input class=${cx(inputCls, "pr-20")} type=${verSenha ? "text" : "password"} name="password" autocomplete="current-password" required
-                value=${password} onInput=${(e) => setPassword(e.target.value)} />
-              <button type="button" tabindex="-1" onClick=${() => setVerSenha((v) => !v)}
-                class="absolute inset-y-0 right-0 px-3 text-xs font-medium text-muted hover:text-ink">
-                ${verSenha ? "Ocultar" : "Mostrar"}
-              </button>
+        <div class="relative">
+          <h1 class="text-5xl font-black tracking-[-0.045em] text-[#ea5167]">Tia do Inglês</h1>
+          <p class="mt-4 max-w-sm text-base font-medium leading-relaxed text-slate-400">
+            Base de Conhecimento, CS, Pedagógico, Conteúdo e Financeiro da empresa num só lugar.
+          </p>
+        </div>
+        <p class="relative text-xs font-semibold text-slate-500">Acesso restrito à equipe.</p>
+      </div>
+
+      <div class="flex w-full items-center justify-center px-4 py-10 sm:px-8">
+        <div class="w-full max-w-md">
+          <div class="mb-8 text-center lg:hidden">
+            <p class="text-[11px] font-black uppercase tracking-[0.2em] text-emerald-700">Sistema Operacional</p>
+            <h1 class="mt-2 text-3xl font-black tracking-[-0.045em] text-[#ea5167]">Tia do Inglês</h1>
+          </div>
+          <form onSubmit=${submit} class="space-y-5 rounded-[2rem] border border-slate-200 bg-white p-6 shadow-[0_20px_55px_-42px_rgba(3,15,10,0.5)] sm:p-8">
+            <div>
+              <p class="os-eyebrow">Acesso</p>
+              <h2 class="mt-2 text-2xl font-black tracking-[-0.045em] text-[#07110e]">Entrar</h2>
             </div>
-          <//>
-          ${erro ? html`<div role="alert" class="rounded-lg bg-[#f4e0db] px-3 py-2 text-sm text-[#a44b43]">${erro}</div>` : null}
-          <${Btn} type="submit" loading=${busy} class="w-full">Entrar<//>
-        </form>
-        <p class="mt-4 text-center text-xs text-muted">
-          O acesso é feito por conta criada pelo ADM. Se você ainda não tem conta ou esqueceu a senha,
-          peça ao ADM uma nova senha temporária.
-        </p>
+            ${aviso ? html`<div role="status" class="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-800">${aviso}</div>` : null}
+            <${Field} label="E-mail" required>
+              <input ref=${emailRef} class=${cx(inputCls, "h-12")} type="email" name="email" autocomplete="username" required
+                value=${email} onInput=${(e) => setEmail(e.target.value)} />
+            <//>
+            <${Field} label="Senha" required>
+              <div class="relative">
+                <input class=${cx(inputCls, "h-12 pr-20")} type=${verSenha ? "text" : "password"} name="password" autocomplete="current-password" required
+                  value=${password} onInput=${(e) => setPassword(e.target.value)} />
+                <button type="button" tabindex="-1" onClick=${() => setVerSenha((v) => !v)}
+                  class="absolute inset-y-0 right-0 px-4 text-xs font-bold text-slate-500 hover:text-emerald-700">
+                  ${verSenha ? "Ocultar" : "Mostrar"}
+                </button>
+              </div>
+            <//>
+            <label class="flex cursor-pointer items-start gap-3 rounded-xl px-1 text-sm">
+              <input type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300" checked=${manter} onChange=${(e) => setManter(e.target.checked)} />
+              <span>
+                <span class="font-bold text-slate-700">Manter conectado</span>
+                <span class="block text-xs font-medium text-slate-500">Só em computador pessoal. Sem marcar, a sessão termina ao fechar a aba.</span>
+              </span>
+            </label>
+            ${erro ? html`<div role="alert" class="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-bold text-rose-700">${erro}</div>` : null}
+            <${Btn} type="submit" loading=${busy} class="h-12 w-full">Entrar<//>
+          </form>
+          <p class="mt-5 text-center text-xs font-medium leading-relaxed text-slate-500">
+            O acesso é feito por conta criada pelo ADM. Se você ainda não tem conta ou esqueceu a senha,
+            peça ao ADM uma nova senha temporária.
+          </p>
+        </div>
       </div>
     </div>`;
 }
@@ -1041,8 +1210,53 @@ function iniciais(txt) {
 
 const EMBED_ROUTES = new Set(["/pedagogico/gerador-feedbacks", "/comercial/dash-fad"]);
 
+// Ícones Lucide (ISC) do menu lateral, no mesmo traço do Craft (financeiro/comum.js > Icone).
+const ICONES_OS = {
+  home: '<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  book: '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
+  calendar: '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/>',
+  cap: '<path d="M21.42 10.922a1 1 0 0 0-.019-1.838L12.83 5.18a2 2 0 0 0-1.66 0L2.6 9.08a1 1 0 0 0 0 1.832l8.57 3.908a2 2 0 0 0 1.66 0z"/><path d="M22 10v6"/><path d="M6 12.5V16a6 3 0 0 0 12 0v-3.5"/>',
+  headset: '<path d="M3 11h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5Zm0 0a9 9 0 1 1 18 0m0 0v5a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3Z"/><path d="M21 16v2a4 4 0 0 1-4 4h-5"/>',
+  trending: '<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>',
+  wallet: '<path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/>',
+  megaphone: '<path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>',
+  bot: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
+  gauge: '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+  sparkles: '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>',
+  wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  settings: '<path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
+  user: '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>',
+  menu: '<line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/>',
+  chevron: '<path d="m6 9 6 6 6-6"/>',
+};
+const ICONE_GRUPO = { bc: "book", agenda: "calendar", pedagogico: "cap", cs: "headset", comercial: "trending", financeiro: "wallet", conteudo: "megaphone" };
+function IconeOS({ nome, class: cls = "h-5 w-5" }) {
+  return html`<svg class=${cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+    stroke-linejoin="round" aria-hidden="true" dangerouslySetInnerHTML=${{ __html: ICONES_OS[nome] || "" }}></svg>`;
+}
+
+// Nome da tela atual para o cabeçalho (grupo do menu + item).
+function tituloDaRota(route) {
+  const p0 = route.parts[0] || "";
+  const fixos = { "": "Início", farol: "Farol do Lucro", "pedir-ia": "Pedir a IA", squad: "Squad de Agentes",
+    ferramentas: "Ferramentas", admin: "Administração", perfil: "Meu perfil" };
+  if (p0 in fixos) return { grupo: "Sistema Operacional", titulo: fixos[p0] };
+  if (["base", "secao", "doc", "novo"].includes(p0)) return { grupo: "Sistema Operacional", titulo: "Base de Conhecimento" };
+  const g = NAV.find((x) => x.id === p0);
+  if (!g) return { grupo: "Sistema Operacional", titulo: "" };
+  const it = (g.itens || []).find((x) => x.slug === route.parts[1]);
+  return { grupo: g.nome, titulo: it ? it.nome : g.nome };
+}
+
+function lerPreferencia(chave) { try { return localStorage.getItem(chave); } catch { return null; } }
+function gravarPreferencia(chave, v) { try { localStorage.setItem(chave, v); } catch { /* sem storage */ } }
+
+// Layout do Craft Green (app_layout): menu lateral escuro #07110e (fixo, recolhe para ícones no desktop,
+// gaveta no celular) + cabeçalho branco translúcido com o título da tela, DESFAZER e o usuário.
 function Shell({ me, route, children }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(false); // gaveta do celular
+  const [recolhido, setRecolhido] = useState(() => lerPreferencia("os.menuRecolhido") === "1"); // desktop
   const p0 = route.parts[0] || "";
   const bcActive = p0 === "base" || p0 === "secao" || p0 === "doc" || p0 === "novo";
   const homeActive = p0 === "";
@@ -1054,109 +1268,149 @@ function Shell({ me, route, children }) {
   const [openGroups, setOpenGroups] = useState(() => new Set([p0, ...(nav.length === 1 ? [nav[0].id] : [])]));
   useEffect(() => { setOpenGroups((s) => new Set([...s, p0])); }, [p0]);
   const toggle = (id) => setOpenGroups((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const recolher = (v) => { setRecolhido(v); gravarPreferencia("os.menuRecolhido", v ? "1" : "0"); };
+  const alternarMenu = () => (window.matchMedia("(min-width: 1024px)").matches ? recolher(!recolhido) : setOpen((o) => !o));
+  const fechar = () => setOpen(false);
+  const so = recolhido ? "lg:hidden" : ""; // some com o texto quando o menu está recolhido (só desktop)
+  const { grupo: grupoAtual, titulo } = tituloDaRota(route);
+  const navRef = useRef(null);
+  // Mantém o item ativo visível no menu (grupos longos, como CS / Suporte).
+  useEffect(() => {
+    // Rola só o próprio menu (scrollIntoView rolaria a página inteira no celular).
+    const nav = navRef.current, el = nav && nav.querySelector('[aria-current="page"]');
+    if (!el) return;
+    const topo = el.offsetTop, base = topo + el.offsetHeight;
+    if (topo < nav.scrollTop) nav.scrollTop = Math.max(0, topo - 24);
+    else if (base > nav.scrollTop + nav.clientHeight) nav.scrollTop = base - nav.clientHeight + 24;
+  }, [route.path, recolhido]);
 
-  const linkItem = (label, icon, target, active) => html`
-    <a href=${"#" + target} onClick=${() => setOpen(false)}
-      class=${cx(
-        "flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition",
-        active ? "bg-brand-light font-medium text-brand-dark" : "text-ink/70 hover:bg-black/[0.04]"
-      )}>
-      <span class="w-5 text-center text-[15px] leading-none">${icon}</span>
-      <span class="truncate">${label}</span>
+  const linkItem = (label, icone, target, active) => html`
+    <a href=${"#" + target} onClick=${fechar} title=${recolhido ? label : undefined} aria-current=${active ? "page" : undefined}
+      class=${cx("group flex h-11 w-full items-center gap-3 rounded-xl px-3 text-left transition",
+        active ? "bg-emerald-500 text-[#07110e] shadow-[0_12px_30px_-16px_rgba(16,185,129,0.8)]" : "text-slate-300 hover:bg-white/[0.06] hover:text-white",
+        recolhido && "lg:justify-center lg:px-0")}>
+      <${IconeOS} nome=${icone} class=${cx("h-5 w-5 shrink-0", active ? "text-[#07110e]" : "text-slate-400 group-hover:text-emerald-400")} />
+      <span class=${cx("truncate text-[14px] font-bold tracking-tight", so)}>${label}</span>
     </a>`;
 
+  const secao = (rotulo, itens) => {
+    const vis = itens.filter(Boolean);
+    if (!vis.length) return null;
+    return html`<section>
+      <p class=${cx("mb-2 px-3 text-[11px] font-bold uppercase tracking-[0.16em] text-slate-400", so)}>${rotulo}</p>
+      ${recolhido ? html`<div class="mx-2 mb-3 hidden h-px bg-white/[0.08] lg:block"></div>` : null}
+      <div class="space-y-1">${vis}</div>
+    </section>`;
+  };
+
   const grupo = (g) => {
-    if (g.id === "bc") return linkItem(g.nome, g.icone, "/base", bcActive);
+    if (g.id === "bc") return linkItem(g.nome, ICONE_GRUPO.bc, "/base", bcActive);
     const aberto = openGroups.has(g.id);
     const algumAtivo = p0 === g.id;
     return html`
       <div>
-        <button onClick=${() => toggle(g.id)}
-          class=${cx("flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition",
-            algumAtivo ? "font-medium text-brand-dark" : "text-ink/70 hover:bg-black/[0.04]")}>
-          <span class="w-5 text-center text-[15px] leading-none">${g.icone}</span>
-          <span class="flex-1 truncate text-left">${g.nome}</span>
-          <span class="text-xs text-muted">${aberto ? "▾" : "▸"}</span>
+        <button type="button" aria-expanded=${aberto} title=${recolhido ? g.nome : undefined}
+          onClick=${() => { if (recolhido && window.matchMedia("(min-width: 1024px)").matches) { recolher(false); setOpenGroups((s) => new Set([...s, g.id])); } else toggle(g.id); }}
+          class=${cx("group flex h-11 w-full items-center gap-3 rounded-xl px-3 text-left transition",
+            algumAtivo ? "bg-white/[0.06] text-white" : "text-slate-300 hover:bg-white/[0.06] hover:text-white",
+            recolhido && "lg:justify-center lg:px-0")}>
+          <${IconeOS} nome=${ICONE_GRUPO[g.id] || "book"} class=${cx("h-5 w-5 shrink-0", algumAtivo ? "text-emerald-400" : "text-slate-400 group-hover:text-emerald-400")} />
+          <span class=${cx("flex-1 truncate text-[14px] font-bold tracking-tight", so)}>${g.nome}</span>
+          <${IconeOS} nome="chevron" class=${cx("h-4 w-4 shrink-0 text-slate-500 transition-transform", aberto ? "" : "-rotate-90", so)} />
         </button>
         ${aberto ? html`
-          <div class="mb-1 ml-4 space-y-0.5 border-l border-line pl-2">
+          <div class=${cx("mb-1 ml-[1.35rem] mt-1 space-y-0.5 border-l border-white/[0.08] pl-3", so)}>
             ${g.itens.map((it) => {
               const target = "/" + g.id + "/" + it.slug;
-              const active = route.path === target;
+              const active = route.path === target || route.path.startsWith(target + "/");
               return html`
-                <a href=${"#" + target} onClick=${() => setOpen(false)}
-                  class=${cx("block truncate rounded-lg px-3 py-1.5 text-sm transition",
-                    active ? "bg-brand-light font-medium text-brand-dark" : "text-ink/60 hover:bg-black/[0.04]")}>
-                  ${it.nome}
+                <a href=${"#" + target} onClick=${fechar} aria-current=${active ? "page" : undefined}
+                  class=${cx("flex h-9 items-center truncate rounded-lg px-3 text-[13px] font-semibold transition",
+                    active ? "bg-emerald-500 text-[#07110e] shadow-[0_12px_30px_-16px_rgba(16,185,129,0.8)]" : "text-slate-400 hover:bg-white/[0.06] hover:text-white")}>
+                  <span class="truncate">${it.nome}</span>
                 </a>`;
             })}
           </div>` : null}
       </div>`;
   };
 
-  const sidebar = html`
-    <div class="flex h-full flex-col">
-      <div class="flex items-center gap-3 border-b border-line px-4 py-4">
-        <div class="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-brand-light text-sm font-semibold text-brand-dark">
-          ${iniciais(me.nome || me.email)}
-        </div>
-        <div class="min-w-0">
-          <div class="truncate text-sm font-semibold text-ink">${me.nome || me.email}</div>
-          <div class="truncate text-xs text-muted" title=${rotuloAcesso(me)}>${rotuloAcesso(me)}</div>
-        </div>
-      </div>
-
-      <nav class="flex-1 space-y-0.5 overflow-y-auto px-2 py-3">
-        ${ok("/squad") ? linkItem("Squad de Agentes", "🤖", "/squad", route.path === "/squad") : null}
-        ${ok("/") ? linkItem("Início", "🏠", "/", homeActive) : null}
-        ${ok("/farol") ? linkItem("Farol do Lucro", "🚦", "/farol", p0 === "farol") : null}
-        ${ok("/pedir-ia") ? linkItem("Pedir a IA", "✨", "/pedir-ia", route.path === "/pedir-ia") : null}
-        ${ok("/squad") ? html`<div class="my-1 border-t border-line"></div>` : null}
-        ${nav.map(grupo)}
+  const aside = html`
+    <aside aria-label="Menu principal"
+      class=${cx("fixed inset-y-0 left-0 z-50 flex w-72 flex-col overflow-hidden border-r border-white/[0.08] bg-[#07110e] text-slate-400 transition-[width,transform] duration-300 lg:shadow-[24px_0_70px_-45px_rgba(0,0,0,0.9)]",
+        open ? "translate-x-0 shadow-[24px_0_70px_-45px_rgba(0,0,0,0.9)]" : "-translate-x-full lg:translate-x-0", recolhido ? "lg:w-20" : "lg:w-72")}>
+      <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_15%_0%,rgba(16,185,129,0.18),transparent_26rem)]"></div>
+      <a href=${ok("/") ? "#/" : "#/perfil"} onClick=${fechar}
+        class=${cx("relative flex h-20 shrink-0 items-center gap-3 border-b border-white/[0.06] px-5", recolhido && "lg:justify-center lg:px-0")}>
+        <span class="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-emerald-500 text-[13px] font-black tracking-tight text-[#07110e] shadow-[0_12px_30px_-16px_rgba(16,185,129,0.8)]">TI</span>
+        <span class=${cx("min-w-0", so)}>
+          <span class="block truncate text-[15px] font-black tracking-tight text-white">Tia do Inglês</span>
+          <span class="block truncate text-[10px] font-black uppercase tracking-[0.2em] text-emerald-400">Sistema Operacional</span>
+        </span>
+      </a>
+      <nav ref=${navRef} class="os-sidebar relative flex-1 space-y-7 overflow-y-auto px-3 py-6">
+        ${secao("Visão geral", [
+          ok("/") ? linkItem("Início", "home", "/", homeActive) : null,
+          ok("/farol") ? linkItem("Farol do Lucro", "gauge", "/farol", p0 === "farol") : null,
+          ok("/pedir-ia") ? linkItem("Pedir a IA", "sparkles", "/pedir-ia", route.path === "/pedir-ia") : null,
+          ok("/squad") ? linkItem("Squad de Agentes", "bot", "/squad", route.path === "/squad") : null,
+        ])}
+        ${secao("Áreas", nav.map(grupo))}
+        ${secao("Conta", [
+          ok("/ferramentas") ? linkItem("Ferramentas", "wrench", "/ferramentas", route.path === "/ferramentas") : null,
+          ok("/admin") && ehAdmin(me) ? linkItem("Administração", "settings", "/admin", route.path === "/admin") : null,
+          ok("/perfil") ? linkItem("Meu perfil", "user", "/perfil", route.path === "/perfil") : null,
+        ])}
       </nav>
+      ${cfg.AUTH_MODE === "open" ? null : html`
+        <div class="relative border-t border-white/[0.06] p-3">
+          <button type="button" onClick=${() => sairDoSistema()} title=${recolhido ? "Sair com segurança" : undefined}
+            class=${cx("group flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left text-slate-400 transition hover:bg-rose-500/10 hover:text-rose-300", recolhido && "lg:justify-center lg:px-0")}>
+            <${IconeOS} nome="logout" class="h-5 w-5 shrink-0" />
+            <span class=${cx("text-[13px] font-bold", so)}>Sair com segurança</span>
+          </button>
+        </div>`}
+    </aside>`;
 
-      <div class="space-y-0.5 border-t border-line px-2 py-2">
-        ${ok("/ferramentas") ? linkItem("Ferramentas", "🧰", "/ferramentas", route.path === "/ferramentas") : null}
-        ${ok("/admin") && ehAdmin(me) ? linkItem("Administração", "⚙️", "/admin", route.path === "/admin") : null}
-        ${ok("/perfil") ? linkItem("Meu perfil", "👤", "/perfil", route.path === "/perfil") : null}
-        ${cfg.AUTH_MODE === "open" ? null : html`
-          <button
-            class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-ink/70 hover:bg-black/[0.04]"
-            onClick=${async () => { await sb.auth.signOut(); location.hash = "/"; }}>
-            <span class="w-5 text-center text-[15px] leading-none">↩︎</span> Sair
-          </button>`}
+  const podeDesfazer = escopoDesf && podeEscreverRota(me, route.path);
+  const header = html`
+    <header class="sticky top-0 z-30 flex h-16 w-full items-center justify-between gap-3 border-b border-slate-200/70 bg-white/85 px-4 backdrop-blur-xl md:px-6">
+      <div class="flex min-w-0 items-center gap-3 md:gap-5">
+        <button type="button" onClick=${alternarMenu} aria-label="Alternar menu"
+          class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 shadow-sm transition hover:border-emerald-200 hover:text-emerald-700 active:scale-95">
+          <${IconeOS} nome="menu" class="h-[18px] w-[18px]" />
+        </button>
+        <div class="hidden h-7 w-px bg-slate-200 sm:block"></div>
+        <div class="min-w-0">
+          <p class="hidden truncate text-[10px] font-black uppercase tracking-[0.18em] text-emerald-700 sm:block">${grupoAtual}</p>
+          <h2 class="truncate text-base font-black tracking-tight text-slate-950 md:text-lg">${titulo || "Sistema Operacional"}</h2>
+        </div>
       </div>
-    </div>`;
+      <div class="flex shrink-0 items-center gap-3">
+        ${podeDesfazer ? html`<${BotaoDesfazer} key=${escopoDesf} escopo=${escopoDesf} />` : null}
+        <a href=${ok("/perfil") ? "#/perfil" : undefined} class="flex items-center gap-3 rounded-xl" title="Meu perfil">
+          <span class="hidden text-right md:block">
+            <span class="block max-w-52 truncate text-xs font-black text-slate-900">${me.nome || me.email}</span>
+            <span class="mt-0.5 block max-w-52 truncate text-[10px] font-black uppercase tracking-[0.18em] text-emerald-700" title=${rotuloAcesso(me)}>${rotuloAcesso(me)}</span>
+          </span>
+          <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-[#07110e] text-[13px] font-black text-emerald-400 shadow-sm">${iniciais(me.nome || me.email)}</span>
+        </a>
+      </div>
+    </header>`;
 
   return html`
-    <div class="min-h-screen lg:flex">
-      <aside class="hidden w-60 shrink-0 border-r border-line bg-sidebar lg:block">
-        <div class="sticky top-0 h-screen">${sidebar}</div>
-      </aside>
-
-      <div class="flex items-center justify-between border-b border-line bg-sidebar px-4 py-3 lg:hidden">
-        <span class="text-sm font-semibold text-ink">Sistema Operacional</span>
-        <button class="rounded-md p-2 text-muted hover:bg-black/[0.04]" onClick=${() => setOpen(true)}>☰</button>
+    <div class="min-h-screen bg-[#f5f7f6]">
+      ${open ? html`<button type="button" aria-label="Fechar menu" onClick=${fechar} class="fixed inset-0 z-40 bg-slate-950/55 backdrop-blur-sm lg:hidden"></button>` : null}
+      ${aside}
+      <div class=${cx("min-w-0 transition-[padding] duration-300", recolhido ? "lg:pl-20" : "lg:pl-72")}>
+        ${header}
+        <main class="os-main min-w-0">
+          ${fullBleed
+            ? children
+            : finWide
+            ? html`<div class="fin-shell">${children}</div>`
+            : html`<div class="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">${children}</div>`}
+        </main>
       </div>
-      ${open && html`
-        <div class="fixed inset-0 z-40 lg:hidden">
-          <div class="absolute inset-0 bg-ink/30" onClick=${() => setOpen(false)}></div>
-          <div class="absolute left-0 top-0 h-full w-72 bg-sidebar shadow-xl">${sidebar}</div>
-        </div>`}
-
-      <main class="min-w-0 flex-1">
-        ${fullBleed
-          ? children
-          : finWide
-          ? html`<div class="fin-shell">
-              ${escopoDesf && podeEscreverRota(me, route.path) ? html`<div class="fin-shell-desfazer"><${BotaoDesfazer} key=${escopoDesf} escopo=${escopoDesf} /></div>` : null}
-              ${children}
-            </div>`
-          : html`<div class="mx-auto max-w-5xl px-4 py-7 sm:px-6 lg:px-10 lg:py-10">
-              ${escopoDesf && podeEscreverRota(me, route.path) ? html`<div class="mb-3 flex justify-end"><${BotaoDesfazer} key=${escopoDesf} escopo=${escopoDesf} /></div>` : null}
-              ${children}
-            </div>`}
-      </main>
     </div>`;
 }
 
@@ -1193,7 +1447,7 @@ function Dashboard({ me, sections }) {
 
   return html`
     <div>
-      <h1 class="text-2xl font-semibold text-ink">Base de Conhecimento</h1>
+      <h1 class="os-titulo text-2xl sm:text-[1.75rem]">Base de Conhecimento</h1>
       <p class="mt-1 max-w-2xl text-sm text-muted">
         Tudo sobre a empresa, a metodologia, o produto, a cliente e os resultados — para que todas as áreas
         conheçam bem o que fazemos e como pensamos.
@@ -1213,7 +1467,7 @@ function Dashboard({ me, sections }) {
         : html`
           <div class="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             ${sections.map((s) => html`
-              <a href=${"#/secao/" + s.slug} class="group rounded-xl border border-line bg-white p-4 transition hover:border-brand/40 hover:shadow-sm">
+              <a href=${"#/secao/" + s.slug} class="group rounded-[1.35rem] border border-line bg-white shadow-card p-4 transition hover:border-emerald-200 hover:shadow-sm">
                 <div class="flex items-center gap-2 text-lg">${s.icone || "📄"}<span class="text-base font-semibold text-ink">${s.nome}</span></div>
                 <p class="mt-1.5 line-clamp-3 text-sm text-muted">${s.descricao}</p>
                 <div class="mt-3 text-xs text-muted">
@@ -1250,7 +1504,7 @@ function SectionPage({ slug, me, sections, onSectionsChanged }) {
   useEffect(() => { setDocs(null); load(); }, [load]);
   useAoDesfazer("base", () => { onSectionsChanged && onSectionsChanged(); load(); });
 
-  if (!section) return html`<${Empty} title="Seção não encontrada" icon="❓"><a class="text-brand" href="#/base">Voltar à Base de Conhecimento</a><//>`;
+  if (!section) return html`<${Empty} title="Seção não encontrada" icon="❓"><a class="text-emerald-700" href="#/base">Voltar à Base de Conhecimento</a><//>`;
 
   const allTags = useMemo(() => {
     const set = new Set();
@@ -1271,8 +1525,8 @@ function SectionPage({ slug, me, sections, onSectionsChanged }) {
     <div>
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div class="flex items-center gap-2 text-sm text-muted"><a href="#/base" class="hover:text-ink/75">Base de Conhecimento</a> / <span>${section.nome}</span></div>
-          <h1 class="mt-1 flex items-center gap-2 text-2xl font-semibold text-ink">${section.icone || "📄"} ${section.nome}</h1>
+          <div class="os-eyebrow"><a href="#/base">Base de Conhecimento</a> / <span>${section.nome}</span></div>
+          <h1 class="mt-2 flex items-center gap-2 os-titulo text-2xl sm:text-[1.75rem]">${section.icone || "📄"} ${section.nome}</h1>
         </div>
         <div class="flex gap-2">
           ${temArea(me, "bc") && html`<${Btn} variant="ghost" onClick=${() => setEditing(true)}>Editar descrição<//>`}
@@ -1342,7 +1596,7 @@ function SectionEditModal({ section, onClose, onSaved }) {
 function DocTable({ docs, showSection }) {
   if (!docs.length) return null;
   return html`
-    <div class="overflow-x-auto rounded-xl border border-line bg-white">
+    <div class="overflow-x-auto rounded-[1.35rem] border border-line bg-white shadow-card">
       <table class="w-full min-w-[640px] text-left text-sm">
         <thead class="border-b border-line text-xs uppercase tracking-wide text-muted">
           <tr>
@@ -1396,7 +1650,7 @@ function Markdown({ text }) {
     try { return sanitizeHtml(marked.parse(text || "")); }
     catch (_) { return "<pre>" + (text || "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) + "</pre>"; }
   }, [text]);
-  return html`<div class="prose-doc rounded-xl border border-line bg-white p-5" dangerouslySetInnerHTML=${{ __html: htmlStr }}></div>`;
+  return html`<div class="prose-doc rounded-[1.35rem] border border-line bg-white shadow-card p-5" dangerouslySetInnerHTML=${{ __html: htmlStr }}></div>`;
 }
 
 // Converte Markdown (o que a IA gera) para o subconjunto de formatacao que o
@@ -1549,7 +1803,7 @@ function DocDetail({ id, me, sections }) {
 
   useEffect(() => { setDoc(null); setNotFound(false); load(); }, [load]);
 
-  if (notFound) return html`<${Empty} title="Documento não encontrado" icon="🔍"><a class="text-brand" href="#/base">Voltar à Base de Conhecimento</a><//>`;
+  if (notFound) return html`<${Empty} title="Documento não encontrado" icon="🔍"><a class="text-emerald-700" href="#/base">Voltar à Base de Conhecimento</a><//>`;
   if (!doc) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
 
   const canEdit = temArea(me, "bc");
@@ -1571,13 +1825,13 @@ function DocDetail({ id, me, sections }) {
 
   return html`
     <div>
-      <div class="flex items-center gap-2 text-sm text-muted">
-        <a href="#/base" class="hover:text-ink/75">Base de Conhecimento</a> /
-        <a href=${"#/secao/" + doc.section.slug} class="hover:text-ink/75">${doc.section.nome}</a>
+      <div class="os-eyebrow flex flex-wrap items-center gap-2">
+        <a href="#/base">Base de Conhecimento</a> /
+        <a href=${"#/secao/" + doc.section.slug}>${doc.section.nome}</a>
       </div>
 
       <div class="mt-2 flex flex-wrap items-start justify-between gap-3">
-        <h1 class="text-2xl font-semibold text-ink">${doc.titulo}</h1>
+        <h1 class="os-titulo text-2xl sm:text-[1.75rem]">${doc.titulo}</h1>
         <div class="flex flex-wrap gap-2">
           ${canEdit && html`<${Btn} variant="ghost" onClick=${() => setShowEdit(true)}>Editar<//>`}
           ${canEdit && html`<${Btn} onClick=${() => setShowNewVersion(true)}>+ Nova versão<//>`}
@@ -1613,7 +1867,7 @@ function DocDetail({ id, me, sections }) {
               <li key=${v.id}>
                 <button
                   class=${cx("w-full rounded-lg border px-3 py-2 text-left text-sm transition",
-                    v.id === selVersion ? "border-brand/40 bg-brand-light" : "border-line bg-white hover:bg-black/[0.04]")}
+                    v.id === selVersion ? "border-emerald-300 bg-brand-light" : "border-line bg-white hover:bg-black/[0.04]")}
                   onClick=${() => setSelVersion(v.id)}
                 >
                   <div class="flex items-center justify-between">
@@ -1654,7 +1908,7 @@ function SourceInput({ value, onChange }) {
   const v = value;
   const tab = (m, label) => html`
     <button type="button" onClick=${() => onChange({ ...v, mode: m })}
-      class=${cx("rounded-lg px-3 py-1.5", v.mode === m ? "bg-brand text-white" : "bg-black/[0.05] text-ink/75")}>${label}</button>`;
+      class=${cx("rounded-lg px-3 py-1.5 text-sm font-bold transition", v.mode === m ? "bg-[#07110e] text-white shadow" : "bg-slate-100 text-slate-500 hover:text-slate-800")}>${label}</button>`;
   return html`
     <div class="space-y-3">
       <div class="flex flex-wrap gap-2 text-sm">
@@ -1892,7 +2146,7 @@ function NewDocPage({ me, sections, query }) {
 
   return html`
     <form onSubmit=${save}>
-      <h1 class="text-2xl font-semibold text-ink">Novo documento</h1>
+      <h1 class="os-titulo text-2xl sm:text-[1.75rem]">Novo documento</h1>
       <div class="mt-5 max-w-2xl space-y-5">
         <${DocFields} f=${f} setF=${setF} sections=${sections} profiles=${profiles} />
         <${SugestaoIA} f=${f} src=${src} sections=${sections}
@@ -1902,7 +2156,7 @@ function NewDocPage({ me, sections, query }) {
             tags: [...new Set([...(cur.tags ? cur.tags.split(",").map((t) => t.trim()).filter(Boolean) : []), ...tags])].join(", "),
           }))} />
         <div>
-          <span class="mb-1 block text-sm font-medium text-ink">Arquivo, link ou texto <span class="text-brand">*</span></span>
+          <span class="mb-1 block text-sm font-medium text-ink">Arquivo, link ou texto <span class="text-emerald-700">*</span></span>
           <${SourceInput} value=${src} onChange=${setSrc} />
         </div>
         <div class="flex gap-2">
@@ -1956,9 +2210,9 @@ function NovaSenhaForm({ onSaved, botao = "Salvar nova senha", autoFocus = false
       ${campo("Confirme a senha nova", pw2, setPw2, "new-password", null)}
       <ul class="space-y-1 rounded-lg bg-black/[0.03] px-3 py-2.5 text-sm" aria-live="polite">
         ${regras.itens.map((i) => html`
-          <li key=${i.id} class=${cx("flex items-center gap-2", i.ok ? "text-[#4c6b3f]" : "text-muted")}>
+          <li key=${i.id} class=${cx("flex items-center gap-2", i.ok ? "text-[#047857]" : "text-muted")}>
             <span class=${cx("grid h-4 w-4 shrink-0 place-items-center rounded-full text-[10px] font-bold",
-              i.ok ? "bg-[#dcecd5] text-[#4c6b3f]" : "bg-black/[0.06] text-transparent")}>${i.ok ? "✓" : "·"}</span>
+              i.ok ? "bg-[#d1fae5] text-[#047857]" : "bg-black/[0.06] text-transparent")}>${i.ok ? "✓" : "·"}</span>
             ${i.texto}
           </li>`)}
         <li class="flex items-center gap-2 text-muted">
@@ -1966,7 +2220,7 @@ function NovaSenhaForm({ onSaved, botao = "Salvar nova senha", autoFocus = false
           Diferente da senha atual (conferido ao salvar)
         </li>
       </ul>
-      ${erro ? html`<div role="alert" class="rounded-lg bg-[#f4e0db] px-3 py-2 text-sm text-[#a44b43]">${erro}</div>` : null}
+      ${erro ? html`<div role="alert" class="rounded-lg bg-[#ffe4e6] px-3 py-2 text-sm text-[#be123c]">${erro}</div>` : null}
       <${Btn} type="submit" loading=${busy} class="w-full sm:w-auto">${botao}<//>
     </form>`;
 }
@@ -1986,17 +2240,17 @@ function TrocaSenhaObrigatoria({ me, onDone }) {
   }
   return html`
     <div class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-gradient-to-b from-card to-bg px-4 py-10 sm:items-center">
-      <div role="dialog" aria-modal="true" aria-labelledby="troca-senha-titulo" class="w-full max-w-md rounded-2xl bg-white p-6 shadow-sm ring-1 ring-line">
-        <h1 id="troca-senha-titulo" class="text-lg font-semibold text-ink">Crie a sua senha</h1>
+      <div role="dialog" aria-modal="true" aria-labelledby="troca-senha-titulo" class="w-full max-w-md rounded-[2rem] border border-slate-200 bg-white p-6 shadow-painel sm:p-8">
+        <h1 id="troca-senha-titulo" class="os-titulo text-2xl">Crie a sua senha</h1>
         <p class="mt-2 text-sm text-ink/75">
           Olá${me.nome ? ", " + me.nome.split(" ")[0] : ""}! Você entrou com uma senha temporária.
           Para continuar, escolha uma senha só sua. Ela vale a partir do próximo acesso.
         </p>
-        ${aviso ? html`<div role="alert" class="mt-4 rounded-lg bg-[#f6efd6] px-3 py-2 text-sm text-[#7a6420]">${aviso}</div>` : null}
+        ${aviso ? html`<div role="alert" class="mt-4 rounded-lg bg-[#fef3c7] px-3 py-2 text-sm text-[#92400e]">${aviso}</div>` : null}
         <div class="mt-5"><${NovaSenhaForm} onSaved=${concluido} botao="Salvar e entrar" autoFocus /></div>
         <div class="mt-5 flex items-center justify-between border-t border-line pt-4 text-xs text-muted">
           <span class="truncate">${me.email}</span>
-          <button class="font-medium text-muted hover:text-ink" onClick=${async () => { await sb.auth.signOut(); location.hash = "/"; }}>Sair</button>
+          <button class="font-medium text-muted hover:text-ink" onClick=${() => sairDoSistema()}>Sair</button>
         </div>
       </div>
     </div>`;
@@ -2019,22 +2273,22 @@ function ProfilePage({ me, onProfileChanged }) {
 
   return html`
     <div class="max-w-lg">
-      <h1 class="text-2xl font-semibold text-ink">Meu perfil</h1>
+      <h1 class="os-titulo text-2xl sm:text-[1.75rem]">Meu perfil</h1>
       <div class="mt-6 space-y-6">
-        <div class="rounded-xl border border-line bg-white p-5">
+        <div class="rounded-[1.35rem] border border-line bg-white shadow-card p-5">
           <div class="text-sm text-muted">E-mail</div>
           <div class="font-medium text-ink">${me.email}</div>
           <div class="mt-1 text-xs text-muted">Acesso: ${rotuloAcesso(me)}</div>
         </div>
         ${!ehAdmin(me) && areasDe(me).length === 0 ? html`
-          <div role="status" class="rounded-xl bg-[#f6efd6] px-4 py-3 text-sm text-[#7a6420]">
+          <div role="status" class="rounded-xl bg-[#fef3c7] px-4 py-3 text-sm text-[#92400e]">
             Peça ao ADM para liberar suas abas.
           </div>` : null}
-        <div class="rounded-xl border border-line bg-white p-5">
+        <div class="rounded-[1.35rem] border border-line bg-white shadow-card p-5">
           <${Field} label="Nome"><input class=${inputCls} value=${nome} onInput=${(e) => setNome(e.target.value)} /><//>
           <div class="mt-3"><${Btn} loading=${busy} onClick=${saveName}>Salvar nome<//></div>
         </div>
-        <div class="rounded-xl border border-line bg-white p-5">
+        <div class="rounded-[1.35rem] border border-line bg-white shadow-card p-5">
           <h2 class="mb-3 font-medium text-ink">Trocar senha</h2>
           <${NovaSenhaForm} botao="Alterar senha" onSaved=${async () => { notify("Senha alterada.", "ok"); }} />
         </div>
@@ -2063,8 +2317,8 @@ function CamposAcesso({ valor, onChange, admBloqueado = false }) {
   const marcar = (area, sim) => onChange({ admin: false, areas: AREAS.filter((a) => a === area ? sim : valor.areas.includes(a)) });
   return html`
     <div class="space-y-2">
-      <label class=${cx("flex items-start gap-2.5 rounded-lg border px-3 py-2.5", valor.admin ? "border-brand/40 bg-brand-light/50" : "border-line")}>
-        <input type="checkbox" class="mt-0.5 h-4 w-4 rounded border-line text-brand focus:ring-brand" checked=${valor.admin}
+      <label class=${cx("flex items-start gap-2.5 rounded-lg border px-3 py-2.5", valor.admin ? "border-emerald-300 bg-brand-light/50" : "border-line")}>
+        <input type="checkbox" class="mt-0.5 h-4 w-4 rounded border-line accent-emerald-600" checked=${valor.admin}
           disabled=${admBloqueado} onChange=${(e) => onChange({ admin: e.target.checked, areas: valor.areas })} />
         <span>
           <span class="block text-sm font-medium text-ink">ADM</span>
@@ -2074,7 +2328,7 @@ function CamposAcesso({ valor, onChange, admBloqueado = false }) {
       <div class=${cx("grid gap-1.5 sm:grid-cols-2", valor.admin && "opacity-50")}>
         ${NAV.map((g) => html`
           <label key=${g.id} class="flex items-center gap-2.5 rounded-lg border border-line px-3 py-2 text-sm text-ink">
-            <input type="checkbox" class="h-4 w-4 rounded border-line text-brand focus:ring-brand"
+            <input type="checkbox" class="h-4 w-4 rounded border-line accent-emerald-600"
               checked=${valor.admin || valor.areas.includes(g.id)} disabled=${valor.admin}
               onChange=${(e) => marcar(g.id, e.target.checked)} />
             <span>${g.icone} ${g.nome}</span>
@@ -2157,14 +2411,14 @@ function AdminPage({ me }) {
   return html`
     <div>
       <div class="flex flex-wrap items-center justify-between gap-2">
-        <h1 class="text-2xl font-semibold text-ink">Administração</h1>
+        <h1 class="os-titulo text-2xl sm:text-[1.75rem]">Administração</h1>
         ${tab === "usuarios" ? html`<${Btn} onClick=${() => setShowCreate(true)}>+ Novo usuário<//>` : null}
       </div>
 
       <div class="mt-4 flex gap-2 border-b border-line">
-        <button class=${cx("px-3 py-2 text-sm font-medium", tab === "usuarios" ? "border-b-2 border-brand text-ink" : "text-muted hover:text-ink")}
+        <button class=${cx("px-3 py-2 text-sm font-medium", tab === "usuarios" ? "border-b-2 border-emerald-500 text-ink" : "text-muted hover:text-ink")}
           onClick=${() => setTab("usuarios")}>Usuários</button>
-        <button class=${cx("px-3 py-2 text-sm font-medium", tab === "sincronizacoes" ? "border-b-2 border-brand text-ink" : "text-muted hover:text-ink")}
+        <button class=${cx("px-3 py-2 text-sm font-medium", tab === "sincronizacoes" ? "border-b-2 border-emerald-500 text-ink" : "text-muted hover:text-ink")}
           onClick=${() => setTab("sincronizacoes")}>Sincronizações</button>
       </div>
 
@@ -2172,7 +2426,7 @@ function AdminPage({ me }) {
       <div>
         <p class="mt-3 text-sm text-muted">Crie contas, escolha as abas de cada pessoa (ou ADM) e gere senhas temporárias. Não é necessário e-mail de confirmação.</p>
 
-        <div class="mt-4 overflow-x-auto rounded-xl border border-line bg-white">
+        <div class="mt-4 overflow-x-auto rounded-[1.35rem] border border-line bg-white shadow-card">
           ${users === null
             ? html`<div class="p-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
             : html`
@@ -2189,7 +2443,7 @@ function AdminPage({ me }) {
                     </td>
                     <td class="px-4 py-3">
                       <${PillsAcesso} u=${u} />
-                      ${u.id !== me.id ? html`<button class="mt-1.5 block text-xs font-medium text-brand hover:underline" onClick=${() => setEditando(u)}>Editar abas</button>` : null}
+                      ${u.id !== me.id ? html`<button class="mt-1.5 block text-xs font-medium text-emerald-700 hover:underline" onClick=${() => setEditando(u)}>Editar abas</button>` : null}
                     </td>
                     <td class="px-4 py-3 text-muted">${fmtDate(u.created_at)}</td>
                     <td class="px-4 py-3 text-right">
@@ -2234,7 +2488,7 @@ function SincronizacoesPage() {
     <div>
       <p class="mt-3 text-sm text-muted">Tarefas de sincronização e checagem que rodam sozinhas todo dia. Use o botão pra rodar uma agora, sem esperar o horário programado.</p>
 
-      <div class="mt-4 overflow-x-auto rounded-xl border border-line bg-white">
+      <div class="mt-4 overflow-x-auto rounded-[1.35rem] border border-line bg-white shadow-card">
         ${rows === null
           ? html`<div class="p-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
           : html`
@@ -2419,7 +2673,7 @@ function FerramentasPage({ me }) {
     <div>
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 class="flex items-center gap-2 text-2xl font-semibold text-ink">🧰 Ferramentas</h1>
+          <h1 class="flex items-center gap-2 os-titulo text-2xl sm:text-[1.75rem]">Ferramentas</h1>
           <p class="mt-1 max-w-2xl text-sm text-muted">
             Tudo que a OS usa ou que fica conectado à operação, com o status atual e o que cada uma faz aqui.
           </p>
@@ -2434,7 +2688,7 @@ function FerramentasPage({ me }) {
         ${Object.entries(resumo).map(([s, n]) => html`
           <button class="inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 ring-1 ring-line hover:bg-black/[0.04]"
             onClick=${() => setStatusFilter(statusFilter === s ? "" : s)}>
-            <span class=${cx("inline-block h-1.5 w-1.5 rounded-full", (FERRAMENTA_STATUS[s] || {}).dot || "bg-[#b3aca0]")}></span>
+            <span class=${cx("inline-block h-1.5 w-1.5 rounded-full", (FERRAMENTA_STATUS[s] || {}).dot || "bg-[#94a3b8]")}></span>
             ${(FERRAMENTA_STATUS[s] || {}).label || s}: <b>${n}</b>
           </button>`)}
       </div>
@@ -2452,7 +2706,7 @@ function FerramentasPage({ me }) {
 
       <div class="mt-4 space-y-2">
         ${filtered.map((f) => html`
-          <div key=${f.id} class="rounded-xl border border-line bg-white p-4">
+          <div key=${f.id} class="rounded-[1.35rem] border border-line bg-white shadow-card p-4">
             <div class="flex flex-wrap items-start justify-between gap-3">
               <div class="min-w-0">
                 <div class="flex flex-wrap items-center gap-2">
@@ -2467,7 +2721,7 @@ function FerramentasPage({ me }) {
                   ${f.check_type === "auto" && f.ultimo_check_at
                     ? html`<span>Verificado ${fmtDate(f.ultimo_check_at, true)}${f.ultimo_check_detalhe ? " · " + f.ultimo_check_detalhe : ""}</span>` : null}
                   ${f.check_type === "manual" && f.status_manual_nota ? html`<span>${f.status_manual_nota}</span>` : null}
-                  ${f.url ? html`<a href=${f.url} target="_blank" rel="noopener" class="text-brand hover:underline">abrir ↗</a>` : null}
+                  ${f.url ? html`<a href=${f.url} target="_blank" rel="noopener" class="text-emerald-700 hover:underline">abrir ↗</a>` : null}
                 </div>
               </div>
               ${canEdit && html`<button class="shrink-0 text-xs text-muted hover:text-ink" onClick=${() => setEditing(f)}>editar</button>`}
@@ -2613,8 +2867,8 @@ function FerramentaModal({ ferramenta, me, onClose, onSaved }) {
 function ModuloEmConstrucao({ grupo, item }) {
   return html`
     <div>
-      <div class="text-sm text-muted">${grupo.icone} ${grupo.nome}</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">${item.nome}</h1>
+      <div class="os-eyebrow">${grupo.nome}</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">${item.nome}</h1>
       <div class="mt-6 rounded-2xl border border-dashed border-line bg-card/70 px-6 py-12 text-center">
         <div class="text-4xl">🚧</div>
         <div class="mt-3 font-medium text-ink">Módulo em construção</div>
@@ -2624,7 +2878,7 @@ function ModuloEmConstrucao({ grupo, item }) {
             <div class="text-xs font-semibold uppercase tracking-wide text-muted">Fontes de dados</div>
             <ul class="mt-1 space-y-1 text-sm">
               ${item.links.map(([label, url]) => html`
-                <li>· <a href=${url} target="_blank" rel="noopener" class="text-brand hover:underline">${label} ↗</a></li>`)}
+                <li>· <a href=${url} target="_blank" rel="noopener" class="text-emerald-700 hover:underline">${label} ↗</a></li>`)}
             </ul>
           </div>` : null}
         <p class="mx-auto mt-4 max-w-lg text-xs text-muted">
@@ -2658,14 +2912,14 @@ function PedirIA() {
 
   return html`
     <div class="max-w-2xl">
-      <h1 class="flex items-center gap-2 text-2xl font-semibold text-ink">✨ Pedir a IA</h1>
+      <h1 class="flex items-center gap-2 os-titulo text-2xl sm:text-[1.75rem]">Pedir a IA</h1>
       <p class="mt-1 text-sm text-muted">
         Pergunte em linguagem natural: sobre o próprio sistema, sobre o conteúdo da Base de Conhecimento
         (com as fontes), ou qualquer outra coisa.
       </p>
 
       ${configured === false && html`
-        <div class="mt-5 rounded-2xl border border-[#efd9d3] bg-[#faefec] p-5">
+        <div class="mt-5 rounded-2xl border border-[#fecdd3] bg-[#fff1f2] p-5">
           <div class="text-sm font-medium text-ink">IA ainda não conectada</div>
           <p class="mt-1 text-sm text-muted">
             Falta o segredo <code class="rounded bg-black/[0.05] px-1">ANTHROPIC_API_KEY</code> nas Edge Functions do Supabase.
@@ -2684,7 +2938,7 @@ function PedirIA() {
       </form>
 
       ${resp && html`
-        <div class="mt-5 rounded-2xl border border-line bg-card p-5">
+        <div class="mt-5 rounded-[1.6rem] border border-line bg-card shadow-card p-5">
           <div class="mb-2 flex justify-end">
             <${CopyRespostaBtn} text=${resp.resposta} />
           </div>
@@ -2853,7 +3107,7 @@ function CadastrarRespostaModal({ secaoSlug, me, onClose, onSalvo }) {
         <${Field} label="Tema" required>
           <input class=${inputCls} placeholder="Ex.: Renovação de acesso" value=${tema} onInput=${(e) => setTema(e.target.value)} />
           ${sugestaoTema && html`
-            <div class="mt-1.5 flex items-center justify-between gap-2 rounded-lg border border-[#cfe0d8] bg-[#eef6f1] px-3 py-2 text-xs text-[#3c6552]">
+            <div class="mt-1.5 flex items-center justify-between gap-2 rounded-lg border border-[#a7f3d0] bg-[#ecfdf5] px-3 py-2 text-xs text-[#065f46]">
               <span>💡 Já existe o tema padrão "<b>${sugestaoTema}</b>" — usar esse em vez de criar um novo?</span>
               <button type="button" class="shrink-0 font-medium underline" onClick=${() => setTema(sugestaoTema)}>Usar esse</button>
             </div>`}
@@ -2924,7 +3178,7 @@ function FaqFeedback({ interacaoId, secaoSlug, tema, pergunta, respostaIa, me, o
   if (status === "corrigindo")
     return html`
       <form onSubmit=${salvarCorrecao} class="mt-4 border-t border-line pt-3">
-        <label class="block text-sm font-medium text-ink">Escreva a resposta correta <span class="text-brand">*</span></label>
+        <label class="block text-sm font-medium text-ink">Escreva a resposta correta <span class="text-emerald-700">*</span></label>
         <textarea class=${cx(inputCls, "mt-1 min-h-[90px]")} placeholder="Qual é a resposta certa para esta pergunta?"
           value=${texto} onInput=${(e) => setTexto(e.target.value)} autofocus></textarea>
         <label class="mt-2 block text-xs font-medium text-muted">Tema (opcional, ajuda a organizar)</label>
@@ -2974,8 +3228,8 @@ function FaqPage({ me }) {
 
   return html`
     <div class="max-w-2xl">
-      <div class="text-sm text-muted">🤝 CS / Suporte</div>
-      <h1 class="mt-1 flex items-center gap-2 text-2xl font-semibold text-ink">💬 FAQ</h1>
+      <div class="os-eyebrow">CS / Suporte</div>
+      <h1 class="mt-2 flex items-center gap-2 os-titulo text-2xl sm:text-[1.75rem]">FAQ</h1>
       <p class="mt-1 text-sm text-muted">
         Pergunte sobre processos de CS/Suporte — a IA responde com base nos documentos da pasta
         <b>CS:Suporte</b> (dentro de <b>00. OS TIA DO INGLÊS</b> no Google Drive), sincronizados todo dia
@@ -2983,13 +3237,13 @@ function FaqPage({ me }) {
         resposta pode ser aceita ou corrigida logo abaixo.
       </p>
 
-      <div class="mt-3 flex items-center justify-between rounded-xl border border-line bg-card px-4 py-2.5 text-xs text-muted">
+      <div class="mt-3 flex items-center justify-between rounded-[1.35rem] border border-line bg-card shadow-card px-4 py-2.5 text-xs text-muted">
         <span>Base atual: ${base ? html`<b class="text-ink">${nf(base.total)}</b>` : "…"} documento(s) ${base && base.nome ? `em "${base.nome}"` : ""}</span>
-        ${rotaPermitida(me, "/secao/cs-suporte") ? html`<a href="#/secao/cs-suporte" class="font-medium text-brand hover:underline">ver documentos →</a>` : null}
+        ${rotaPermitida(me, "/secao/cs-suporte") ? html`<a href="#/secao/cs-suporte" class="font-medium text-emerald-700 hover:underline">ver documentos →</a>` : null}
       </div>
 
       ${configured === false && html`
-        <div class="mt-5 rounded-2xl border border-[#efd9d3] bg-[#faefec] p-5">
+        <div class="mt-5 rounded-2xl border border-[#fecdd3] bg-[#fff1f2] p-5">
           <div class="text-sm font-medium text-ink">IA ainda não conectada</div>
           <p class="mt-1 text-sm text-muted">
             Falta o segredo <code class="rounded bg-black/[0.05] px-1">ANTHROPIC_API_KEY</code> nas Edge Functions do Supabase.
@@ -3014,13 +3268,13 @@ function FaqPage({ me }) {
           onSalvo=${() => fetchUltimasCorrecoes(SECAO_SLUG).then(setUltimasCorrecoes)} />`}
 
       ${resp && html`
-        <div class="mt-5 rounded-2xl border border-line bg-card p-5">
+        <div class="mt-5 rounded-[1.6rem] border border-line bg-card shadow-card p-5">
           <div class="mb-2 flex items-center justify-between gap-3">
             ${resp.tema ? html`<div class="text-xs font-medium uppercase tracking-wide text-muted">Tema: ${resp.tema}</div>` : html`<div></div>`}
             <${CopyRespostaBtn} text=${resp.resposta} />
           </div>
           ${resp.confianca === "baixa" && html`
-            <div class="mb-3 rounded-lg border border-[#f0d9a8] bg-[#fdf5e6] px-3 py-2 text-xs text-[#8a6a1f]">
+            <div class="mb-3 rounded-lg border border-[#fcd34d] bg-[#fffbeb] px-3 py-2 text-xs text-[#b45309]">
               ⚠️ Confiança baixa — os documentos não cobrem isso com clareza. Revise esta resposta antes de confiar totalmente.
             </div>`}
           <${Markdown} text=${resp.resposta} />
@@ -3188,7 +3442,7 @@ function EnvioForm({ me, onSalvo, onCancelar }) {
   }
 
   return html`
-    <form onSubmit=${salvar} class="mt-3 rounded-2xl border border-line bg-card p-5">
+    <form onSubmit=${salvar} class="mt-3 rounded-[1.6rem] border border-line bg-card shadow-card p-5">
       <div class="grid gap-3 sm:grid-cols-2">
         <div class="sm:col-span-2">
           <${Field} label="Produto" required>
@@ -3285,8 +3539,8 @@ function EnvioDetalheModal({ envio, onClose, onAtualizado }) {
           <div class="mt-0.5 text-ink">${(envio.produtos || []).join(" · ") || "—"}</div></div>
         <div><div class="text-xs uppercase tracking-wide text-muted">Status</div>
           <div class="mt-0.5">${envio.status === "enviado"
-            ? html`<${Badge} class="bg-[#e3ecdf] text-[#4c6b3f]">Enviado<//>`
-            : html`<${Badge} class="bg-[#f3ecd8] text-[#8a6a1f]">Pendente<//>`}</div></div>
+            ? html`<${Badge} class="bg-[#d1fae5] text-[#047857]">Enviado<//>`
+            : html`<${Badge} class="bg-[#fef3c7] text-[#b45309]">Pendente<//>`}</div></div>
         <div><div class="text-xs uppercase tracking-wide text-muted">Data da venda</div>
           <div class="mt-0.5 text-ink">${envio.data_venda ? fmtDataISO(envio.data_venda) : "—"}</div></div>
         <div><div class="text-xs uppercase tracking-wide text-muted">Data do cadastro</div>
@@ -3343,8 +3597,8 @@ function EnviosLivrosPage({ me }) {
 
   return html`
     <div>
-      <div class="text-sm text-muted">🤝 CS / Suporte</div>
-      <h1 class="mt-1 flex items-center gap-2 text-2xl font-semibold text-ink">📦 Envios de Livros</h1>
+      <div class="os-eyebrow">CS / Suporte</div>
+      <h1 class="mt-2 flex items-center gap-2 os-titulo text-2xl sm:text-[1.75rem]">Envios de Livros</h1>
       <p class="mt-1 text-sm text-muted">
         Cadastro e acompanhamento dos envios de <b>Material Didático</b> e do livro
         <b>Mente Aberta e Língua Solta</b>.
@@ -3352,15 +3606,15 @@ function EnviosLivrosPage({ me }) {
 
       ${lista === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
         <div class="mt-5 grid gap-3 sm:grid-cols-2">
-          <div class="rounded-2xl border border-line bg-card p-5">
+          <div class="rounded-[1.6rem] border border-line bg-card shadow-card p-5">
             <div class="text-xs uppercase tracking-wide text-muted">Envios realizados</div>
             <div class="mt-1 text-3xl font-semibold text-ink">${nf(resumo.enviados)}</div>
           </div>
-          <div class=${cx("rounded-2xl border p-5", resumo.atrasados > 0 ? "border-[#e3b7ae] bg-[#faefec]" : "border-line bg-card")}>
+          <div class=${cx("rounded-2xl border p-5", resumo.atrasados > 0 ? "border-[#fda4af] bg-[#fff1f2]" : "border-line bg-card")}>
             <div class="text-xs uppercase tracking-wide text-muted">Envios pendentes</div>
-            <div class=${cx("mt-1 text-3xl font-semibold", resumo.atrasados > 0 ? "text-[#a44b43]" : "text-ink")}>${nf(resumo.pendentes)}</div>
+            <div class=${cx("mt-1 text-3xl font-semibold", resumo.atrasados > 0 ? "text-[#be123c]" : "text-ink")}>${nf(resumo.pendentes)}</div>
             ${resumo.atrasados > 0 && html`
-              <div class="mt-1.5 text-xs font-medium text-[#a44b43]">⚠️ ${resumo.atrasados} há mais de 7 dias sem envio</div>`}
+              <div class="mt-1.5 text-xs font-medium text-[#be123c]">⚠️ ${resumo.atrasados} há mais de 7 dias sem envio</div>`}
           </div>
         </div>
 
@@ -3400,7 +3654,7 @@ function EnviosLivrosPage({ me }) {
           </div>
         </div>
 
-        <div class="mt-3 overflow-x-auto rounded-2xl border border-line bg-card">
+        <div class="mt-3 overflow-x-auto rounded-[1.6rem] border border-line bg-card shadow-card">
           <table class="w-full min-w-[820px] text-sm">
             <thead>
               <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
@@ -3419,7 +3673,7 @@ function EnviosLivrosPage({ me }) {
                   return html`
                     <tr class="border-b border-line last:border-0 hover:bg-black/[0.02]">
                       <td class="px-4 py-2.5">
-                        <button type="button" class="font-medium text-ink hover:text-brand hover:underline" onClick=${() => setSelecionado(e)}>${e.nome}</button>
+                        <button type="button" class="font-medium text-ink hover:text-emerald-700 hover:underline" onClick=${() => setSelecionado(e)}>${e.nome}</button>
                         <div class="text-xs text-muted">${e.email || "—"}</div>
                       </td>
                       <td class="px-4 py-2.5 text-xs text-muted">${(e.produtos || []).join(" · ") || "—"}</td>
@@ -3427,10 +3681,10 @@ function EnviosLivrosPage({ me }) {
                       <td class="px-4 py-2.5 text-xs text-muted">${fmtDataISO(e.data_cadastro)}</td>
                       <td class="px-4 py-2.5">
                         ${e.status === "enviado"
-                          ? html`<${Badge} class="bg-[#e3ecdf] text-[#4c6b3f]">Enviado<//>`
+                          ? html`<${Badge} class="bg-[#d1fae5] text-[#047857]">Enviado<//>`
                           : html`<span class="flex items-center gap-1.5">
-                              <${Badge} class="bg-[#f3ecd8] text-[#8a6a1f]">Pendente<//>
-                              ${atrasado ? html`<span class="text-xs font-medium text-[#a44b43]">⚠️ atrasado</span>` : null}
+                              <${Badge} class="bg-[#fef3c7] text-[#b45309]">Pendente<//>
+                              ${atrasado ? html`<span class="text-xs font-medium text-[#be123c]">⚠️ atrasado</span>` : null}
                             </span>`}
                       </td>
                     </tr>`;
@@ -3793,12 +4047,12 @@ function DiagMetas({ metas, onChange, rascunho, setRascunho, disabled }) {
         ${lista.length === 0 ? html`<div class="text-sm text-muted">Nenhuma meta inserida ainda.</div>` :
           lista.map((m, i) => html`
             <div key=${i} class="grid items-center gap-2 rounded-xl border border-line bg-bg/60 p-2 sm:grid-cols-[28px_1fr_170px_auto]">
-              <span class="text-center text-sm font-semibold text-brand">${i + 1}</span>
+              <span class="text-center text-sm font-semibold text-emerald-700">${i + 1}</span>
               <input class=${inputCls} value=${m.descricao || ""} disabled=${disabled} aria-label=${"Meta " + (i + 1)}
                 onInput=${(e) => editar(i, "descricao", e.target.value)} />
               <input type="date" class=${inputCls} value=${m.data || ""} disabled=${disabled} aria-label=${"Data da meta " + (i + 1)}
                 onInput=${(e) => editar(i, "data", e.target.value)} />
-              ${!disabled ? html`<button type="button" class="px-2 text-sm text-[#a44b43] hover:underline" onClick=${() => remover(i)}>Remover</button>` : html`<span></span>`}
+              ${!disabled ? html`<button type="button" class="px-2 text-sm text-[#be123c] hover:underline" onClick=${() => remover(i)}>Remover</button>` : html`<span></span>`}
             </div>`)}
       </div>
     </div>`;
@@ -3819,7 +4073,7 @@ function DiagCampo({ c, valor, onChange, disabled }) {
       ${c.op.map((o) => html`
         <button type="button" disabled=${disabled} aria-pressed=${sel.includes(o)} onClick=${() => toggle(o)}
           class=${cx("rounded-full border px-4 py-1.5 text-sm font-medium transition disabled:opacity-60",
-            sel.includes(o) ? "border-brand bg-brand text-white" : "border-line bg-white text-ink hover:border-brand/50")}>
+            sel.includes(o) ? "border-[#07110e] bg-[#07110e] text-white" : "border-line bg-white text-ink hover:border-emerald-300")}>
           ${o}
         </button>`)}
     </div>`;
@@ -4063,7 +4317,7 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
       </div>
 
       ${DIAG_SECOES.map((s) => html`
-        <section class="mt-4 rounded-2xl border border-line bg-card p-5">
+        <section class="mt-4 rounded-[1.6rem] border border-line bg-card shadow-card p-5">
           <h2 class="text-sm font-semibold uppercase tracking-wider text-muted">${s.titulo}</h2>
           <div class="mt-3 grid gap-4 sm:grid-cols-2">
             ${s.campos.map((c) => c.t === "metas"
@@ -4073,11 +4327,11 @@ function DiagnosticoForm({ id, me, onVoltar, onCriado }) {
           </div>
         </section>`)}
 
-      <div class="mt-5 rounded-2xl border border-line bg-card p-5">
+      <div class="mt-5 rounded-[1.6rem] border border-line bg-card shadow-card p-5">
         ${row && row.drive_url ? html`
           <div class="mb-3 text-sm text-ink">Planilha no Drive:
-            <a class="font-medium text-brand hover:underline" href=${row.drive_url} target="_blank" rel="noopener">abrir planilha ↗</a></div>` : null}
-        ${erroConcluir ? html`<div class="mb-3 rounded-lg bg-[#faefec] px-3 py-2 text-sm text-[#a44b43]">${erroConcluir}</div>` : null}
+            <a class="font-medium text-emerald-700 hover:underline" href=${row.drive_url} target="_blank" rel="noopener">abrir planilha ↗</a></div>` : null}
+        ${erroConcluir ? html`<div class="mb-3 rounded-lg bg-[#fff1f2] px-3 py-2 text-sm text-[#be123c]">${erroConcluir}</div>` : null}
         <div class="flex flex-wrap items-center gap-2">
           ${canEdit ? html`
             <${Btn} type="button" loading=${concluindo} onClick=${concluir}>
@@ -4129,8 +4383,8 @@ function DiagnosticoPage({ me, query }) {
   }, [lista, busca]);
 
   const cabecalho = html`
-    <div class="text-sm text-muted">🤝 CS / Suporte</div>
-    <h1 class="mt-1 text-2xl font-semibold text-ink">Diagnóstico do Mentorado</h1>
+    <div class="os-eyebrow">CS / Suporte</div>
+    <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Diagnóstico do Mentorado</h1>
     <p class="mt-1 text-sm text-muted">Preencha durante ou depois da call. O rascunho é salvo sozinho; ao concluir, a planilha vai para o Drive.</p>`;
 
   if (id || novo) return html`<div>${cabecalho}
@@ -4147,7 +4401,7 @@ function DiagnosticoPage({ me, query }) {
           <input class=${cx(inputCls, "max-w-xs")} placeholder="Buscar por nome ou email" value=${busca} onInput=${(e) => setBusca(e.target.value)} />
           <span class="ml-auto text-xs text-muted">${nf(filtrados.length)} de ${nf(lista.length)}</span>
         </div>
-        <div class="mt-3 overflow-x-auto rounded-2xl border border-line bg-card">
+        <div class="mt-3 overflow-x-auto rounded-[1.6rem] border border-line bg-card shadow-card">
           <table class="w-full min-w-[640px] text-sm">
             <thead>
               <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
@@ -4163,18 +4417,18 @@ function DiagnosticoPage({ me, query }) {
                 filtrados.map((d) => html`
                   <tr key=${d.id} class="border-b border-line last:border-0 hover:bg-black/[0.02]">
                     <td class="px-4 py-2.5">
-                      <a href=${"#/cs/diagnostico?id=" + d.id} class="font-medium text-ink hover:text-brand hover:underline">${d.nome || "(sem nome)"}</a>
+                      <a href=${"#/cs/diagnostico?id=" + d.id} class="font-medium text-ink hover:text-emerald-700 hover:underline">${d.nome || "(sem nome)"}</a>
                       <div class="text-xs text-muted">${d.email || "—"}</div>
                     </td>
                     <td class="px-4 py-2.5 text-xs text-muted">${d.data_diagnostico ? fmtDataISO(d.data_diagnostico) : "—"}</td>
                     <td class="px-4 py-2.5">${d.status === "concluido"
                       ? html`<${Badge} class=${PILL_OK}>Concluído<//>`
                       : html`<${Badge} class=${PILL_WARN}>Rascunho<//>`}
-                      ${diagDesatualizado(d) ? html`<div class="mt-1 text-xs text-[#a44b43]">alterações não enviadas ao Drive</div>` : null}</td>
+                      ${diagDesatualizado(d) ? html`<div class="mt-1 text-xs text-[#be123c]">alterações não enviadas ao Drive</div>` : null}</td>
                     <td class="px-4 py-2.5 text-xs">
                       <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5">
                         ${d.drive_url
-                          ? html`<a class="text-brand hover:underline" href=${d.drive_url} target="_blank" rel="noopener">Abrir no Drive ↗</a>`
+                          ? html`<a class="text-emerald-700 hover:underline" href=${d.drive_url} target="_blank" rel="noopener">Abrir no Drive ↗</a>`
                           : html`<span class="text-muted">—</span>`}
                         ${d.status === "concluido" ? html`
                           <button type="button" disabled=${!!baixandoId} onClick=${() => baixarDaLista(d)}
@@ -4398,10 +4652,10 @@ function MetasPage({ me }) {
   function origem(m) {
     if (m.origem === "diagnostico") return html`
       <div class="text-xs text-muted">Diagnóstico${m.removida_da_ficha ? " (retirada da ficha)" : ""}</div>
-      ${!m.removida_da_ficha ? html`<a class="text-xs text-brand hover:underline" href=${"#/cs/diagnostico?id=" + m.diagnostico_id}>editar na ficha</a>` : null}`;
+      ${!m.removida_da_ficha ? html`<a class="text-xs text-emerald-700 hover:underline" href=${"#/cs/diagnostico?id=" + m.diagnostico_id}>editar na ficha</a>` : null}`;
     return html`
       <div class="text-xs text-muted">Manual</div>
-      ${m.diagnostico_id ? html`<a class="text-xs text-brand hover:underline" href=${"#/cs/diagnostico?id=" + m.diagnostico_id}>ver ficha</a>` : null}`;
+      ${m.diagnostico_id ? html`<a class="text-xs text-emerald-700 hover:underline" href=${"#/cs/diagnostico?id=" + m.diagnostico_id}>ver ficha</a>` : null}`;
   }
 
   const filtros = [["todas", "Todas"], ["vencidas", "Só vencidas"], ["7dias", "Próximos 7 dias"]];
@@ -4409,13 +4663,13 @@ function MetasPage({ me }) {
 
   return html`
     <div>
-      <div class="text-sm text-muted">🤝 CS / Suporte</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">Metas Mentorados</h1>
+      <div class="os-eyebrow">CS / Suporte</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Metas Mentorados</h1>
       <p class="mt-1 text-sm text-muted">Metas definidas no diagnóstico e metas cadastradas aqui. Marque FEITO quando a mentorada cumprir.
-        <a class="text-brand hover:underline" href=${PLANILHA_METAS_URL} target="_blank" rel="noopener">Abrir planilha ↗</a></p>
+        <a class="text-emerald-700 hover:underline" href=${PLANILHA_METAS_URL} target="_blank" rel="noopener">Abrir planilha ↗</a></p>
 
       ${erroPlanilha ? html`
-        <div class="mt-4 rounded-lg border border-[#efe0b5] bg-[#faf5e4] px-3 py-2 text-xs text-[#7c6a2a]">
+        <div class="mt-4 rounded-lg border border-[#fde68a] bg-[#fffbeb] px-3 py-2 text-xs text-[#92400e]">
           A planilha METAS MENTORADOS não foi atualizada na última tentativa: ${String(status.ultimo_detalhe || "erro").replace(/\.$/, "")}.
           As metas continuam salvas no OS e a planilha se atualiza sozinha quando o acesso voltar.
         </div>` : null}
@@ -4427,7 +4681,7 @@ function MetasPage({ me }) {
           <div class="flex gap-1">
             ${filtros.map(([k, l]) => html`
               <button type="button" onClick=${() => setFiltro(k)}
-                class=${cx("rounded-full border px-3 py-1 text-xs font-medium", filtro === k ? "border-brand bg-brand text-white" : "border-line bg-white text-ink hover:border-brand/50")}>
+                class=${cx("rounded-full border px-3 py-1 text-xs font-medium", filtro === k ? "border-[#07110e] bg-[#07110e] text-white" : "border-line bg-white text-ink hover:border-emerald-300")}>
                 ${l}${k === "vencidas" && nVencidas ? ` (${nVencidas})` : ""}
               </button>`)}
           </div>
@@ -4437,7 +4691,7 @@ function MetasPage({ me }) {
           </div>
         </div>
 
-        <div class="mt-3 overflow-x-auto rounded-2xl border border-line bg-card">
+        <div class="mt-3 overflow-x-auto rounded-[1.6rem] border border-line bg-card shadow-card">
           <table class="w-full min-w-[820px] text-sm">
             <thead>
               <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
@@ -4455,7 +4709,7 @@ function MetasPage({ me }) {
                   const p = prazoMeta(m, hoje);
                   const vencida = p.cls === PILL_ERR;
                   return html`
-                    <tr key=${m.id} class=${cx("border-b border-line last:border-0", vencida ? "bg-[#fbf0ee]" : "hover:bg-black/[0.02]")}>
+                    <tr key=${m.id} class=${cx("border-b border-line last:border-0", vencida ? "bg-[#fff1f2]" : "hover:bg-black/[0.02]")}>
                       <td class="px-4 py-2.5 align-top">
                         <div class="font-medium text-ink">${m.mentorado_nome || "—"}</div>
                         ${m.mentorado_email ? html`<div class="text-xs text-muted">${m.mentorado_email}</div>` : null}
@@ -4471,9 +4725,9 @@ function MetasPage({ me }) {
                           <div class="flex flex-wrap items-center justify-end gap-2">
                             ${m.origem === "manual" ? html`
                               <button type="button" class="text-xs text-muted hover:text-ink hover:underline" onClick=${() => setModal({ meta: m })}>Editar</button>
-                              <button type="button" class="text-xs text-[#a44b43] hover:underline" onClick=${() => excluir(m)}>Excluir</button>` : null}
+                              <button type="button" class="text-xs text-[#be123c] hover:underline" onClick=${() => excluir(m)}>Excluir</button>` : null}
                             <button type="button" disabled=${busyId === m.id} onClick=${() => marcar(m, true)}
-                              class="inline-flex items-center gap-1.5 rounded-md bg-[#5e7a52] px-3 py-1 text-xs font-semibold tracking-wide text-white hover:bg-[#4c6b3f] disabled:opacity-60">
+                              class="inline-flex items-center gap-1.5 rounded-md bg-[#065f46] px-3 py-1 text-xs font-semibold tracking-wide text-white hover:bg-[#047857] disabled:opacity-60">
                               ${busyId === m.id ? html`<span class="spinner"></span>` : null}FEITO
                             </button>
                           </div>` : null}
@@ -4489,7 +4743,7 @@ function MetasPage({ me }) {
             ${verConcluidas ? "▾" : "▸"} Concluídas (${concluidas.length})
           </button>
           ${verConcluidas ? html`
-            <div class="mt-3 overflow-x-auto rounded-2xl border border-line bg-card">
+            <div class="mt-3 overflow-x-auto rounded-[1.6rem] border border-line bg-card shadow-card">
               <table class="w-full min-w-[820px] text-sm">
                 <tbody>
                   ${concluidas.length === 0 ? html`<tr><td class="px-4 py-6 text-center text-sm text-muted">Nenhuma meta concluída ainda.</td></tr>` :
@@ -4666,7 +4920,7 @@ function ListaMentoradosPage() {
     const ls = linksWhats(m.telefone);
     if (!ls.length) return html`<span class="text-muted">—</span>`;
     return ls.map((t, i) => html`${i ? html`<br />` : null}${t.url
-      ? html`<a class="text-[#3d7a45] hover:underline" href=${t.url} target="_blank" rel="noopener" title="Abrir no WhatsApp">${t.texto}</a>`
+      ? html`<a class="text-[#047857] hover:underline" href=${t.url} target="_blank" rel="noopener" title="Abrir no WhatsApp">${t.texto}</a>`
       : t.texto}`);
   };
   const obs = (m) => {
@@ -4674,24 +4928,24 @@ function ListaMentoradosPage() {
     const longa = m.observacoes.length > 60;
     const aberta = abertas[m.linha];
     return html`<span class=${cx("whitespace-pre-line", !aberta && longa && "line-clamp-2")}>${m.observacoes}</span>
-      ${longa ? html`<button type="button" class="block text-[11px] text-brand hover:underline"
+      ${longa ? html`<button type="button" class="block text-[11px] text-emerald-700 hover:underline"
         onClick=${() => setAbertas((x) => ({ ...x, [m.linha]: !x[m.linha] }))}>${aberta ? "ver menos" : "ver mais"}</button>` : null}`;
   };
   const sinais = (m) => html`<${SinaisFicha} r=${(resumo || {})[(m.email || "").trim().toLowerCase()]} />
     <${ContatoWhatsMini} a=${whatsPorEmail[(m.email || "").trim().toLowerCase()]} />`;
   const nomeLink = (m) => (m.email
-    ? html`<a class="font-medium text-ink hover:text-brand hover:underline" href=${linkFicha(m.email)} title="Abrir a ficha">${m.nome || m.email}</a>`
+    ? html`<a class="font-medium text-ink hover:text-emerald-700 hover:underline" href=${linkFicha(m.email)} title="Abrir a ficha">${m.nome || m.email}</a>`
     : html`<span class="font-medium text-ink">${m.nome || "—"}</span>`);
 
   return html`
     <div>
-      <div class="text-sm text-muted">🤝 CS / Suporte</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">Lista de Mentorados</h1>
+      <div class="os-eyebrow">CS / Suporte</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Lista de Mentorados</h1>
       <p class="mt-1 text-sm text-muted">Da planilha Lista de Mentorados [Oficial], aba Mentoria 2026 (somente leitura).
-        <a class="text-brand hover:underline" href=${PLANILHA_MENTORADOS_URL} target="_blank" rel="noopener">Abrir planilha ↗</a></p>
+        <a class="text-emerald-700 hover:underline" href=${PLANILHA_MENTORADOS_URL} target="_blank" rel="noopener">Abrir planilha ↗</a></p>
 
       ${erro ? html`
-        <div class="mt-4 rounded-lg border border-[#efe0b5] bg-[#faf5e4] px-3 py-2 text-sm text-[#7c6a2a]">
+        <div class="mt-4 rounded-lg border border-[#fde68a] bg-[#fffbeb] px-3 py-2 text-sm text-[#92400e]">
           ${String(status.ultimo_detalhe || "Não foi possível ler a planilha.").replace(/\.$/, "")}.
           ${lista && lista.length ? " Mostrando a última versão salva no OS." : ""}
         </div>` : null}
@@ -4732,7 +4986,7 @@ function ListaMentoradosPage() {
           </div>
         </div>
 
-        <div class="mt-3 hidden overflow-x-auto rounded-2xl border border-line bg-card md:block">
+        <div class="mt-3 hidden overflow-x-auto rounded-[1.6rem] border border-line bg-card shadow-card md:block">
           <table class="w-full min-w-[1100px] text-sm">
             <thead>
               <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
@@ -4766,9 +5020,9 @@ function ListaMentoradosPage() {
         </div>
 
         <div class="mt-3 space-y-2 md:hidden">
-          ${filtrados.length === 0 ? html`<div class="rounded-xl border border-line bg-card px-4 py-8 text-center text-sm text-muted">Nenhum mentorado encontrado.</div>` :
+          ${filtrados.length === 0 ? html`<div class="rounded-[1.35rem] border border-line bg-card shadow-card px-4 py-8 text-center text-sm text-muted">Nenhum mentorado encontrado.</div>` :
             filtrados.map((m) => html`
-              <div key=${m.linha} class="rounded-xl border border-line bg-card p-4">
+              <div key=${m.linha} class="rounded-[1.35rem] border border-line bg-card shadow-card p-4">
                 <div class="flex items-start justify-between gap-2">
                   <div class="min-w-0">
                     <div>${nomeLink(m)}</div>
@@ -4783,7 +5037,7 @@ function ListaMentoradosPage() {
                   <div><span class="text-muted">Início</span><div>${dataBR(m.data_inicio, m.data_inicio_txt)}</div></div>
                   <div><span class="text-muted">Data final</span><div>${dataBR(m.data_final, m.data_final_txt)}</div></div>
                   <div><span class="text-muted">Renovou</span><div>${m.renovou || "—"}</div></div>
-                  <div>${m.email ? html`<a class="text-xs font-medium text-brand hover:underline" href=${linkFicha(m.email)}>Abrir ficha →</a>` : null}</div>
+                  <div>${m.email ? html`<a class="text-xs font-medium text-emerald-700 hover:underline" href=${linkFicha(m.email)}>Abrir ficha →</a>` : null}</div>
                 </div>
                 ${m.observacoes ? html`<div class="mt-2 text-xs"><span class="text-muted">Observações</span><div>${obs(m)}</div></div>` : null}
               </div>`)}
@@ -4834,7 +5088,7 @@ function SinaisFicha({ r }) {
 }
 
 function SecaoFicha({ titulo, n, acao, children, id }) {
-  return html`<section id=${id} class="rounded-2xl border border-line bg-card p-4 sm:p-5">
+  return html`<section id=${id} class="rounded-[1.6rem] border border-line bg-card shadow-card p-4 sm:p-5">
     <div class="flex flex-wrap items-center justify-between gap-2">
       <h2 class="text-base font-semibold text-ink">${titulo}${n != null ? html` <span class="text-sm font-normal text-muted">(${n})</span>` : null}</h2>
       ${acao || null}
@@ -4896,14 +5150,14 @@ function NotasFicha({ email, notas, me, onMudou }) {
       </div>
     </form>
     ${notas.length ? html`<ul class="mt-4 space-y-3">
-      ${notas.map((n) => html`<li key=${n.id} class="rounded-xl border border-line bg-white px-3 py-2.5">
+      ${notas.map((n) => html`<li key=${n.id} class="rounded-[1.35rem] border border-line bg-white shadow-card px-3 py-2.5">
         <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted">
           <span class="font-semibold text-ink">${n.autor_nome || "Sem nome"}</span>
           <span>${fmtDataHoraPesq(n.created_at)}</span>
           ${n.updated_at && new Date(n.updated_at) - new Date(n.created_at) > 60000 ? html`<span>· editada ${fmtDataHoraPesq(n.updated_at)}</span>` : null}
           ${podeMexer(n) && (!editando || editando.id !== n.id) ? html`<span class="ml-auto flex gap-3">
-            <button type="button" class="text-brand hover:underline" onClick=${() => setEditando({ id: n.id, texto: n.texto })}>editar</button>
-            <button type="button" class="text-[#a44b43] hover:underline" onClick=${() => excluir(n)}>excluir</button>
+            <button type="button" class="text-emerald-700 hover:underline" onClick=${() => setEditando({ id: n.id, texto: n.texto })}>editar</button>
+            <button type="button" class="text-[#be123c] hover:underline" onClick=${() => excluir(n)}>excluir</button>
           </span>` : null}
         </div>
         ${editando && editando.id === n.id ? html`<div class="mt-2">
@@ -4953,7 +5207,7 @@ function VinculosFicha({ email, vinculos, chaves, onMudou }) {
         <${Badge} class=${PILL_NEUTRAL}>${v.tipo === "email" ? "E-mail" : "Telefone"}<//>
         <span class="break-all text-ink">${v.tipo === "telefone" ? `(${v.valor.slice(0, 2)}) ${v.valor.slice(2)}` : v.valor}</span>
         <span class="text-xs text-muted">por ${v.criado_por_nome || "—"} em ${dataBRFicha(v.created_at)}</span>
-        <button type="button" class="ml-auto text-xs text-[#a44b43] hover:underline" onClick=${() => remover(v)}>remover</button>
+        <button type="button" class="ml-auto text-xs text-[#be123c] hover:underline" onClick=${() => remover(v)}>remover</button>
       </li>`)}
     </ul>` : null}
     <form onSubmit=${vincular} class="mt-3 flex flex-wrap items-end gap-2">
@@ -5030,7 +5284,7 @@ function FichaMentoradoPage({ email, me }) {
   useEffect(() => { setF(null); carregar(); }, [email]);
   useAoDesfazer(FICHA_ESCOPO, carregar);
 
-  if (erro) return html`<div class="text-sm text-[#a44b43]">${erro}</div>`;
+  if (erro) return html`<div class="text-sm text-[#be123c]">${erro}</div>`;
   if (!f) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando a ficha…</div>`;
 
   const m = f.mentorado || null;
@@ -5073,10 +5327,10 @@ function FichaMentoradoPage({ email, me }) {
 
   return html`
     <div>
-      <div class="text-sm text-muted"><a href="#/cs/mentorados" class="hover:underline">🤝 CS / Suporte · Lista de Mentorados</a></div>
+      <div class="os-eyebrow"><a href="#/cs/mentorados">CS / Suporte · Lista de Mentorados</a></div>
       <div class="mt-1 flex flex-wrap items-start justify-between gap-3">
         <div class="min-w-0">
-          <h1 class="text-2xl font-semibold text-ink">${nome}</h1>
+          <h1 class="os-titulo text-2xl sm:text-[1.75rem]">${nome}</h1>
           <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
             ${m && m.status ? html`<${Badge} class=${pillStatusMentorado(m.status)}>${m.status}<//>` : null}
             ${m && m.guardiao ? html`<span>Guardião: <span class="text-ink">${m.guardiao}</span></span>` : null}
@@ -5086,10 +5340,10 @@ function FichaMentoradoPage({ email, me }) {
         <a href="#/cs/mentorados" class="inline-flex items-center rounded-lg bg-white px-3.5 py-2 text-sm font-medium text-ink ring-1 ring-line hover:bg-black/[0.04]">← Voltar para a lista</a>
       </div>
 
-      <div class="mt-4 grid gap-3 rounded-2xl border border-line bg-card p-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div class="mt-4 grid gap-3 rounded-[1.6rem] border border-line bg-card shadow-card p-4 sm:grid-cols-2 lg:grid-cols-4">
         <div><div class="text-[11px] uppercase tracking-wide text-muted">E-mail</div><div class="break-all text-sm text-ink">${email}</div></div>
         <div><div class="text-[11px] uppercase tracking-wide text-muted">WhatsApp</div><div class="text-sm">${tel.length ? tel.map((t, i) => html`${i ? " / " : ""}${t.url
-          ? html`<a class="text-[#3d7a45] hover:underline" href=${t.url} target="_blank" rel="noopener">${t.texto}</a>` : t.texto}`) : "—"}</div></div>
+          ? html`<a class="text-[#047857] hover:underline" href=${t.url} target="_blank" rel="noopener">${t.texto}</a>` : t.texto}`) : "—"}</div></div>
         <div><div class="text-[11px] uppercase tracking-wide text-muted">Início · Final</div>
           <div class="text-sm text-ink">${m ? dataBRFicha(m.data_inicio) + " · " + dataBRFicha(m.data_final) : "—"}</div>
           ${dias != null ? html`<div class="text-xs text-muted">${dias >= 0 ? `faltam ${dias} dias` : `terminou há ${-dias} dias`}</div>` : null}</div>
@@ -5111,8 +5365,8 @@ function FichaMentoradoPage({ email, me }) {
             <${NotasFicha} email=${email} notas=${notas} me=${me} onMudou=${carregar} />
           <//>
           <${SecaoFicha} titulo="Diagnóstico do Mentorado" n=${diags.length || null}
-            acao=${d0 ? html`<a class="text-sm font-medium text-brand hover:underline" href=${"#/cs/diagnostico?id=" + d0.id}>Abrir diagnóstico →</a>`
-              : html`<a class="text-sm font-medium text-brand hover:underline" href="#/cs/diagnostico?novo=1">Criar diagnóstico →</a>`}>
+            acao=${d0 ? html`<a class="text-sm font-medium text-emerald-700 hover:underline" href=${"#/cs/diagnostico?id=" + d0.id}>Abrir diagnóstico →</a>`
+              : html`<a class="text-sm font-medium text-emerald-700 hover:underline" href="#/cs/diagnostico?novo=1">Criar diagnóstico →</a>`}>
             ${d0 ? html`<div class="grid gap-3 sm:grid-cols-2">
               ${campo("Data", dataBRFicha(d0.data_diagnostico) + (d0.status === "concluido" ? " · concluído" : " · em andamento"))}
               ${campo("Trilha", [textoDiag(d0.dados && d0.dados.trilha), textoDiag(d0.dados && d0.dados.trilha_obs)].filter(Boolean).join(" · "))}
@@ -5128,10 +5382,10 @@ function FichaMentoradoPage({ email, me }) {
               <div class="sm:col-span-2">${campo("O que já fez", textoDiag(d0.dados && d0.dados.o_que_fez))}</div>
               <div class="sm:col-span-2">${campo("Observações", textoDiag(d0.dados && d0.dados.observacoes))}</div>
             </div>
-            ${d0.drive_url && /^https:\/\//.test(d0.drive_url) ? html`<a class="mt-3 inline-block text-xs text-brand hover:underline" href=${d0.drive_url} target="_blank" rel="noopener">Planilha do diagnóstico no Drive ↗</a>` : null}`
+            ${d0.drive_url && /^https:\/\//.test(d0.drive_url) ? html`<a class="mt-3 inline-block text-xs text-emerald-700 hover:underline" href=${d0.drive_url} target="_blank" rel="noopener">Planilha do diagnóstico no Drive ↗</a>` : null}`
             : html`<${VazioFicha}>Ainda não tem diagnóstico.<//>`}
           <//>
-          <${SecaoFicha} titulo="Metas" n=${metas.length || null} acao=${metas.length ? html`<a class="text-sm font-medium text-brand hover:underline" href="#/cs/metas">Ver em Metas →</a>` : null}>
+          <${SecaoFicha} titulo="Metas" n=${metas.length || null} acao=${metas.length ? html`<a class="text-sm font-medium text-emerald-700 hover:underline" href="#/cs/metas">Ver em Metas →</a>` : null}>
             ${metas.length ? html`<ul class="divide-y divide-line">
               ${metas.filter((x) => !x.removida_da_ficha || x.concluida_em).map((x) => {
                 const atrasada = !x.concluida_em && x.vencimento && x.vencimento < hoje;
@@ -5185,7 +5439,7 @@ function FichaMentoradoPage({ email, me }) {
           <//>
           <${SecaoFicha} titulo="Linha do tempo" n=${tempo.length || null}>
             ${tempo.length ? html`<ol class="max-h-[420px] space-y-2 overflow-y-auto border-l border-line pl-3">${tempo.map((x, i) => html`<li key=${i} class="relative text-sm">
-              <span class="absolute -left-[17px] top-1.5 h-2 w-2 rounded-full bg-brand/60"></span>
+              <span class="absolute -left-[17px] top-1.5 h-2 w-2 rounded-full bg-emerald-400"></span>
               <div class="text-xs text-muted">${dataHoraFicha(x.q)} · ${x.f}</div>
               <div class="text-ink">${x.t}</div>
             </li>`)}</ol>` : html`<${VazioFicha}>Nada com data ainda.<//>`}
@@ -5204,9 +5458,9 @@ function FichaMentoradoPage({ email, me }) {
 // tarefa diária "sync-clint-ficha-os" (7h40). Faixas: verde < 15 dias, amarelo 15 a 30 (símbolo de cuidado), vermelho > 30
 // ou sem contato registrado (símbolo de urgente). Engajamento = dias com mensagem da aluna nos últimos 30.
 const FAIXAS_ATIV = {
-  vermelho: { nome: "Mais de 30 dias", curto: "Urgente", fundo: "bg-[#fbeeeb]", borda: "border-[#e9c3bd]", texto: "text-[#a44b43]", forte: "#c4544a" },
-  amarelo: { nome: "De 15 a 30 dias", curto: "Cuidado", fundo: "bg-[#faf5e4]", borda: "border-[#efe0b5]", texto: "text-[#7c6a2a]", forte: "#c9a227" },
-  verde: { nome: "Menos de 15 dias", curto: "Em dia", fundo: "bg-[#eef4ea]", borda: "border-[#cfe0c4]", texto: "text-[#4f6b44]", forte: "#6f9a5e" },
+  vermelho: { nome: "Mais de 30 dias", curto: "Urgente", fundo: "bg-[#fff1f2]", borda: "border-[#fecdd3]", texto: "text-[#be123c]", forte: "#be123c" },
+  amarelo: { nome: "De 15 a 30 dias", curto: "Cuidado", fundo: "bg-[#fffbeb]", borda: "border-[#fde68a]", texto: "text-[#92400e]", forte: "#f59e0b" },
+  verde: { nome: "Menos de 15 dias", curto: "Em dia", fundo: "bg-[#ecfdf5]", borda: "border-[#a7f3d0]", texto: "text-[#047857]", forte: "#10b981" },
 };
 const ENGAJ = {
   alto: ["Engajamento alto", PILL_OK], medio: ["Engajamento médio", "bg-[#e1e8f2] text-[#4a6286]"],
@@ -5224,12 +5478,12 @@ function IconeCuidado({ size = 16 }) {
   return html`<svg viewBox="0 0 20 20" width=${size} height=${size} class="inline-block shrink-0" role="img" aria-label="Cuidado">
     <title>Cuidado: mais de 15 dias sem contato</title>
     <path d="M10 2.5 1.8 17h16.4L10 2.5Z" fill="#f2b632" stroke="#b07d0c" stroke-width="1.2" stroke-linejoin="round"></path>
-    <rect x="9.1" y="7.2" width="1.8" height="5.4" rx=".9" fill="#5b4103"></rect><circle cx="10" cy="14.6" r="1.05" fill="#5b4103"></circle></svg>`;
+    <rect x="9.1" y="7.2" width="1.8" height="5.4" rx=".9" fill="#78350f"></rect><circle cx="10" cy="14.6" r="1.05" fill="#78350f"></circle></svg>`;
 }
 function IconeUrgente({ size = 16 }) {
   return html`<svg viewBox="0 0 20 20" width=${size} height=${size} class="inline-block shrink-0" role="img" aria-label="Urgente">
     <title>Urgente: mais de 30 dias sem contato</title>
-    <circle cx="10" cy="10" r="8.6" fill="#d9483b"></circle>
+    <circle cx="10" cy="10" r="8.6" fill="#e11d48"></circle>
     <rect x="9" y="4.8" width="2" height="6.6" rx="1" fill="#fff"></rect><circle cx="10" cy="14.2" r="1.2" fill="#fff"></circle></svg>`;
 }
 const iconeFaixa = (faixa, size) => (faixa === "vermelho" ? html`<${IconeUrgente} size=${size} />` : faixa === "amarelo" ? html`<${IconeCuidado} size=${size} />` : null);
@@ -5315,12 +5569,12 @@ function AtivacoesPage() {
 
   return html`
     <div>
-      <div class="text-sm text-muted">🤝 CS / Suporte</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">Controle de Ativações</h1>
+      <div class="os-eyebrow">CS / Suporte</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Controle de Ativações</h1>
       <p class="mt-1 text-sm text-muted">Há quantos dias foi a última conversa no WhatsApp com cada mentorado (só conversa de verdade: campanhas e automações não contam).
         ${status && status.ultima_execucao_em ? html` Dados do Clint de ${fmtDataHoraPesq(status.ultima_execucao_em)}; atualiza todo dia às 7h40.` : null}</p>
 
-      ${lista && lista.length && !lista[0].cobertura_desde ? html`<div class="mt-4 rounded-lg border border-[#efe0b5] bg-[#faf5e4] px-3 py-2 text-sm text-[#7c6a2a]">
+      ${lista && lista.length && !lista[0].cobertura_desde ? html`<div class="mt-4 rounded-lg border border-[#fde68a] bg-[#fffbeb] px-3 py-2 text-sm text-[#92400e]">
         A contagem diária de mensagens ainda não foi carregada: por enquanto o último contato vem da data da última conversa no Clint,
         que inclui disparos de campanha. Os números ficam exatos depois da próxima atualização da tarefa diária.</div>` : null}
       ${lista === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
@@ -5363,7 +5617,7 @@ function AtivacoesPage() {
           <h2 class=${cx("text-base font-semibold", f.texto)}>${f.curto} · ${f.nome}</h2>
           <span class="text-xs text-muted">${nf(linhas.length)} ${linhas.length === 1 ? "mentorado" : "mentorados"}</span>
         </div>
-        <div class="mt-2 hidden overflow-x-auto rounded-2xl border border-line bg-card md:block">
+        <div class="mt-2 hidden overflow-x-auto rounded-[1.6rem] border border-line bg-card shadow-card md:block">
           <table class="w-full min-w-[880px] text-sm">
             <thead><tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
               <th class="px-3 py-2.5">Mentorado</th><th class="px-3 py-2.5">Último contato</th><th class="px-3 py-2.5">Última msg da aluna</th>
@@ -5375,7 +5629,7 @@ function AtivacoesPage() {
                   const [rotEng, clsEng] = ENGAJ[a.engajamento] || ["—", PILL_NEUTRAL];
                   const tel = linksWhats(a.telefone)[0];
                   return html`<tr key=${a.email} class="border-b border-line align-top last:border-0 hover:bg-black/[0.02]">
-                    <td class="px-3 py-2.5"><a class="font-medium text-ink hover:text-brand hover:underline" href=${linkFicha(a.email)}>${a.nome || a.email}</a>
+                    <td class="px-3 py-2.5"><a class="font-medium text-ink hover:text-emerald-700 hover:underline" href=${linkFicha(a.email)}>${a.nome || a.email}</a>
                       <div class="text-[11px] text-muted">${a.status || "—"}</div></td>
                     <td class="whitespace-nowrap px-3 py-2.5"><span class=${cx("inline-flex items-center gap-1.5 font-medium", f.texto)}>${iconeFaixa(a.faixa, 15)}${textoDiasContato(a)}</span>
                       ${a.ultimo_contato ? html`<div class="text-[11px] text-muted">${dataBRFicha(a.ultimo_contato)}</div>` : null}</td>
@@ -5383,17 +5637,17 @@ function AtivacoesPage() {
                     <td class="px-3 py-2.5"><${Badge} class=${clsEng}>${rotEng}<//></td>
                     <td class="whitespace-nowrap px-3 py-2.5 text-xs text-muted">${a.msgs_aluna_30d} aluna · ${a.msgs_equipe_30d} equipe</td>
                     <td class="px-3 py-2.5 text-xs">${a.guardiao || html`<span class="text-muted">—</span>`}</td>
-                    <td class="px-3 py-2.5 text-xs">${tel && tel.url ? html`<a class="text-[#3d7a45] hover:underline" href=${tel.url} target="_blank" rel="noopener">Abrir conversa</a>` : html`<span class="text-muted">—</span>`}</td>
+                    <td class="px-3 py-2.5 text-xs">${tel && tel.url ? html`<a class="text-[#047857] hover:underline" href=${tel.url} target="_blank" rel="noopener">Abrir conversa</a>` : html`<span class="text-muted">—</span>`}</td>
                   </tr>`;
                 })}
             </tbody>
           </table>
         </div>
         <div class="mt-2 space-y-2 md:hidden">
-          ${linhas.length === 0 ? html`<div class="rounded-xl border border-line bg-card px-4 py-8 text-center text-sm text-muted">Ninguém nesta faixa com esses filtros.</div>`
+          ${linhas.length === 0 ? html`<div class="rounded-[1.35rem] border border-line bg-card shadow-card px-4 py-8 text-center text-sm text-muted">Ninguém nesta faixa com esses filtros.</div>`
             : linhas.map((a) => {
               const [rotEng, clsEng] = ENGAJ[a.engajamento] || ["—", PILL_NEUTRAL];
-              return html`<a key=${a.email} href=${linkFicha(a.email)} class="block rounded-xl border border-line bg-card p-4">
+              return html`<a key=${a.email} href=${linkFicha(a.email)} class="block rounded-[1.35rem] border border-line bg-card shadow-card p-4">
                 <div class="font-medium text-ink">${a.nome || a.email}</div>
                 <div class=${cx("mt-1 flex items-center gap-1.5 text-sm font-medium", f.texto)}>${iconeFaixa(a.faixa, 15)}${textoDiasContato(a)}</div>
                 <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted"><${Badge} class=${clsEng}>${rotEng}<//>
@@ -5515,7 +5769,7 @@ function DetalheVac({ r, onClose }) {
     <div class="mt-3 grid gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
       <div><div class="text-xs text-muted">E-mail</div><div class="break-all">${r.email || "—"}</div></div>
       <div><div class="text-xs text-muted">Telefone</div><div>${tel.length ? tel.map((t, i) => html`${i ? " / " : ""}${t.url
-        ? html`<a class="text-[#3d7a45] hover:underline" href=${t.url} target="_blank" rel="noopener" title="Abrir no WhatsApp">${t.texto}</a>` : t.texto}`) : "—"}</div></div>
+        ? html`<a class="text-[#047857] hover:underline" href=${t.url} target="_blank" rel="noopener" title="Abrir no WhatsApp">${t.texto}</a>` : t.texto}`) : "—"}</div></div>
     </div>
     <div class="mt-3 grid grid-cols-3 gap-2">
       ${VAC_CANAIS.slice(0, 3).map((c, i) => html`<div class="rounded-lg border border-line px-3 py-2 text-center">
@@ -5612,20 +5866,20 @@ function TesteVacPage() {
 
   return html`
     <div>
-      <div class="text-sm text-muted">🤝 CS / Suporte</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">Teste VAC</h1>
+      <div class="os-eyebrow">CS / Suporte</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Teste VAC</h1>
       <p class="mt-1 text-sm text-muted">Respostas do teste de canal de aprendizagem (Visual, Auditivo, Cinestésico) feito no site do Teste VAC, lidas da planilha Respostas Teste VAC (somente leitura).${" "}
-        <a class="text-brand hover:underline" href=${PLANILHA_TESTE_VAC_URL} target="_blank" rel="noopener">Abrir planilha ↗</a></p>
+        <a class="text-emerald-700 hover:underline" href=${PLANILHA_TESTE_VAC_URL} target="_blank" rel="noopener">Abrir planilha ↗</a></p>
 
       ${semAcesso ? html`
-        <div class="mt-4 rounded-xl border border-[#efe0b5] bg-[#faf5e4] px-4 py-3 text-sm text-[#6f5f24]">
+        <div class="mt-4 rounded-xl border border-[#fde68a] bg-[#fffbeb] px-4 py-3 text-sm text-[#78350f]">
           <div class="font-medium">A planilha ainda não foi compartilhada com o OS</div>
           <div class="mt-1">Para os resultados aparecerem aqui, abra a planilha Respostas Teste VAC, clique em Compartilhar e adicione${" "}
             <span class="break-all font-medium">${CONTA_SERVICO_OS}</span> como <span class="font-medium">Leitor</span>. Depois, clique em Atualizar.</div>
           ${lista && lista.length ? html`<div class="mt-1 text-xs">Mostrando a última versão salva no OS.</div>` : null}
         </div>` : null}
       ${erro ? html`
-        <div class="mt-4 rounded-lg border border-[#efe0b5] bg-[#faf5e4] px-3 py-2 text-sm text-[#7c6a2a]">
+        <div class="mt-4 rounded-lg border border-[#fde68a] bg-[#fffbeb] px-3 py-2 text-sm text-[#92400e]">
           ${String(status.ultimo_detalhe || "Não foi possível ler a planilha.").replace(/\.$/, "")}.
           ${lista && lista.length ? " Mostrando a última versão salva no OS." : ""}
         </div>` : null}
@@ -5633,7 +5887,7 @@ function TesteVacPage() {
       ${lista === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
         <div class="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
           <button type="button" onClick=${() => setFCanal("")}
-            class=${cx("col-span-2 rounded-xl border bg-card p-4 text-left transition hover:border-brand/40 sm:col-span-1", !fCanal ? "border-brand/50 ring-1 ring-brand/30" : "border-line")}>
+            class=${cx("col-span-2 rounded-xl border bg-card p-4 text-left transition hover:border-emerald-200 sm:col-span-1", !fCanal ? "border-emerald-300 ring-1 ring-emerald-200" : "border-line")}>
             <div class="text-xs uppercase tracking-wide text-muted">Respostas</div>
             <div class="mt-1 text-2xl font-semibold text-ink">${nf(total)}</div>
             <div class="text-xs text-muted">${temFiltro && total !== lista.length ? "de " + nf(lista.length) + " no total" : "no total"}</div>
@@ -5641,7 +5895,7 @@ function TesteVacPage() {
           ${VAC_CANAIS.map((c) => html`
             <button type="button" onClick=${() => setFCanal(fCanal === c.id ? "" : c.id)} aria-pressed=${fCanal === c.id}
               title=${c.id === "misto" ? "Empates entre canais (ex.: Visual e Auditivo)" : "Só resultados " + c.nome + " puros"}
-              class=${cx("rounded-xl border bg-card p-4 text-left transition hover:border-brand/40", fCanal === c.id ? "border-brand/50 ring-1 ring-brand/30" : "border-line")}>
+              class=${cx("rounded-xl border bg-card p-4 text-left transition hover:border-emerald-200", fCanal === c.id ? "border-emerald-300 ring-1 ring-emerald-200" : "border-line")}>
               <div class="flex items-center gap-1.5 text-xs uppercase tracking-wide text-muted">
                 <span class="inline-block h-2 w-2 rounded-full" style=${"background:" + c.cor}></span>${c.nome}
               </div>
@@ -5697,7 +5951,7 @@ function TesteVacPage() {
           </div>
         </div>
 
-        <div class="mt-3 hidden overflow-x-auto rounded-2xl border border-line bg-card md:block">
+        <div class="mt-3 hidden overflow-x-auto rounded-[1.6rem] border border-line bg-card shadow-card md:block">
           <table class="w-full min-w-[900px] text-sm">
             <thead>
               <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
@@ -5730,10 +5984,10 @@ function TesteVacPage() {
         </div>
 
         <div class="mt-3 space-y-2 md:hidden">
-          ${filtrados.length === 0 ? html`<div class="rounded-xl border border-line bg-card px-4 py-8 text-center text-sm text-muted">
+          ${filtrados.length === 0 ? html`<div class="rounded-[1.35rem] border border-line bg-card shadow-card px-4 py-8 text-center text-sm text-muted">
               ${lista.length ? "Nenhuma resposta com esses filtros." : "Nenhuma resposta do Teste VAC ainda."}</div>` :
             filtrados.map((r) => html`
-              <button type="button" key=${r.linha} onClick=${() => setAberta(r)} class="block w-full rounded-xl border border-line bg-card p-4 text-left">
+              <button type="button" key=${r.linha} onClick=${() => setAberta(r)} class="block w-full rounded-[1.35rem] border border-line bg-card shadow-card p-4 text-left">
                 <div class="flex items-start justify-between gap-2">
                   <div class="min-w-0">
                     <div class="font-medium text-ink">${r.nome || "—"}</div>
@@ -5835,9 +6089,9 @@ function NotasNiv({ r }) {
     ${NIV_AREAS.map((a) => {
       const v = notaNiv(r, a.id);
       return html`<div class="flex items-center gap-1.5 text-[11px] leading-4">
-        <span class=${cx("w-6 shrink-0", fracas.includes(a.id) ? "font-semibold text-[#a44b43]" : "font-medium text-muted")}>${a.curto}</span>
+        <span class=${cx("w-6 shrink-0", fracas.includes(a.id) ? "font-semibold text-[#be123c]" : "font-medium text-muted")}>${a.curto}</span>
         <div class="h-1.5 flex-1 overflow-hidden rounded bg-black/[0.05]">
-          <div class="h-full rounded" style=${`width:${v == null ? 0 : v * 10}%;background:${fracas.includes(a.id) ? "#d98a7f" : "#9aa7b8"}`}></div>
+          <div class="h-full rounded" style=${`width:${v == null ? 0 : v * 10}%;background:${fracas.includes(a.id) ? "#fb7185" : "#94a3b8"}`}></div>
         </div>
         <span class="w-6 shrink-0 text-right tabular-nums text-ink/80">${fmtNota(v)}</span>
       </div>`;
@@ -5895,10 +6149,10 @@ function DetalheNivelamento({ r, onClose }) {
     <div class="mt-3 grid gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
       <div><div class="text-xs text-muted">E-mail</div><div class="break-all">${r.email || "—"}</div></div>
       <div><div class="text-xs text-muted">WhatsApp</div><div>${tel.length ? tel.map((t, i) => html`${i ? " / " : ""}${t.url
-        ? html`<a class="text-[#3d7a45] hover:underline" href=${t.url} target="_blank" rel="noopener" title="Abrir no WhatsApp">${t.texto}</a>` : t.texto}`) : "—"}</div></div>
+        ? html`<a class="text-[#047857] hover:underline" href=${t.url} target="_blank" rel="noopener" title="Abrir no WhatsApp">${t.texto}</a>` : t.texto}`) : "—"}</div></div>
     </div>
     <div class="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-7">
-      ${NIV_AREAS.map((a) => html`<div class=${cx("rounded-lg border px-2 py-2 text-center", fracas.includes(a.id) ? "border-[#e9c3bd] bg-[#fbf1ef]" : "border-line")}>
+      ${NIV_AREAS.map((a) => html`<div class=${cx("rounded-lg border px-2 py-2 text-center", fracas.includes(a.id) ? "border-[#fecdd3] bg-[#fff1f2]" : "border-line")}>
         <div class="text-[11px] uppercase tracking-wide text-muted">${a.nome}</div>
         <div class="text-xl font-semibold text-ink">${fmtNota(notaNiv(r, a.id))}</div>
       </div>`)}
@@ -6045,20 +6299,20 @@ function NivelamentoPage() {
 
   return html`
     <div>
-      <div class="text-sm text-muted">🤝 CS / Suporte</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">Testes de Nivelamento</h1>
+      <div class="os-eyebrow">CS / Suporte</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Testes de Nivelamento</h1>
       <p class="mt-1 text-sm text-muted">Resultados do Teste de Nivelamento da Mentoria (trilha indicada e notas por área dadas pela IA), lidos da aba Novo da planilha de respostas (somente leitura).${" "}
-        <a class="text-brand hover:underline" href=${PLANILHA_NIVELAMENTO_URL} target="_blank" rel="noopener">Abrir planilha ↗</a></p>
+        <a class="text-emerald-700 hover:underline" href=${PLANILHA_NIVELAMENTO_URL} target="_blank" rel="noopener">Abrir planilha ↗</a></p>
 
       ${semAcesso ? html`
-        <div class="mt-4 rounded-xl border border-[#efe0b5] bg-[#faf5e4] px-4 py-3 text-sm text-[#6f5f24]">
+        <div class="mt-4 rounded-xl border border-[#fde68a] bg-[#fffbeb] px-4 py-3 text-sm text-[#78350f]">
           <div class="font-medium">A planilha ainda não foi compartilhada com o OS</div>
           <div class="mt-1">Para os testes aparecerem aqui, abra a planilha Teste de Nivelamento Fluent Mind (respostas), clique em Compartilhar e adicione${" "}
             <span class="break-all font-medium">${CONTA_SERVICO_OS}</span> como <span class="font-medium">Leitor</span>. Depois, clique em Atualizar.</div>
           ${lista && lista.length ? html`<div class="mt-1 text-xs">Mostrando a última versão salva no OS.</div>` : null}
         </div>` : null}
       ${erro ? html`
-        <div class="mt-4 rounded-lg border border-[#efe0b5] bg-[#faf5e4] px-3 py-2 text-sm text-[#7c6a2a]">
+        <div class="mt-4 rounded-lg border border-[#fde68a] bg-[#fffbeb] px-3 py-2 text-sm text-[#92400e]">
           ${String(status.ultimo_detalhe || "Não foi possível ler a planilha.").replace(/\.$/, "")}.
           ${lista && lista.length ? " Mostrando a última versão salva no OS." : ""}
         </div>` : null}
@@ -6066,7 +6320,7 @@ function NivelamentoPage() {
       ${lista === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
         <div class="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
           <button type="button" onClick=${() => setFTrilha("")}
-            class=${cx("col-span-2 rounded-xl border bg-card p-4 text-left transition hover:border-brand/40 sm:col-span-1", !fTrilha ? "border-brand/50 ring-1 ring-brand/30" : "border-line")}>
+            class=${cx("col-span-2 rounded-xl border bg-card p-4 text-left transition hover:border-emerald-200 sm:col-span-1", !fTrilha ? "border-emerald-300 ring-1 ring-emerald-200" : "border-line")}>
             <div class="text-xs uppercase tracking-wide text-muted">Testes</div>
             <div class="mt-1 text-2xl font-semibold text-ink">${nf(total)}</div>
             <div class="text-xs text-muted">${temFiltro && total !== lista.length ? "de " + nf(lista.length) + " no total" : "no total"}</div>
@@ -6074,7 +6328,7 @@ function NivelamentoPage() {
           ${NIV_TRILHAS.map((t) => html`
             <button type="button" onClick=${() => setFTrilha(fTrilha === String(t.n) ? "" : String(t.n))} aria-pressed=${fTrilha === String(t.n)}
               title=${"Trilha " + t.n + " · " + t.nome}
-              class=${cx("rounded-xl border bg-card p-4 text-left transition hover:border-brand/40", fTrilha === String(t.n) ? "border-brand/50 ring-1 ring-brand/30" : "border-line")}>
+              class=${cx("rounded-xl border bg-card p-4 text-left transition hover:border-emerald-200", fTrilha === String(t.n) ? "border-emerald-300 ring-1 ring-emerald-200" : "border-line")}>
               <div class="flex items-center gap-1.5 text-xs uppercase tracking-wide text-muted">
                 <span class="inline-block h-2 w-2 rounded-full" style=${"background:" + t.cor}></span>T${t.n} · ${t.nome}
               </div>
@@ -6089,45 +6343,45 @@ function NivelamentoPage() {
         </div>
 
         <div class="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <div class="rounded-xl border border-line bg-card p-4">
+          <div class="rounded-[1.35rem] border border-line bg-card shadow-card p-4">
             <div class="text-xs uppercase tracking-wide text-muted">Média das notas</div>
             <div class="mt-1 text-2xl font-semibold text-ink">${fmtNota(dash.media)}<span class="text-sm font-normal text-muted"> /10</span></div>
             <div class="mt-2 space-y-1">
               ${NIV_AREAS.map((a) => html`<div class="flex items-center gap-2 text-xs">
                 <span class="w-20 shrink-0 text-muted">${a.nome}</span>
                 <div class="h-1.5 flex-1 overflow-hidden rounded bg-black/[0.05]">
-                  <div class="h-full rounded bg-[#9aa7b8]" style=${`width:${dash.mediaArea[a.id] == null ? 0 : dash.mediaArea[a.id] * 10}%`}></div>
+                  <div class="h-full rounded bg-[#94a3b8]" style=${`width:${dash.mediaArea[a.id] == null ? 0 : dash.mediaArea[a.id] * 10}%`}></div>
                 </div>
                 <span class="w-7 shrink-0 text-right tabular-nums text-ink/80">${fmtNota(dash.mediaArea[a.id])}</span>
               </div>`)}
             </div>
           </div>
-          <div class="rounded-xl border border-line bg-card p-4">
+          <div class="rounded-[1.35rem] border border-line bg-card shadow-card p-4">
             <div class="text-xs uppercase tracking-wide text-muted">Área mais fraca</div>
             <div class="mt-1 text-sm text-muted">Quantas alunas têm a menor nota em cada área (clique para filtrar)</div>
             <div class="mt-2 space-y-1">
               ${NIV_AREAS.map((a) => html`<button type="button" onClick=${() => setFFraca(fFraca === a.id ? "" : a.id)}
-                class=${cx("flex w-full items-center gap-2 rounded px-1 text-left text-xs hover:bg-black/[0.03]", fFraca === a.id && "bg-[#fbf1ef]")}>
+                class=${cx("flex w-full items-center gap-2 rounded px-1 text-left text-xs hover:bg-black/[0.03]", fFraca === a.id && "bg-[#fff1f2]")}>
                 <span class="w-20 shrink-0 text-muted">${a.nome}</span>
                 <div class="h-1.5 flex-1 overflow-hidden rounded bg-black/[0.05]">
-                  <div class="h-full rounded bg-[#d98a7f]" style=${`width:${(dash.fraca[a.id] / maxFraca) * 100}%`}></div>
+                  <div class="h-full rounded bg-[#fb7185]" style=${`width:${(dash.fraca[a.id] / maxFraca) * 100}%`}></div>
                 </div>
                 <span class="w-7 shrink-0 text-right tabular-nums text-ink/80">${dash.fraca[a.id]}</span>
               </button>`)}
             </div>
           </div>
-          <div class="rounded-xl border border-line bg-card p-4">
+          <div class="rounded-[1.35rem] border border-line bg-card shadow-card p-4">
             <div class="text-xs uppercase tracking-wide text-muted">Autoavaliação</div>
             <div class="mt-1 text-2xl font-semibold text-ink">${fmtNota(dash.autoMedia)}<span class="text-sm font-normal text-muted"> /5 em média</span></div>
             <div class="mt-2 flex h-14 items-end gap-1.5">
               ${[1, 2, 3, 4, 5].map((n) => html`<button type="button" onClick=${() => setFAuto(fAuto === String(n) ? "" : String(n))}
                 title=${`${dash.auto[n]} aluna(s) com autoavaliação ${n}`} class="flex flex-1 flex-col items-center gap-0.5">
-                <div class=${cx("w-full rounded-t", fAuto === String(n) ? "bg-brand" : "bg-[#b9c3cf]")} style=${`height:${Math.max(3, (dash.auto[n] / maxAuto) * 40)}px`}></div>
+                <div class=${cx("w-full rounded-t", fAuto === String(n) ? "bg-emerald-600" : "bg-[#cbd5e1]")} style=${`height:${Math.max(3, (dash.auto[n] / maxAuto) * 40)}px`}></div>
                 <span class="text-[11px] tabular-nums text-muted">${n}</span>
               </button>`)}
             </div>
           </div>
-          <div class="rounded-xl border border-line bg-card p-4">
+          <div class="rounded-[1.35rem] border border-line bg-card shadow-card p-4">
             <div class="text-xs uppercase tracking-wide text-muted">Na Lista de Mentorados</div>
             <div class="mt-1 text-2xl font-semibold text-ink">${nf(dash.naLista)}<span class="text-sm font-normal text-muted"> de ${nf(total)}</span></div>
             <div class="text-xs text-muted">${pctVac(dash.naLista, total)} encontradas pelo e-mail ou WhatsApp</div>
@@ -6208,7 +6462,7 @@ function NivelamentoPage() {
           </div>
         </div>
 
-        <div class="mt-3 hidden overflow-x-auto rounded-2xl border border-line bg-card md:block">
+        <div class="mt-3 hidden overflow-x-auto rounded-[1.6rem] border border-line bg-card shadow-card md:block">
           <table class="w-full min-w-[960px] text-sm">
             <thead>
               <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
@@ -6244,10 +6498,10 @@ function NivelamentoPage() {
         </div>
 
         <div class="mt-3 space-y-2 md:hidden">
-          ${filtrados.length === 0 ? html`<div class="rounded-xl border border-line bg-card px-4 py-8 text-center text-sm text-muted">
+          ${filtrados.length === 0 ? html`<div class="rounded-[1.35rem] border border-line bg-card shadow-card px-4 py-8 text-center text-sm text-muted">
               ${lista.length ? "Nenhum teste com esses filtros." : "Nenhum teste de nivelamento ainda."}</div>` :
             filtrados.map((r) => html`
-              <button type="button" key=${r.linha} onClick=${() => setAberta(r)} class="block w-full rounded-xl border border-line bg-card p-4 text-left">
+              <button type="button" key=${r.linha} onClick=${() => setAberta(r)} class="block w-full rounded-[1.35rem] border border-line bg-card shadow-card p-4 text-left">
                 <div class="flex items-start justify-between gap-2">
                   <div class="min-w-0">
                     <div class="font-medium text-ink">${r.nome || "—"}</div>
@@ -6295,17 +6549,17 @@ function Sparkline({ values, height = 40 }) {
     <svg viewBox=${`0 0 100 ${height}`} preserveAspectRatio="none" class="h-10 w-full">
       ${values.map((v, i) => {
         const h = Math.max(1, (v / max) * (height - 2));
-        return html`<rect x=${(i * w).toFixed(2)} y=${(height - h).toFixed(2)} width=${(w * 0.8).toFixed(2)} height=${h.toFixed(2)} rx="0.6" fill="#ea5167" opacity="0.85"></rect>`;
+        return html`<rect x=${(i * w).toFixed(2)} y=${(height - h).toFixed(2)} width=${(w * 0.8).toFixed(2)} height=${h.toFixed(2)} rx="0.6" fill="#059669" opacity="0.85"></rect>`;
       })}
     </svg>`;
 }
 
 function KPI({ label, valor, sub }) {
   return html`
-    <div class="rounded-xl border border-line bg-card p-4">
-      <div class="text-xs uppercase tracking-wide text-muted">${label}</div>
-      <div class="mt-1 text-2xl font-semibold text-ink">${valor}</div>
-      ${sub ? html`<div class="text-xs text-muted">${sub}</div>` : null}
+    <div class="min-w-0 rounded-[1.35rem] border border-slate-200 bg-white p-5 shadow-card">
+      <div class="text-xs font-bold text-slate-500">${label}</div>
+      <div class="mt-4 text-2xl font-black tracking-tight text-[#07110e] tabular-nums">${valor}</div>
+      ${sub ? html`<div class="mt-1 text-xs font-semibold text-slate-400">${sub}</div>` : null}
     </div>`;
 }
 
@@ -6325,15 +6579,15 @@ function InstagramPage() {
 
   return html`
     <div>
-      <div class="text-sm text-muted">✍️ Conteúdo</div>
-      <h1 class="mt-1 flex flex-wrap items-center gap-x-3 text-2xl font-semibold text-ink">
+      <div class="os-eyebrow">Conteúdo</div>
+      <h1 class="mt-2 flex flex-wrap items-center gap-x-3 os-titulo text-2xl sm:text-[1.75rem]">
         Métricas Instagram
-        ${perfil ? html`<a href=${"https://instagram.com/" + perfil.username} target="_blank" rel="noopener" class="text-sm font-normal text-brand hover:underline">@${perfil.username} ↗</a>` : null}
+        ${perfil ? html`<a href=${"https://instagram.com/" + perfil.username} target="_blank" rel="noopener" class="text-sm font-normal text-emerald-700 hover:underline">@${perfil.username} ↗</a>` : null}
       </h1>
       <p class="mt-1 text-xs text-muted">Dados via Windsor.ai · atualizado ${atualizado}</p>
 
       ${perfil && html`
-        <div class="mt-4 flex flex-wrap gap-6 rounded-xl border border-line bg-card p-4">
+        <div class="mt-4 flex flex-wrap gap-6 rounded-[1.35rem] border border-line bg-card shadow-card p-4">
           <div><div class="text-2xl font-semibold text-ink">${nf(perfil.seguidores)}</div><div class="text-xs text-muted">seguidores</div></div>
           <div><div class="text-2xl font-semibold text-ink">${nf(perfil.publicacoes)}</div><div class="text-xs text-muted">publicações</div></div>
           <div><div class="text-2xl font-semibold text-ink">${nf(perfil.seguindo)}</div><div class="text-xs text-muted">seguindo</div></div>
@@ -6347,7 +6601,7 @@ function InstagramPage() {
         <${KPI} label="Views de conteúdo" valor=${nfShort(viewsTotal)} />
       </div>
 
-      <div class="mt-4 rounded-xl border border-line bg-card p-4">
+      <div class="mt-4 rounded-[1.35rem] border border-line bg-card shadow-card p-4">
         <div class="mb-2 text-xs uppercase tracking-wide text-muted">Alcance por dia</div>
         <${Sparkline} values=${jan.map((r) => r.reach || 0)} />
         <div class="mt-1 flex justify-between text-[11px] text-muted">
@@ -6357,7 +6611,7 @@ function InstagramPage() {
       </div>
 
       <h2 class="mt-8 text-sm font-semibold uppercase tracking-wider text-muted">Posts recentes (${posts.length})</h2>
-      <div class="mt-3 overflow-x-auto rounded-xl border border-line bg-card">
+      <div class="mt-3 overflow-x-auto rounded-[1.35rem] border border-line bg-card shadow-card">
         <table class="w-full min-w-[720px] text-left text-sm">
           <thead class="border-b border-line text-xs uppercase tracking-wide text-muted">
             <tr>
@@ -6375,7 +6629,7 @@ function InstagramPage() {
               return html`
                 <tr key=${p.media_id}>
                   <td class="px-4 py-3">
-                    <a href=${p.permalink} target="_blank" rel="noopener" class="font-medium text-ink hover:text-brand">
+                    <a href=${p.permalink} target="_blank" rel="noopener" class="font-medium text-ink hover:text-emerald-700">
                       ${(p.legenda || "(sem legenda)").slice(0, 70)}${(p.legenda || "").length > 70 ? "…" : ""}
                     </a>
                     <div class="text-xs text-muted">${p.tipo}</div>
@@ -6383,7 +6637,7 @@ function InstagramPage() {
                   <td class="px-4 py-3 text-muted">${fmtDate(p.publicado_em)}</td>
                   <td class="px-4 py-3">${nf(p.reach)}</td>
                   <td class="px-4 py-3">${nf(p.engajamento)}</td>
-                  <td class=${cx("px-4 py-3", er >= 4 ? "font-medium text-[#5e7a52]" : "text-muted")}>${er.toFixed(1)}%</td>
+                  <td class=${cx("px-4 py-3", er >= 4 ? "font-medium text-[#065f46]" : "text-muted")}>${er.toFixed(1)}%</td>
                   <td class="px-4 py-3 text-muted">${nf(p.views)}</td>
                 </tr>`;
             })}
@@ -6413,7 +6667,7 @@ function BarRow({ label, valor, max, sufixo, cor }) {
     <div class="flex items-center gap-2 text-sm">
       <div class="w-36 shrink-0 truncate text-ink/80" title=${label}>${label}</div>
       <div class="relative h-3.5 flex-1 overflow-hidden rounded bg-black/[0.05]">
-        <div class="absolute inset-y-0 left-0 rounded" style=${`width:${pct.toFixed(1)}%;background:${cor || "#ea5167"}`}></div>
+        <div class="absolute inset-y-0 left-0 rounded" style=${`width:${pct.toFixed(1)}%;background:${cor || "#059669"}`}></div>
       </div>
       <div class="w-16 shrink-0 text-right tabular-nums text-muted">${nf(valor)}${sufixo || ""}</div>
     </div>`;
@@ -6423,7 +6677,7 @@ function DistBloco({ titulo, contagem }) {
   const itens = Object.entries(contagem).filter(([k, n]) => n > 0 && k !== "—" && k !== "NA").sort((a, b) => b[1] - a[1]);
   const max = itens.length ? itens[0][1] : 1;
   return html`
-    <div class="rounded-xl border border-line bg-card p-4">
+    <div class="rounded-[1.35rem] border border-line bg-card shadow-card p-4">
       <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">${titulo}</div>
       ${itens.length ? html`<div class="space-y-1.5">${itens.map(([k, n]) => html`<${BarRow} label=${k} valor=${n} max=${max} />`)}</div>`
         : html`<div class="text-sm text-muted">Sem dados no período.</div>`}
@@ -6501,15 +6755,15 @@ function ConteudoMetricasPage() {
   const top = comDados.slice().sort((a, b) => (b.views_7d || 0) - (a.views_7d || 0)).slice(0, 10);
   const ruins = filtradas.filter((r) => r.score === "RUIM").sort((a, b) => (b.data_programada || "").localeCompare(a.data_programada || "")).slice(0, 10);
 
-  const selCls = "rounded-lg border border-line bg-white px-2 py-1 text-sm focus:border-brand focus:outline-none";
+  const selCls = "rounded-lg border border-line bg-white px-2 py-1 text-sm focus:border-emerald-300 focus:outline-none";
 
   return html`
     <div>
-      <div class="text-sm text-muted">✍️ Conteúdo</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">Métricas</h1>
+      <div class="os-eyebrow">Conteúdo</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Métricas</h1>
       <p class="mt-1 text-xs text-muted">
         Calendário de conteúdo · atualizado ${atualizado} ·
-        <a href=${CONTEUDO_SHEET_URL} target="_blank" rel="noopener" class="text-brand hover:underline">abrir planilha ↗</a>
+        <a href=${CONTEUDO_SHEET_URL} target="_blank" rel="noopener" class="text-emerald-700 hover:underline">abrir planilha ↗</a>
       </p>
 
       <h2 class="mt-5 text-sm font-semibold uppercase tracking-wider text-muted">Posts por objetivo</h2>
@@ -6517,9 +6771,9 @@ function ConteudoMetricasPage() {
         ${resumo.map((o) => {
           const real = Number(o.percentual || 0), meta = Number(o.meta || 0);
           const bate = real >= meta - 0.001;
-          const cor = o.objetivo === "Total" ? "#8f887d" : (bate ? "#4CAF6E" : "#EEB44E");
+          const cor = o.objetivo === "Total" ? "#64748b" : (bate ? "#4CAF6E" : "#EEB44E");
           return html`
-            <div class="rounded-2xl border border-line bg-card p-4">
+            <div class="rounded-[1.6rem] border border-line bg-card shadow-card p-4">
               <div class="text-sm font-semibold text-ink">${o.objetivo}</div>
               <div class="mt-1 text-2xl font-semibold text-ink">${nf(o.qtde)} <span class="text-sm font-normal text-muted">posts</span></div>
               <div class="mt-2 h-3 overflow-hidden rounded bg-black/[0.05]">
@@ -6533,7 +6787,7 @@ function ConteudoMetricasPage() {
         })}
       </div>
 
-      <div class="mt-6 flex flex-wrap items-end gap-3 rounded-xl border border-line bg-card p-3">
+      <div class="mt-6 flex flex-wrap items-end gap-3 rounded-[1.35rem] border border-line bg-card shadow-card p-3">
         <label class="text-sm">
           <span class="mb-1 block text-[11px] font-medium uppercase tracking-wide text-muted">Período</span>
           <select class=${selCls} value=${janela} onChange=${(e) => setJanela(e.target.value)}>
@@ -6590,7 +6844,7 @@ function ConteudoMetricasPage() {
       <h2 class="mt-8 text-sm font-semibold uppercase tracking-wider text-muted">Evolução por semana</h2>
       <div class="mt-3 grid gap-3 sm:grid-cols-3">
         ${[["Posts/semana", "posts"], ["Views/semana", "views"], ["Seguidores/semana", "seg"]].map(([lab, k]) => html`
-          <div class="rounded-xl border border-line bg-card p-4">
+          <div class="rounded-[1.35rem] border border-line bg-card shadow-card p-4">
             <div class="mb-2 text-xs uppercase tracking-wide text-muted">${lab}</div>
             <${Sparkline} values=${semKeys.map((s) => semanas[s][k])} />
             <div class="mt-1 flex justify-between text-[11px] text-muted">
@@ -6601,7 +6855,7 @@ function ConteudoMetricasPage() {
       </div>
 
       <h2 class="mt-8 text-sm font-semibold uppercase tracking-wider text-muted">Top 10 por views (7 dias)</h2>
-      <div class="mt-3 overflow-x-auto rounded-xl border border-line bg-card">
+      <div class="mt-3 overflow-x-auto rounded-[1.35rem] border border-line bg-card shadow-card">
         <table class="w-full min-w-[640px] text-left text-sm">
           <thead class="border-b border-line text-xs uppercase tracking-wide text-muted">
             <tr><th class="px-4 py-3 font-medium">Tema</th><th class="px-4 py-3 font-medium">Tipo</th><th class="px-4 py-3 font-medium">Funil</th><th class="px-4 py-3 font-medium">Score</th><th class="px-4 py-3 text-right font-medium">Views</th><th class="px-4 py-3 text-right font-medium">Eng.</th></tr>
@@ -6622,7 +6876,7 @@ function ConteudoMetricasPage() {
 
       ${ruins.length ? html`
         <h2 class="mt-8 text-sm font-semibold uppercase tracking-wider text-muted">Posts com Score "RUIM" (revisar)</h2>
-        <div class="mt-3 overflow-x-auto rounded-xl border border-line bg-card">
+        <div class="mt-3 overflow-x-auto rounded-[1.35rem] border border-line bg-card shadow-card">
           <table class="w-full min-w-[560px] text-left text-sm">
             <thead class="border-b border-line text-xs uppercase tracking-wide text-muted">
               <tr><th class="px-4 py-3 font-medium">Data</th><th class="px-4 py-3 font-medium">Tema</th><th class="px-4 py-3 font-medium">Tipo</th><th class="px-4 py-3 text-right font-medium">Views</th></tr>
@@ -6699,7 +6953,7 @@ function PesquisaCard({ p, onRegen }) {
   else { pill = "SEM RESPOSTAS NOVAS"; pillCls = PILL_NEUTRAL; }
 
   return html`
-    <div class="flex min-w-0 flex-col rounded-2xl border border-line bg-card p-5">
+    <div class="flex min-w-0 flex-col rounded-[1.6rem] border border-line bg-card shadow-card p-5">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
           <h3 class="text-base font-semibold leading-tight text-ink">${p.titulo}</h3>
@@ -6732,10 +6986,10 @@ function PesquisaCard({ p, onRegen }) {
         <span>${p.resumo_atualizado_em ? "Resumo atualizado " + fmtDate(p.resumo_atualizado_em) : "Resumo nunca gerado"}</span>
         <div class="flex items-center gap-3">
           <button type="button" onClick=${regenerarResumo} disabled=${regenBusy}
-            class="font-medium text-brand hover:underline disabled:opacity-50">
+            class="font-medium text-emerald-700 hover:underline disabled:opacity-50">
             ${regenBusy ? html`<span class="spinner mr-1"></span>gerando resumo…` : "↻ Atualizar resumo (IA)"}
           </button>
-          ${p.fonte_url ? html`<a href=${p.fonte_url} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">abrir pesquisa ↗</a>` : null}
+          ${p.fonte_url ? html`<a href=${p.fonte_url} target="_blank" rel="noopener" class="font-medium text-emerald-700 hover:underline">abrir pesquisa ↗</a>` : null}
         </div>
       </div>
     </div>`;
@@ -6764,7 +7018,7 @@ const PESQ_TITULO = {
   "metodo-tia-do-ingles": "Método Tia do Inglês", "decole-com-a-tia": "Decole com a Tia",
   "memorizacao": "Memorização", "pnl-metodo": "Módulo PNL · Método",
 };
-const PESQ_CORES = ["#ea5167", "#7d97bd", "#d0955a", "#9cb88f", "#a882b5", "#c9b458", "#6fb0b0", "#c98a9b", "#8d8d8d"];
+const PESQ_CORES = ["#059669", "#7d97bd", "#d0955a", "#9cb88f", "#a882b5", "#c9b458", "#6fb0b0", "#c98a9b", "#8d8d8d"];
 // Perguntas que aparecem primeiro nas pizzas (por trecho do título).
 const PESQ_PRIORIDADE = ["nivel", "renda", "quantos anos", "maior dificuldade", "tenta aprender", "conhece a tia", "urgencia",
   "forma de trabalho", "investir", "comecar", "classificacao", "sonho", "viajar", "pnl", "genero", "sexo"];
@@ -6824,7 +7078,7 @@ function PizzaPesq({ titulo, itens, total, max = 5, tamanho = 112, compacta, fil
   const soma = fatias.reduce((a, x) => a + x[1], 0) || 1;
   const r = 15.9155, c = 2 * Math.PI * r;
   let acum = 0;
-  return html`<div class=${cx("min-w-0 rounded-xl border border-line bg-card", compacta ? "p-3" : "p-4")}>
+  return html`<div class=${cx("min-w-0 rounded-[1.35rem] border border-line bg-card shadow-card", compacta ? "p-3" : "p-4")}>
     <div class=${cx("font-medium leading-snug text-ink", compacta ? "text-xs" : "text-sm")} title=${titulo}>${titulo}</div>
     <div class="mt-0.5 text-[11px] text-muted">${nf(total ?? soma)} respostas</div>
     <div class="mt-2 flex items-center gap-3">
@@ -6832,7 +7086,7 @@ function PizzaPesq({ titulo, itens, total, max = 5, tamanho = 112, compacta, fil
         <circle cx="21" cy="21" r=${r} fill="none" stroke="rgba(0,0,0,0.05)" stroke-width="7"></circle>
         ${fatias.map(([rot, n, ehResto], i) => {
           const len = (n / soma) * c;
-          const el = html`<circle cx="21" cy="21" r=${r} fill="none" stroke=${ehResto ? "#cfcac2" : PESQ_CORES[i % PESQ_CORES.length]}
+          const el = html`<circle cx="21" cy="21" r=${r} fill="none" stroke=${ehResto ? "#cbd5e1" : PESQ_CORES[i % PESQ_CORES.length]}
             stroke-width="7" stroke-dasharray=${`${len} ${c - len}`} stroke-dashoffset=${-acum}
             class=${onFatia && !ehResto ? "cursor-pointer" : ""} onClick=${onFatia && !ehResto ? () => onFatia(rot) : undefined}>
             <title>${rot}: ${n} (${Math.round((n / soma) * 100)}%)</title></circle>`;
@@ -6845,7 +7099,7 @@ function PizzaPesq({ titulo, itens, total, max = 5, tamanho = 112, compacta, fil
           <button type="button" disabled=${!onFatia || ehResto} onClick=${() => onFatia && onFatia(rot)}
             class=${cx("flex w-full items-start gap-1.5 rounded px-1 text-left text-[11px] leading-4", onFatia && !ehResto && "hover:bg-black/[0.04]",
               filtroAtivo === rot && "bg-brand-light")} title=${rot}>
-            <span class="mt-1 inline-block h-2 w-2 shrink-0 rounded-full" style=${"background:" + (ehResto ? "#cfcac2" : PESQ_CORES[i % PESQ_CORES.length])}></span>
+            <span class="mt-1 inline-block h-2 w-2 shrink-0 rounded-full" style=${"background:" + (ehResto ? "#cbd5e1" : PESQ_CORES[i % PESQ_CORES.length])}></span>
             <span class="min-w-0 flex-1 truncate text-ink/80">${rot}</span>
             <span class="shrink-0 tabular-nums text-muted">${Math.round((n / soma) * 100)}%</span>
           </button>
@@ -6884,14 +7138,14 @@ function PesquisasPage() {
 
   return html`
     <div>
-      <div class="text-sm text-muted">🤝 CS / Suporte</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">Pesquisas de Alunos</h1>
+      <div class="os-eyebrow">CS / Suporte</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Pesquisas de Alunos</h1>
       <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
         <span>Última resposta: <span class="font-medium text-ink">${fmtDataHoraPesq(ultimaGeral)}</span></span>
         ${textoAtualizadoPesq(status) ? html`<span>· ${textoAtualizadoPesq(status)}</span>` : null}
         <${Btn} variant="ghost" type="button" class="ml-auto" loading=${sinc} onClick=${() => atualizar(true)}>↻ Atualizar<//>
       </div>
-      ${erro ? html`<div class="mt-3 rounded-lg border border-[#efe0b5] bg-[#faf5e4] px-3 py-2 text-sm text-[#7c6a2a]">
+      ${erro ? html`<div class="mt-3 rounded-lg border border-[#fde68a] bg-[#fffbeb] px-3 py-2 text-sm text-[#92400e]">
         ${status.ultimo_detalhe || "Não foi possível ler as planilhas."} Mostrando a última versão salva no OS.</div>` : null}
 
       ${painel === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
@@ -6900,13 +7154,13 @@ function PesquisasPage() {
             const itens = g.chaves.map((k) => porChave[k]).filter(Boolean);
             const total = itens.reduce((a, x) => a + x.n, 0);
             const ult = itens.map((x) => x.ultima).filter(Boolean).sort().pop();
-            return html`<section class="rounded-2xl border border-line bg-card p-5">
+            return html`<section class="rounded-[1.6rem] border border-line bg-card shadow-card p-5">
               <div class="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h2 class="text-lg font-semibold text-ink">${g.nome}</h2>
                   <div class="text-xs text-muted">${g.desc}</div>
                 </div>
-                <a href=${"#/cs/pesquisas/" + id} class="inline-flex items-center gap-1 rounded-lg bg-brand px-3.5 py-2 text-sm font-medium text-white shadow-sm hover:bg-brand-dark">Ver detalhes →</a>
+                <a href=${"#/cs/pesquisas/" + id} class="os-btn-primario inline-flex items-center gap-1 rounded-2xl px-4 py-2 text-sm font-bold transition">Ver detalhes →</a>
               </div>
               <div class="mt-3 grid grid-cols-3 gap-2">
                 <div class="rounded-lg border border-line px-3 py-2"><div class="text-[11px] uppercase tracking-wide text-muted">Respostas</div>
@@ -6951,7 +7205,7 @@ function DetalheRespostaPesq({ r, onClose }) {
     <div class="mt-3 grid gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
       <div><div class="text-xs text-muted">E-mail</div><div class="break-all">${r.email || "—"}</div></div>
       <div><div class="text-xs text-muted">Telefone</div><div>${tel.length ? tel.map((t, i) => html`${i ? " / " : ""}${t.url
-        ? html`<a class="text-[#3d7a45] hover:underline" href=${t.url} target="_blank" rel="noopener">${t.texto}</a>` : t.texto}`) : "—"}</div></div>
+        ? html`<a class="text-[#047857] hover:underline" href=${t.url} target="_blank" rel="noopener">${t.texto}</a>` : t.texto}`) : "—"}</div></div>
     </div>
     <dl class="mt-4 divide-y divide-line rounded-lg border border-line">
       ${(r.dados || []).map((d) => html`<div class="px-3 py-2 text-sm">
@@ -7096,8 +7350,8 @@ function PesquisaGrupoPage({ grupo }) {
 
   return html`
     <div>
-      <div class="text-sm text-muted"><a href="#/cs/pesquisas" class="hover:underline">🤝 CS / Suporte · Pesquisas de Alunos</a></div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">${g.nome}</h1>
+      <div class="os-eyebrow"><a href="#/cs/pesquisas">CS / Suporte · Pesquisas de Alunos</a></div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">${g.nome}</h1>
       <p class="mt-0.5 text-sm text-muted">${g.desc}</p>
       <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
         <span>Última resposta: <span class="font-medium text-ink">${fmtDataHoraPesq(ultimaResp)}</span></span>
@@ -7110,32 +7364,32 @@ function PesquisaGrupoPage({ grupo }) {
 
       ${lista === null ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando respostas…</div>` : html`
         <div class="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
-          <div class="rounded-xl border border-line bg-card p-4">
+          <div class="rounded-[1.35rem] border border-line bg-card shadow-card p-4">
             <div class="text-xs uppercase tracking-wide text-muted">Respostas</div>
             <div class="mt-1 text-2xl font-semibold text-ink">${nf(filtrados.length)}</div>
             <div class="text-xs text-muted">${temFiltro ? "de " + nf(lista.length) + " no total" : "no total"}</div>
           </div>
-          <div class="col-span-2 rounded-xl border border-line bg-card p-4">
+          <div class="col-span-2 rounded-[1.35rem] border border-line bg-card shadow-card p-4">
             <div class="text-xs uppercase tracking-wide text-muted">Por pesquisa (clique para filtrar)</div>
             <div class="mt-2 space-y-1">
               ${g.chaves.map((k) => html`<button type="button" onClick=${() => setFChaves((cs) => cs.includes(k) ? cs.filter((x) => x !== k) : [...cs, k])}
                 class=${cx("flex w-full items-center gap-2 rounded px-1 text-left text-xs hover:bg-black/[0.03]", fChaves.includes(k) && "bg-brand-light")}>
                 <span class="w-40 shrink-0 truncate text-ink/80">${PESQ_TITULO[k]}</span>
                 <div class="h-1.5 flex-1 overflow-hidden rounded bg-black/[0.05]">
-                  <div class="h-full rounded bg-brand/70" style=${`width:${filtrados.length ? ((porChave[k] || 0) / filtrados.length) * 100 : 0}%`}></div>
+                  <div class="h-full rounded bg-emerald-500/80" style=${`width:${filtrados.length ? ((porChave[k] || 0) / filtrados.length) * 100 : 0}%`}></div>
                 </div>
                 <span class="w-12 shrink-0 text-right tabular-nums text-muted">${nf(porChave[k] || 0)}</span>
               </button>`)}
             </div>
           </div>
-          <div class="rounded-xl border border-line bg-card p-4">
+          <div class="rounded-[1.35rem] border border-line bg-card shadow-card p-4">
             <div class="text-xs uppercase tracking-wide text-muted">Na Lista de Mentorados</div>
             <div class="mt-1 text-2xl font-semibold text-ink">${nf(naLista)}</div>
             <div class="text-xs text-muted">${pctVac(naLista, filtrados.length)} das respostas filtradas (por e-mail ou telefone)</div>
           </div>
         </div>
 
-        <div class="mt-4 rounded-2xl border border-line bg-card p-4">
+        <div class="mt-4 rounded-[1.6rem] border border-line bg-card shadow-card p-4">
           <div class="flex flex-wrap items-end gap-2">
             <label class="block w-full sm:w-auto sm:min-w-[240px] sm:flex-1 lg:max-w-xs">
               <span class="mb-1 block text-xs text-muted">Buscar</span>
@@ -7187,7 +7441,7 @@ function PesquisaGrupoPage({ grupo }) {
           </div>` : null}
         </div>
 
-        <div class="mt-4 rounded-2xl border border-brand/30 bg-brand-light/30 p-4">
+        <div class="mt-4 rounded-2xl border border-emerald-200 bg-brand-light/30 p-4">
           <div class="text-sm font-semibold text-ink">Pergunte sobre estas respostas</div>
           <div class="text-xs text-muted">A IA analisa as ${nf(filtrados.length)} respostas filtradas: números exatos nas perguntas de múltipla escolha e uma leitura das respostas abertas.</div>
           <form class="mt-2 flex flex-col gap-2 sm:flex-row" onSubmit=${(e) => { e.preventDefault(); perguntar(); }}>
@@ -7197,10 +7451,10 @@ function PesquisaGrupoPage({ grupo }) {
           </form>
           ${!respostaIa && !perguntando ? html`<div class="mt-2 flex flex-wrap gap-1.5">
             ${PESQ_SUGESTOES[grupo].map((s) => html`<button type="button" onClick=${() => perguntar(s)}
-              class="rounded-full border border-line bg-white px-2.5 py-1 text-xs text-ink/80 hover:border-brand/40">${s}</button>`)}
+              class="rounded-full border border-line bg-white px-2.5 py-1 text-xs text-ink/80 hover:border-emerald-200">${s}</button>`)}
           </div>` : null}
           ${perguntando ? html`<div class="mt-3 text-sm text-muted"><span class="spinner mr-2"></span>Analisando as respostas…</div>` : null}
-          ${respostaIa && !perguntando ? html`<div class="mt-3 rounded-xl border border-line bg-white p-4">
+          ${respostaIa && !perguntando ? html`<div class="mt-3 rounded-[1.35rem] border border-line bg-white shadow-card p-4">
             <div class="text-xs text-muted">${respostaIa.pergunta} · base: ${nf(respostaIa.base)} respostas</div>
             <div class="prose-doc mt-2 min-w-0 text-sm" dangerouslySetInnerHTML=${{ __html: mdToHtml(respostaIa.texto) }}></div>
           </div>` : null}
@@ -7216,7 +7470,7 @@ function PesquisaGrupoPage({ grupo }) {
         </div>
         ${pizzas.length > 6 ? html`<div class="mt-2 text-center"><${Btn} variant="ghost" type="button" onClick=${() => setTodasPizzas(!todasPizzas)}>
           ${todasPizzas ? "Mostrar menos" : `Mostrar todas (${pizzas.length})`}<//></div>` : null}`
-        : html`<div class="mt-2 rounded-xl border border-line bg-card px-4 py-6 text-center text-sm text-muted">
+        : html`<div class="mt-2 rounded-[1.35rem] border border-line bg-card shadow-card px-4 py-6 text-center text-sm text-muted">
             ${filtrados.length ? "Estas respostas só têm perguntas abertas. Use a busca, a lista abaixo ou pergunte à IA." : "Nenhuma resposta com esses filtros."}</div>`}
 
         <div class="mt-5 flex flex-wrap items-center gap-2">
@@ -7224,7 +7478,7 @@ function PesquisaGrupoPage({ grupo }) {
           <span class="text-xs text-muted">${nf(filtrados.length)} ${filtrados.length === 1 ? "resposta" : "respostas"}</span>
           <${Btn} variant="ghost" type="button" class="ml-auto" disabled=${!filtrados.length} onClick=${() => exportarCsvPesq(filtrados, grupo)}>Exportar CSV<//>
         </div>
-        <div class="mt-2 divide-y divide-line overflow-hidden rounded-2xl border border-line bg-card">
+        <div class="mt-2 divide-y divide-line overflow-hidden rounded-[1.6rem] border border-line bg-card shadow-card">
           ${paginaRows.length ? paginaRows.map((r) => html`<button type="button" key=${r.chave + r.linha} onClick=${() => setAberta(r)}
             class="block w-full px-4 py-3 text-left hover:bg-black/[0.02]">
             <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
@@ -7277,20 +7531,20 @@ const CHAT_CATEGORIAS = [
 
 const CHAT_CAT_CLS = {
   "Gramática": "bg-[#e6f2fb] text-[#2c5b78]",
-  "Vocabulário e expressões": "bg-[#e3ecdf] text-[#4c6b3f]",
-  "Pronúncia e MYPA": "bg-[#f3ecd8] text-[#8a6a1f]",
+  "Vocabulário e expressões": "bg-[#d1fae5] text-[#047857]",
+  "Pronúncia e MYPA": "bg-[#fef3c7] text-[#b45309]",
   "Listening / compreensão": "bg-[#e8e4f3] text-[#5b4c8a]",
-  "Speaking / travar ao falar": "bg-[#fbe7e4] text-[#a44b43]",
+  "Speaking / travar ao falar": "bg-[#ffe4e6] text-[#be123c]",
   "Técnicas do Método": "bg-[#dfeeec] text-[#3f6b64]",
-  "Materiais e módulos": "bg-[#f0e8df] text-[#7a5c3f]",
+  "Materiais e módulos": "bg-[#f1f5f9] text-[#7a5c3f]",
   "Motivação / bloqueio": "bg-[#f7e4ef] text-[#8a3f6d]",
-  "Fora de escopo": "bg-[#f4ddda] text-[#9c2b23]",
+  "Fora de escopo": "bg-[#ffe4e6] text-[#9f1239]",
   "Outro": "bg-black/[0.05] text-ink",
 };
 
 function ChatRespostaCel({ r }) {
   const [open, setOpen] = useState(false);
-  if (r.erro) return html`<span class="text-[#9c2b23]">Erro: ${r.erro}</span>`;
+  if (r.erro) return html`<span class="text-[#9f1239]">Erro: ${r.erro}</span>`;
   const resp = r.resposta || "—";
   const longo = resp.length > 200;
   const txt = longo && !open ? resp.slice(0, 200) + "…" : resp;
@@ -7299,7 +7553,7 @@ function ChatRespostaCel({ r }) {
       ${r.stop_reason && r.stop_reason !== "end_turn"
         ? html`<span class="mr-1" title=${`possível resposta cortada (${r.stop_reason})`}>⚠️</span>` : null}
       <span class="whitespace-pre-wrap">${txt}</span>
-      ${longo ? html`<button type="button" class="ml-1 whitespace-nowrap text-xs text-brand hover:underline"
+      ${longo ? html`<button type="button" class="ml-1 whitespace-nowrap text-xs text-emerald-700 hover:underline"
         onClick=${() => setOpen((o) => !o)}>${open ? "ver menos" : "ver tudo"}</button>` : null}
     </div>`;
 }
@@ -7360,12 +7614,12 @@ function ChatCademiPage() {
 
   return html`
     <div>
-      <div class="text-sm text-muted">🤝 CS / Suporte</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">Chat da Cademí</h1>
+      <div class="os-eyebrow">CS / Suporte</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Chat da Cademí</h1>
       <p class="mt-1 max-w-3xl text-xs text-muted">
         Perguntas e respostas do chatbot de dúvidas de conteúdo (popup na Cademí, treinado só com a seção Metodologia).
         Cada resposta é categorizada automaticamente. As mesmas colunas vão para a
-        ${" "}<a class="text-brand hover:underline" target="_blank" rel="noopener"
+        ${" "}<a class="text-emerald-700 hover:underline" target="_blank" rel="noopener"
           href="https://docs.google.com/spreadsheets/d/1XX_WrLzhW8ORSi4PY2yUghg7GAGHt0_4aRy2lP0-KzY/edit">planilha do Google</a>.
       </p>
 
@@ -7380,7 +7634,7 @@ function ChatCademiPage() {
         <${DistBloco} titulo="Principais categorias de dúvida" contagem=${contagemCat} />
       </div>
 
-      <div class="mt-4 flex flex-wrap items-end gap-3 rounded-xl border border-line bg-card p-3">
+      <div class="mt-4 flex flex-wrap items-end gap-3 rounded-[1.35rem] border border-line bg-card shadow-card p-3">
         <div class="w-full sm:w-44">
           <label class="block text-xs text-muted">Período</label>
           <select class=${cx(inputCls, "mt-1")} value=${periodo} onChange=${(e) => setPeriodo(e.target.value)}>
@@ -7410,11 +7664,11 @@ function ChatCademiPage() {
           <input type="text" placeholder="buscar…" class=${cx(inputCls, "mt-1")} value=${busca}
             onInput=${(e) => setBusca(e.target.value)} />
         </div>
-        <button type="button" class="pb-2 text-xs text-brand hover:underline" onClick=${limparFiltros}>limpar filtros</button>
+        <button type="button" class="pb-2 text-xs text-emerald-700 hover:underline" onClick=${limparFiltros}>limpar filtros</button>
         <span class="pb-2 text-xs text-muted">${filtradas.length} de ${noPeriodo.length}</span>
       </div>
 
-      <div class="mt-4 overflow-x-auto rounded-2xl border border-line bg-card">
+      <div class="mt-4 overflow-x-auto rounded-[1.6rem] border border-line bg-card shadow-card">
         <table class="w-full min-w-[900px] text-sm">
           <thead>
             <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
@@ -7521,21 +7775,21 @@ function GeradorConteudosPage() {
   const Radio = ({ val, cur, set, children }) => html`
     <button type="button" onClick=${() => set(val)}
       class=${cx("rounded-lg border px-3 py-1.5 text-sm transition",
-        cur === val ? "border-brand bg-brand-light font-medium text-brand-dark" : "border-line text-ink/70 hover:bg-black/[0.04]")}>
+        cur === val ? "border-emerald-500 bg-brand-light font-medium text-brand-dark" : "border-line text-ink/70 hover:bg-black/[0.04]")}>
       ${children}
     </button>`;
 
   return html`
     <div>
-      <div class="text-sm text-muted">✍️ Conteúdo</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">Gerador de Conteúdos</h1>
+      <div class="os-eyebrow">Conteúdo</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Gerador de Conteúdos</h1>
       <p class="mt-1 text-xs text-muted">
         As principais respostas das pesquisas com alunas da Mentoria, organizadas para virar pauta${atualizado ? " · atualizado " + fmtDate(atualizado) : ""}.
       </p>
 
       <div class="mt-5 grid gap-4 lg:grid-cols-2">
         ${INSIGHT_CATS.map(([k, label, emoji]) => html`
-          <div class="rounded-2xl border border-line bg-card p-5">
+          <div class="rounded-[1.6rem] border border-line bg-card shadow-card p-5">
             <div class="text-sm font-semibold text-ink">${emoji} ${label}</div>
             <ol class="mt-2 space-y-1.5 text-sm">
               ${(porCat[k] || []).map((r) => html`
@@ -7548,9 +7802,9 @@ function GeradorConteudosPage() {
       </div>
 
       <h2 class="mt-9 text-sm font-semibold uppercase tracking-wider text-muted">Gerar ideias de conteúdo</h2>
-      <div class="mt-3 rounded-2xl border border-line bg-card p-5">
+      <div class="mt-3 rounded-[1.6rem] border border-line bg-card shadow-card p-5">
         ${configured === false ? html`
-          <div class="mb-4 rounded-xl border border-[#efd9d3] bg-[#faefec] p-4 text-sm text-muted">
+          <div class="mb-4 rounded-xl border border-[#fecdd3] bg-[#fff1f2] p-4 text-sm text-muted">
             A IA ainda não está conectada (falta o segredo <code class="rounded bg-black/[0.05] px-1">ANTHROPIC_API_KEY</code>).
           </div>` : null}
 
@@ -7559,7 +7813,7 @@ function GeradorConteudosPage() {
           ${INSIGHT_CATS.map(([k, label, emoji]) => html`
             <button type="button" onClick=${() => toggle(k)}
               class=${cx("rounded-full border px-3 py-1.5 text-sm transition",
-                sel.has(k) ? "border-brand bg-brand-light font-medium text-brand-dark" : "border-line text-ink/60 hover:bg-black/[0.04]")}>
+                sel.has(k) ? "border-emerald-500 bg-brand-light font-medium text-brand-dark" : "border-line text-ink/60 hover:bg-black/[0.04]")}>
               ${emoji} ${label}
             </button>`)}
         </div>
@@ -7727,9 +7981,9 @@ function LinkedinConexao({ me, onStatus }) {
     </div>
     <${Btn} onClick=${conectar} loading=${busy === "conectar"}>Conectar LinkedIn<//>`);
   const sit = liSituacaoToken(st.expires_at);
-  const cls = sit.nivel === "expirado" ? "border-[#e3b7ae] bg-[#faefec]" : sit.nivel === "perto" ? "border-[#e8dca0] bg-[#fbf5d9]" : "border-line bg-card";
+  const cls = sit.nivel === "expirado" ? "border-[#fda4af] bg-[#fff1f2]" : sit.nivel === "perto" ? "border-[#fde68a] bg-[#fffbeb]" : "border-line bg-card";
   const txt = sit.nivel === "expirado"
-    ? html`<span class="font-semibold text-[#a44b43]">Conexão expirada</span> · nada será publicado até reconectar`
+    ? html`<span class="font-semibold text-[#be123c]">Conexão expirada</span> · nada será publicado até reconectar`
     : html`expira em ${sit.dias} dia${sit.dias === 1 ? "" : "s"}${sit.nivel === "perto" ? " · reconecte para não interromper as publicações" : ""}`;
   return caixa(cls, html`
     <div class="min-w-[240px] flex-1 text-sm">
@@ -7843,11 +8097,11 @@ function LinkedinPage({ me }) {
 
   return html`
     <div>
-      <div class="text-sm text-muted">✍️ Conteúdo</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">LinkedIn</h1>
+      <div class="os-eyebrow">Conteúdo</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">LinkedIn</h1>
       <p class="mt-1 max-w-3xl text-sm text-muted">
         Fila de posts do LinkedIn pessoal da Tia. Post <b>aprovado</b> é publicado sozinho no LinkedIn no horário marcado,
-        se o LinkedIn estiver conectado (cartão abaixo). Regras no${" "}<a class="text-brand hover:underline" href="#/secao/documentacao-e-processos">Guia Editorial (Documentação e Processos)</a>.
+        se o LinkedIn estiver conectado (cartão abaixo). Regras no${" "}<a class="text-emerald-700 hover:underline" href="#/secao/documentacao-e-processos">Guia Editorial (Documentação e Processos)</a>.
       </p>
 
       ${pode ? html`<${LinkedinConexao} me=${me} />` : null}
@@ -7867,7 +8121,7 @@ function LinkedinPage({ me }) {
       </div>
 
       ${pode ? html`
-        <div class="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-line bg-card p-4">
+        <div class="mt-4 flex flex-wrap items-center gap-3 rounded-[1.6rem] border border-line bg-card shadow-card p-4">
           <${Btn} onClick=${gerar} loading=${gerando} disabled=${configured === false}>${rotuloGerar}<//>
           <label class="flex items-center gap-2 text-sm text-ink">
             <input type="checkbox" checked=${opcionais} onChange=${(e) => setOpcionais(e.target.checked)} /> Incluir opcionais 17:30 (ter a qui)
@@ -7886,7 +8140,7 @@ function LinkedinPage({ me }) {
           const vazios = slots.filter((h) => !doDia.some((r) => liPartesSP(r.agendado_para).hora === h));
           return html`
             <section key=${d}>
-              <h2 class=${cx("text-sm font-semibold uppercase tracking-wider", d === hoje ? "text-brand" : "text-muted")}>
+              <h2 class=${cx("text-sm font-semibold uppercase tracking-wider", d === hoje ? "text-emerald-700" : "text-muted")}>
                 ${liDiaCurto(d)}${d === hoje ? " · hoje" : ""}
               </h2>
               <div class="mt-2 grid gap-4 xl:grid-cols-2">
@@ -7931,7 +8185,7 @@ function LinkedinCard({ post, pode, onSalvo }) {
   const gancho = [...(post.texto || "")].slice(0, LI_GANCHO).join("");
   const resto = [...(post.texto || "")].slice(LI_GANCHO).join("");
   const faixa = liFaixaTamanho(post.formato);
-  const nCls = n < faixa.min || n > faixa.max ? "text-[#a44b43]" : "text-[#5e7a52]";
+  const nCls = n < faixa.min || n > faixa.max ? "text-[#be123c]" : "text-[#065f46]";
   const mudouData = partes ? (data !== partes.data || hora !== partes.hora) : !!data;
 
   async function acao(nome, patch, rotulo, mensagem) {
@@ -8009,15 +8263,15 @@ function LinkedinCard({ post, pode, onSalvo }) {
       </div>
 
       ${post.observacao ? html`
-        <div class="mt-3 rounded-lg border border-[#e8dca0] bg-[#fbf5d9] px-3 py-2 text-xs text-[#6f6224]">${post.observacao}</div>` : null}
+        <div class="mt-3 rounded-lg border border-[#fde68a] bg-[#fffbeb] px-3 py-2 text-xs text-[#78350f]">${post.observacao}</div>` : null}
       ${(post.status === "erro" || post.status === "publicado") && post.erro ? html`
-        <div class="mt-3 rounded-lg border border-[#efd9d3] bg-[#faefec] px-3 py-2 text-xs text-[#a44b43]">${post.erro}</div>` : null}
+        <div class="mt-3 rounded-lg border border-[#fecdd3] bg-[#fff1f2] px-3 py-2 text-xs text-[#be123c]">${post.erro}</div>` : null}
       ${post.status === "publicado" ? html`
         <div class="mt-3 rounded-lg bg-[#dfe8f3]/60 px-3 py-2 text-xs text-[#3f5f86]">
           Publicado${post.publicado_em ? " em " + liFmtDataHora(post.publicado_em) : ""}${post.linkedin_urn ? html` · <a class="font-medium underline" href=${`https://www.linkedin.com/feed/update/${post.linkedin_urn}/`} target="_blank" rel="noopener">ver no LinkedIn</a>` : null}
         </div>` : null}
       ${post.status === "aprovado" && post.agendado_para && new Date(post.agendado_para).getTime() <= Date.now() - 24 * 3600 * 1000 ? html`
-        <div class="mt-3 rounded-lg border border-[#e8dca0] bg-[#fbf5d9] px-3 py-2 text-xs text-[#6f6224]">O horário marcado passou há mais de 24 horas: este post não sai sozinho. Escolha uma nova data e hora para ele ser publicado.</div>` : null}
+        <div class="mt-3 rounded-lg border border-[#fde68a] bg-[#fffbeb] px-3 py-2 text-xs text-[#78350f]">O horário marcado passou há mais de 24 horas: este post não sai sozinho. Escolha uma nova data e hora para ele ser publicado.</div>` : null}
       ${post.status === "publicando" ? html`
         <div class="mt-3 rounded-lg bg-[#dfe8f3]/60 px-3 py-2 text-xs text-[#3f5f86]"><span class="spinner mr-2"></span>Publicando no LinkedIn… recarregue a página em alguns instantes.</div>` : null}
 
@@ -8037,21 +8291,21 @@ function LinkedinCard({ post, pode, onSalvo }) {
         </div>` : html`
         <div class="mt-3 whitespace-pre-wrap break-words text-sm leading-relaxed">
           <span class="rounded bg-brand-light/60 font-medium text-ink" title=${`Primeiros ${LI_GANCHO} caracteres: o que aparece antes do "ver mais"`}>${gancho}</span>${resto
-            ? (aberto ? html`<span class="text-ink/75">${resto}</span>` : html`<button type="button" class="ml-1 text-xs font-medium text-brand hover:underline" onClick=${() => setAberto(true)}>…ver mais</button>`)
+            ? (aberto ? html`<span class="text-ink/75">${resto}</span>` : html`<button type="button" class="ml-1 text-xs font-medium text-emerald-700 hover:underline" onClick=${() => setAberto(true)}>…ver mais</button>`)
             : null}
-          ${aberto && resto ? html`<div><button type="button" class="mt-1 text-xs font-medium text-brand hover:underline" onClick=${() => setAberto(false)}>ver menos</button></div>` : null}
+          ${aberto && resto ? html`<div><button type="button" class="mt-1 text-xs font-medium text-emerald-700 hover:underline" onClick=${() => setAberto(false)}>ver menos</button></div>` : null}
         </div>
         ${post.primeiro_comentario ? html`
           <div class="mt-3 rounded-lg bg-black/[0.03] px-3 py-2 text-xs text-ink/80">
             <span class="font-medium text-muted">Primeiro comentário:</span> ${post.primeiro_comentario}
-            <button type="button" class="ml-2 font-medium text-brand hover:underline" onClick=${() => copiar(post.primeiro_comentario, "Comentário copiado.")}>copiar</button>
+            <button type="button" class="ml-2 font-medium text-emerald-700 hover:underline" onClick=${() => copiar(post.primeiro_comentario, "Comentário copiado.")}>copiar</button>
           </div>` : null}`}
 
       ${sugestao ? html`
-        <div class="mt-3 rounded-xl border border-brand/30 bg-brand-light/30 p-3">
+        <div class="mt-3 rounded-xl border border-emerald-200 bg-brand-light/30 p-3">
           <div class="text-xs font-semibold uppercase tracking-wide text-brand-dark">Sugestão da IA · ${liContar(sugestao.texto).toLocaleString("pt-BR")} caracteres</div>
-          ${sugestao.avisos.length ? html`<div class="mt-1 text-xs text-[#6f6224]">Atenção: ${sugestao.avisos.join("; ")}.</div>` : null}
-          ${sugestao.observacao ? html`<div class="mt-1 text-xs text-[#6f6224]">${sugestao.observacao} (vai para a observação do post ao salvar o texto)</div>` : null}
+          ${sugestao.avisos.length ? html`<div class="mt-1 text-xs text-[#78350f]">Atenção: ${sugestao.avisos.join("; ")}.</div>` : null}
+          ${sugestao.observacao ? html`<div class="mt-1 text-xs text-[#78350f]">${sugestao.observacao} (vai para a observação do post ao salvar o texto)</div>` : null}
           <div class="mt-2 max-h-[360px] overflow-auto whitespace-pre-wrap text-sm leading-relaxed text-ink">${sugestao.texto}</div>
           <div class="mt-2 flex flex-wrap gap-2">
             <${Btn} onClick=${usarSugestao}>Usar este texto<//>
@@ -8479,9 +8733,9 @@ function FarolPage({ me }) {
   if (loading) return html`<div class="text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`;
 
   const totalCols = semanas + 8;
-  const numInput = "w-full rounded-md border border-line bg-white px-2 py-1 text-right text-sm tabular-nums focus:border-brand focus:outline-none";
-  const txtInput = "w-full rounded-md border border-line bg-white px-2 py-1 text-sm focus:border-brand focus:outline-none";
-  const miniSel = "rounded border border-line bg-white px-1 py-0.5 text-[11px] text-muted focus:border-brand focus:outline-none";
+  const numInput = "w-full rounded-md border border-line bg-white px-2 py-1 text-right text-sm tabular-nums focus:border-emerald-300 focus:outline-none";
+  const txtInput = "w-full rounded-md border border-line bg-white px-2 py-1 text-sm focus:border-emerald-300 focus:outline-none";
+  const miniSel = "rounded border border-line bg-white px-1 py-0.5 text-[11px] text-muted focus:border-emerald-300 focus:outline-none";
 
   // alertas
   const alertas = [];
@@ -8525,20 +8779,20 @@ function FarolPage({ me }) {
 
   return html`
     <div>
-      <div class="text-sm text-muted">🚦 Painel de acompanhamento estratégico</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">Farol do Lucro</h1>
+      <div class="os-eyebrow">Painel de acompanhamento estratégico</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Farol do Lucro</h1>
       <p class="mt-1 max-w-3xl text-xs text-muted">
         Você define a meta de cada indicador, preenche o realizado semana a semana e o farol muda de cor sozinho,
         mostrando onde agir antes de o mês fechar. Tudo é salvo automaticamente.
       </p>
 
-      <div class="mt-4 rounded-xl border border-line bg-card p-4">
+      <div class="mt-4 rounded-[1.35rem] border border-line bg-card shadow-card p-4">
         <div class="text-xs font-medium uppercase tracking-wide text-muted">Área da empresa</div>
         <div class="mt-2 flex flex-wrap gap-1.5">
           ${FAROL_SETORES.map(([id, nome]) => html`
             <button type="button" onClick=${() => escolherSetor(id)}
               class=${cx("rounded-full border px-3 py-1 text-xs transition",
-                setor === id ? "border-brand bg-brand-light font-medium text-brand-dark" : "border-line text-ink/60 hover:bg-black/[0.04]")}>
+                setor === id ? "border-emerald-500 bg-brand-light font-medium text-brand-dark" : "border-line text-ink/60 hover:bg-black/[0.04]")}>
               ${nome}
             </button>`)}
         </div>
@@ -8548,13 +8802,13 @@ function FarolPage({ me }) {
         const opcoesMes = [...new Set([...(mesesDisp || []), mes, farolMesAtual()])].sort();
         const modoComp = comparar.length >= 2;
         return html`
-          <div class="mt-3 rounded-xl border border-line bg-card p-4">
+          <div class="mt-3 rounded-[1.35rem] border border-line bg-card shadow-card p-4">
             <div class="text-xs font-medium uppercase tracking-wide text-muted">Meses — acompanhamento e evolução</div>
             <div class="mt-2 flex flex-wrap items-center gap-1.5">
               ${opcoesMes.map((m) => html`
                 <button type="button" onClick=${() => toggleComparar(m)}
                   class=${cx("rounded-full border px-2.5 py-1 text-xs transition",
-                    comparar.includes(m) ? "border-brand bg-brand-light font-medium text-brand-dark" : "border-line text-ink/60 hover:bg-black/[0.04]")}>
+                    comparar.includes(m) ? "border-emerald-500 bg-brand-light font-medium text-brand-dark" : "border-line text-ink/60 hover:bg-black/[0.04]")}>
                   ${farolMesLabel(m)}${m === mes && !modoComp ? " ·" : ""}
                 </button>`)}
               ${comparar.length > 1 ? html`<button type="button" class="ml-1 text-xs text-muted hover:text-ink" onClick=${() => setComparar([farolMesAtual()])}>só o mês vigente</button>` : null}
@@ -8564,7 +8818,7 @@ function FarolPage({ me }) {
             </p>
           </div>
 
-          <div class=${cx("mt-3 flex flex-wrap items-end gap-4 rounded-xl border border-line bg-card p-4", modoComp && "opacity-60")}>
+          <div class=${cx("mt-3 flex flex-wrap items-end gap-4 rounded-[1.35rem] border border-line bg-card shadow-card p-4", modoComp && "opacity-60")}>
             <label class="text-sm">
               <span class="mb-1 block text-xs font-medium uppercase tracking-wide text-muted">Ir para outro mês</span>
               <div class="flex gap-2">
@@ -8592,7 +8846,7 @@ function FarolPage({ me }) {
       })()}
 
       ${comparar.length >= 2 ? html`
-        <div class="mt-4 overflow-x-auto rounded-xl border border-line bg-card">
+        <div class="mt-4 overflow-x-auto rounded-[1.35rem] border border-line bg-card shadow-card">
           ${linhasComp === null ? html`<div class="p-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando comparativo…</div>` : html`
           <table class="w-full min-w-[640px] border-collapse text-left text-sm">
             <thead class="border-b border-line text-[11px] uppercase tracking-wide text-muted">
@@ -8608,7 +8862,7 @@ function FarolPage({ me }) {
                 if (!nomes.length) return null;
                 const mesesC = [...comparar].sort();
                 return [
-                  html`<tr class="bg-[#f6f3ee]"><td colspan=${mesesC.length + 1} class="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-ink">${bloco.nome}</td></tr>`,
+                  html`<tr class="bg-[#f3f7f5]"><td colspan=${mesesC.length + 1} class="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-ink">${bloco.nome}</td></tr>`,
                   ...nomes.map((nome) => {
                     const byMes = {}; for (const r of linhasB.filter((x) => x.nome === nome)) byMes[r.mes] = r;
                     return html`
@@ -8620,7 +8874,7 @@ function FarolPage({ me }) {
                           const ts = (r.valores || []).length || 4;
                           const st = farolStatus(r, ts);
                           const val = farolFmt(farolConsolidar(r), r.unidade) || "—";
-                          const cor = st === "abaixo-indefinido" ? "#f0d9a8" : (FAROL_STATUS[st] && FAROL_STATUS[st].cor);
+                          const cor = st === "abaixo-indefinido" ? "#fcd34d" : (FAROL_STATUS[st] && FAROL_STATUS[st].cor);
                           const pinta = cor && st !== "sem-dado";
                           return html`<td class="px-3 py-2 text-right tabular-nums" style=${pinta ? `background:${cor};color:${farolTextoSobre(cor)}` : ""}>
                             ${val}${r.meta != null ? html`<span class="ml-1 text-[10px] opacity-70">/ ${farolFmt(r.meta, r.unidade)}</span>` : null}
@@ -8642,10 +8896,10 @@ function FarolPage({ me }) {
 
       ${alertas.length ? html`
         <div class="mt-3 space-y-1.5">
-          ${alertas.map((a) => html`<div class="rounded-lg border border-[#efe9cf] bg-[#faf6e8] px-3 py-2 text-xs text-[#7c7440]">⚠ ${a}</div>`)}
+          ${alertas.map((a) => html`<div class="rounded-lg border border-[#fef3c7] bg-[#fffbeb] px-3 py-2 text-xs text-[#92400e]">⚠ ${a}</div>`)}
         </div>` : null}
 
-      <div class="mt-4 overflow-x-auto rounded-xl border border-line bg-card">
+      <div class="mt-4 overflow-x-auto rounded-[1.35rem] border border-line bg-card shadow-card">
         <table class="w-full min-w-[900px] border-collapse text-left text-sm">
           <thead class="border-b border-line text-[11px] uppercase tracking-wide text-muted">
             <tr>
@@ -8669,7 +8923,7 @@ function FarolPage({ me }) {
               const opcoes = FAROL_INDICADORES.filter((i) => i.bloco === bloco.id && !usados.has(i.nome.toLowerCase()));
               return [
                 html`
-                  <tr class="bg-[#f6f3ee]">
+                  <tr class="bg-[#f3f7f5]">
                     <td colspan=${totalCols} class="px-3 py-2">
                       <span class="text-xs font-semibold uppercase tracking-wide text-ink">${bloco.nome}</span>
                       ${bloco.descricao ? html`<span class="ml-2 text-[11px] text-muted">${bloco.descricao}</span>` : null}
@@ -8721,7 +8975,7 @@ function FarolPage({ me }) {
                           disabled=${!podeEditar} value=${r.obs || ""} onInput=${(e) => patchRow(r.id, { obs: e.target.value })} />
                       </td>
                       <td class="px-1 py-2 text-center">
-                        ${podeEditar ? html`<button class="rounded p-1 text-muted hover:bg-black/[0.06] hover:text-[#a44b43]" title="Remover" onClick=${() => delInd(r.id)}>✕</button>` : null}
+                        ${podeEditar ? html`<button class="rounded p-1 text-muted hover:bg-black/[0.06] hover:text-[#be123c]" title="Remover" onClick=${() => delInd(r.id)}>✕</button>` : null}
                       </td>
                     </tr>`),
                 podeEditar ? html`
@@ -8802,7 +9056,7 @@ function FilaPedidos({ pedidos, podeEditar, tabela, tarefa, estimativa, minutosE
                 const desdeMs = p.status === "processando" && p.updated_at ? Date.now() - new Date(p.updated_at).getTime() : null;
                 const restanteMin = desdeMs != null ? Math.max(1, minEst(p) - Math.round(desdeMs / 60000)) : null;
                 return html`
-                  <div class="rounded-xl border border-line bg-card p-4">
+                  <div class="rounded-[1.35rem] border border-line bg-card shadow-card p-4">
                     <div class="flex flex-wrap items-start justify-between gap-2">
                       <div class="min-w-0">
                         <div class="font-medium text-ink">${p.tema}</div>
@@ -8816,7 +9070,7 @@ function FilaPedidos({ pedidos, podeEditar, tabela, tarefa, estimativa, minutosE
                     </div>
                     ${p.status === "pendente" && p.prioridade ? html`<div class="mt-1 text-[11px] text-muted">Gerando em breve — previsão: pronto em até ${minEst(p)} min.</div>` : null}
                     ${p.status === "pendente" && !p.prioridade && (Date.now() - new Date(p.created_at).getTime()) > 30 * 60000
-                      ? html`<div class="mt-1 text-[11px] font-medium" style="color:#a44b43">Na fila há ${fmtMin(Date.now() - new Date(p.created_at).getTime())} — mais que o esperado (a fila roda a cada ~10 min). Avise a equipe técnica se continuar assim.</div>`
+                      ? html`<div class="mt-1 text-[11px] font-medium" style="color:#be123c">Na fila há ${fmtMin(Date.now() - new Date(p.created_at).getTime())} — mais que o esperado (a fila roda a cada ~10 min). Avise a equipe técnica se continuar assim.</div>`
                       : null}
                     ${desdeMs != null ? html`<div class="mt-1 text-[11px] text-muted">gerando há ${fmtMin(desdeMs)} · previsão: mais ~${restanteMin} min</div>` : null}
                     ${p.status === "pronto" ? html`<div class="mt-2 flex flex-wrap gap-2">${linksPronto(p)}</div>` : null}
@@ -9148,15 +9402,15 @@ function GeradorMateriaisPage({ me, query }) {
 
   return html`
     <div class="max-w-3xl">
-      <div class="text-sm text-muted">🎓 Pedagógico</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">Gerador de Materiais</h1>
+      <div class="os-eyebrow">Pedagógico</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Gerador de Materiais</h1>
       <p class="mt-1 text-sm text-muted">
         Materiais das <b>Arenas de Conversação</b>, gerados na hora pela IA do OS. Escolha o tema e o nível, veja a <b>prévia</b> e
         decida: <b>aprovar</b>, <b>reprovar</b> ou escrever seu <b>feedback</b> para sair uma nova versão. Ao aprovar, o OS monta os PDFs
         no layout do Método (<b>RC</b>: 4 páginas com Reading Practice; <b>BIA</b>: 3 páginas).
       </p>
       ${podeEditar ? html`<${FormArena} me=${me} usados=${usados} onCriado=${(id) => setAberto(id)} />` : html`
-        <div class="mt-5 rounded-xl border border-line bg-card px-4 py-3 text-sm text-muted">Seu acesso é só de leitura: você vê os pedidos e baixa os materiais prontos.</div>`}
+        <div class="mt-5 rounded-[1.35rem] border border-line bg-card shadow-card px-4 py-3 text-sm text-muted">Seu acesso é só de leitura: você vê os pedidos e baixa os materiais prontos.</div>`}
       <${PedidosArena} pedidos=${pedidos} podeEditar=${podeEditar} onAbrir=${setAberto} onMudou=${recarregar} />
       <${RegrasArena} podeEditar=${podeEditar} />
     </div>`;
@@ -9196,7 +9450,7 @@ function TemaArenaCombo({ valor, usados, onMudar }) {
       <button type="button" tabindex="-1" aria-label="Mostrar temas" class="absolute inset-y-0 right-0 px-3 text-muted hover:text-ink"
         onMouseDown=${(e) => { e.preventDefault(); setAberto((x) => !x); e.currentTarget.previousElementSibling.focus(); }}>▾</button>
       ${aberto ? html`
-        <div ref=${listaRef} role="listbox" class="absolute z-20 mt-1 max-h-80 w-full overflow-y-auto rounded-xl border border-line bg-white py-1 shadow-lg"
+        <div ref=${listaRef} role="listbox" class="absolute z-20 mt-1 max-h-80 w-full overflow-y-auto rounded-[1.35rem] border border-line bg-white shadow-card py-1 shadow-lg"
           onMouseDown=${(e) => e.preventDefault()}>
           ${grupos.length ? grupos.map(([c, ts]) => html`
             <div key=${c}>
@@ -9245,9 +9499,9 @@ function FormArena({ me, usados, onCriado }) {
   }
 
   return html`
-    <form onSubmit=${gerar} class="mt-6 rounded-2xl border border-line bg-card p-4 sm:p-5">
+    <form onSubmit=${gerar} class="mt-6 rounded-[1.6rem] border border-line bg-card shadow-card p-4 sm:p-5">
       <div>
-        <div class="text-sm font-medium text-ink">Tema <span class="text-brand">*</span></div>
+        <div class="text-sm font-medium text-ink">Tema <span class="text-emerald-700">*</span></div>
         <div class="mt-0.5 text-xs text-muted">Clique no campo para ver a lista dos 30 temas, ou digite um tema seu.</div>
         <div class="mt-2"><${TemaArenaCombo} valor=${f.tema} usados=${usados} onMudar=${(v) => set("tema", v)} /></div>
       </div>
@@ -9288,7 +9542,7 @@ function PedidosArena({ pedidos, podeEditar, onAbrir, onMudou }) {
           const st = ARENA_STATUS[p.status] || ARENA_STATUS.rascunho;
           const n = Array.isArray(p.conteudo) ? p.conteudo.length : ((p.niveis || []).length * (p.quantidade || 1));
           return html`
-            <div key=${p.id} class="rounded-xl border border-line bg-card p-4">
+            <div key=${p.id} class="rounded-[1.35rem] border border-line bg-card shadow-card p-4">
               <div class="flex flex-wrap items-start justify-between gap-2">
                 <div class="min-w-0">
                   <div class="font-medium text-ink">${p.tema}</div>
@@ -9312,9 +9566,9 @@ function GlossarioArena({ itens, marcar }) {
   return html`
     <div class="overflow-x-auto rounded-lg border border-line">
       <table class="w-full min-w-[420px] text-[13px]">
-        <thead><tr class="bg-[#fdf0f2] text-left"><th class="border-b-2 border-brand px-2.5 py-1.5">English</th><th class="border-b-2 border-brand px-2.5 py-1.5">MYPA</th><th class="border-b-2 border-brand px-2.5 py-1.5">Tradução</th></tr></thead>
+        <thead><tr class="bg-[#fdf0f2] text-left"><th class="border-b-2 border-[#ea5167] px-2.5 py-1.5">English</th><th class="border-b-2 border-[#ea5167] px-2.5 py-1.5">MYPA</th><th class="border-b-2 border-[#ea5167] px-2.5 py-1.5">Tradução</th></tr></thead>
         <tbody>${itens.map((g, i) => html`
-          <tr class=${cx(i % 2 === 0 ? "bg-[#f5f5f5]" : "bg-white", marcar && marcar(g) && "outline outline-2 -outline-offset-2 outline-brand/60")}>
+          <tr class=${cx(i % 2 === 0 ? "bg-[#f5f5f5]" : "bg-white", marcar && marcar(g) && "outline outline-2 -outline-offset-2 outline-[#ea5167]/60")}>
             <td class="border-t border-line px-2.5 py-1 font-semibold">${arenaCap(g[0])}</td>
             <td class="border-t border-line px-2.5 py-1 italic" style="color:#ea5167">${g[1]}</td>
             <td class="border-t border-line px-2.5 py-1">${arenaCap(g[2])}</td>
@@ -9328,7 +9582,7 @@ function ConteudoArena({ m, outro }) {
   const mudou = (lista, x) => outro && !(lista || []).includes(x);
   const chave = (g) => (g || []).join("|");
   const outrasG = outro ? (outro.glossary || []).map(chave) : null;
-  const marca = "rounded bg-brand-light/70";
+  const marca = "rounded bg-[#fbe7e4]/70";
   return html`
     <div class="min-w-0 space-y-4">
       ${arenaTipo(m.nivel) === "rc" ? html`
@@ -9354,7 +9608,7 @@ function ConteudoArena({ m, outro }) {
 function IndicadoresArena({ m }) {
   const { itens } = checarMaterial(m);
   return html`
-    <div class="rounded-xl border border-line bg-white p-3">
+    <div class="rounded-[1.35rem] border border-line bg-white shadow-card p-3">
       <div class="text-xs font-semibold uppercase tracking-wider text-muted">Indicadores</div>
       <ul class="mt-2 space-y-1.5">
         ${itens.map((i) => html`
@@ -9570,23 +9824,23 @@ function PedidoArena({ id, me, podeEditar, onVoltar }) {
 
   return html`
     <div class="max-w-5xl">
-      <button type="button" class="text-sm font-medium text-brand hover:underline" onClick=${onVoltar}>← Gerador de Materiais</button>
+      <button type="button" class="text-sm font-medium text-emerald-700 hover:underline" onClick=${onVoltar}>← Gerador de Materiais</button>
       <div class="mt-2 flex flex-wrap items-start justify-between gap-2">
         <div class="min-w-0">
-          <h1 class="text-2xl font-semibold text-ink">${p.tema}</h1>
+          <h1 class="os-titulo text-2xl sm:text-[1.75rem]">${p.tema}</h1>
           <div class="text-xs text-muted">${[(p.niveis || []).join(" + "), `${conteudo.length} material(is)`, b.turma, b.data_arena ? fmtDataISO(b.data_arena) : null].filter(Boolean).join(" · ")}</div>
         </div>
         <span class=${cx("rounded-full px-2.5 py-1 text-[11px] font-semibold", st.cls)}>${st.label}</span>
       </div>
 
       ${prontos < conteudo.length ? html`
-        <div class="mt-4 rounded-xl border border-line bg-card p-4">
+        <div class="mt-4 rounded-[1.35rem] border border-line bg-card shadow-card p-4">
           <div class="flex items-center justify-between gap-2 text-sm">
             <span class="font-medium text-ink">${rodando ? html`<span class="spinner mr-2"></span>` : null}Gerando a prévia: ${prontos} de ${conteudo.length} pronto(s)</span>
             ${podeEditar && !rodando && (falhas.length || pendentes.length) ? html`
               <${Btn} class="!px-3 !py-1.5 !text-xs" onClick=${() => gerar(falhas.length ? falhas : pendentes)}>${falhas.length ? `Tentar de novo (${falhas.length})` : "Continuar a geração"}<//>` : null}
           </div>
-          <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-black/[0.06]"><div class="h-full bg-brand transition-all" style=${`width:${Math.round((prontos / Math.max(1, conteudo.length)) * 100)}%`}></div></div>
+          <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-black/[0.06]"><div class="h-full bg-emerald-500 transition-all" style=${`width:${Math.round((prontos / Math.max(1, conteudo.length)) * 100)}%`}></div></div>
           <div class="mt-1 text-[11px] text-muted">Cada material leva de 30 a 60 s; até ${ARENA_PARALELO} ao mesmo tempo. Pode deixar esta tela aberta.</div>
         </div>` : null}
 
@@ -9595,7 +9849,7 @@ function PedidoArena({ id, me, podeEditar, onVoltar }) {
           const e = estado[i] || {};
           const ant = comparar[i];
           return html`
-            <section key=${i} class="rounded-2xl border border-line bg-card p-4 sm:p-5">
+            <section key=${i} class="rounded-[1.6rem] border border-line bg-card shadow-card p-4 sm:p-5">
               <div class="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <div class="text-xs font-semibold uppercase tracking-wider text-brand-dark">${arenaRotulo(m)}</div>
@@ -9623,7 +9877,7 @@ function PedidoArena({ id, me, podeEditar, onVoltar }) {
       </div>
 
       ${podeEditar && prontos === conteudo.length && conteudo.length ? html`
-        <div id="arena-ajuste" class="mt-5 rounded-2xl border border-line bg-card p-4 sm:p-5">
+        <div id="arena-ajuste" class="mt-5 rounded-[1.6rem] border border-line bg-card shadow-card p-4 sm:p-5">
           <div class="text-sm font-semibold text-ink">Seu feedback: o que deve mudar?</div>
           <div class="mt-1 text-xs text-muted">Escreva livremente, como falaria com a equipe. O OS gera uma nova versão com as mudanças e destaca o que mudou. Ex.: “troque o narrador para they e deixe o final engraçado”, “perguntas mais curtas”.</div>
           <textarea class=${cx(inputCls, "mt-2 min-h-[88px]")} value=${instrucao} onInput=${(e) => setInstrucao(e.target.value)} disabled=${ocupado}
@@ -9644,7 +9898,7 @@ function PedidoArena({ id, me, podeEditar, onVoltar }) {
             </details>` : null}
         </div>
 
-        <div class="mt-5 rounded-2xl border border-brand/40 bg-brand-light/40 p-4 sm:p-5">
+        <div class="mt-5 rounded-2xl border border-emerald-300 bg-brand-light/40 p-4 sm:p-5">
           ${pdf ? html`
             <div class="text-sm font-medium text-ink">${pdf.fase !== "Pronto" ? html`<span class="spinner mr-2"></span>` : null}${pdf.fase}${pdf.fase !== "Pronto" ? ` (${pdf.feito} de ${pdf.total})` : ""}</div>
             ${pdf.notas && pdf.notas.length ? html`<div class="mt-1 text-xs text-muted">Ajuste de layout para caber: ${pdf.notas.join("; ")}.</div>` : null}
@@ -9786,7 +10040,7 @@ function RegrasArena({ podeEditar }) {
       ${regras === null ? html`<div class="mt-3 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
         ${!aprendidas.length ? html`<div class="mt-3 rounded-xl border border-dashed border-line bg-card/70 px-4 py-5 text-center text-sm text-muted">Nenhuma regra aprendida ainda.</div>` : html`
           <div class="mt-3 space-y-2">${aprendidas.map((r) => html`
-            <div key=${r.id} class=${cx("rounded-xl border border-line bg-card p-3", !r.ativa && "opacity-60")}>
+            <div key=${r.id} class=${cx("rounded-[1.35rem] border border-line bg-card shadow-card p-3", !r.ativa && "opacity-60")}>
               <div class="text-sm text-ink">${r.texto}</div>
               <div class="mt-2 flex flex-wrap items-center gap-2">
                 <span class=${cx("rounded-full px-2 py-0.5 text-[10px] font-semibold", r.ativa ? PILL_OK : PILL_NEUTRAL)}>${r.ativa ? "Ativa" : "Desligada"}</span>
@@ -9800,7 +10054,7 @@ function RegrasArena({ podeEditar }) {
                   </span>` : null}
               </div>
             </div>`)}</div>`}
-        <details class="mt-3 rounded-xl border border-line bg-card p-3 text-sm">
+        <details class="mt-3 rounded-[1.35rem] border border-line bg-card shadow-card p-3 text-sm">
           <summary class="cursor-pointer text-sm font-medium text-ink">Regras base aprovadas pela Tia em 16/10/2026 (${base.length})</summary>
           <ol class="mt-2 list-decimal space-y-1 pl-5 text-xs text-muted">${base.map((r) => html`<li>${r.texto}</li>`)}</ol>
         </details>`}
@@ -9822,12 +10076,12 @@ function SlidesOpc({ on, click, children }) {
   return html`
     <button type="button" onClick=${click}
       class=${cx("mb-1.5 mr-1.5 rounded-lg border px-3 py-1.5 text-sm transition",
-        on ? "border-brand bg-brand-light font-medium text-brand-dark" : "border-line text-ink/70 hover:bg-black/[0.04]")}>${children}</button>`;
+        on ? "border-emerald-500 bg-brand-light font-medium text-brand-dark" : "border-line text-ink/70 hover:bg-black/[0.04]")}>${children}</button>`;
 }
 function SlidesGrupo({ label, obrig, hint, children }) {
   return html`
     <div class="border-t border-line pt-4">
-      <div class="text-sm font-medium text-ink">${label}${obrig ? html`<span class="text-brand"> *</span>` : null}</div>
+      <div class="text-sm font-medium text-ink">${label}${obrig ? html`<span class="text-emerald-700"> *</span>` : null}</div>
       ${hint ? html`<div class="mt-0.5 text-xs text-muted">${hint}</div>` : null}
       <div class="mt-2">${children}</div>
     </div>`;
@@ -9859,7 +10113,7 @@ function AulaSubTabela({ titulo, aulas, formato }) {
       <div class="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">${titulo} · ${nf(aulas.length)}</div>
       ${aulas.length === 0 ? html`
         <div class="rounded-xl border border-dashed border-line bg-card/60 px-4 py-4 text-center text-xs text-muted">Nenhuma aula.</div>` : html`
-        <div class="overflow-x-auto rounded-2xl border border-line bg-card">
+        <div class="overflow-x-auto rounded-[1.6rem] border border-line bg-card shadow-card">
           <table class="w-full min-w-[640px] text-sm">
             <thead>
               <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
@@ -9912,8 +10166,8 @@ function AulasPraticasPage() {
 
   return html`
     <div>
-      <div class="text-sm text-muted">🎓 Pedagógico</div>
-      <h1 class="mt-1 flex items-center gap-2 text-2xl font-semibold text-ink">🗓️ Aulas ao vivo e Práticas</h1>
+      <div class="os-eyebrow">Pedagógico</div>
+      <h1 class="mt-2 flex items-center gap-2 os-titulo text-2xl sm:text-[1.75rem]">Aulas ao vivo e Práticas</h1>
       <p class="mt-1 text-sm text-muted">
         Cronograma das <b>Aulas ao vivo do Método</b> e das <b>Sessões Práticas</b>, com data, tema e os
         links de slide/material. Separado por <b>anteriores</b> e <b>próximas</b>.
@@ -9948,7 +10202,7 @@ function AulasPraticasPage() {
 
         <p class="mt-6 text-xs text-muted">
           Você edita o cronograma direto na
-          <a href=${AULAS_PLANILHA_URL} target="_blank" rel="noopener" class="font-medium text-brand hover:underline">planilha do Drive</a>
+          <a href=${AULAS_PLANILHA_URL} target="_blank" rel="noopener" class="font-medium text-emerald-700 hover:underline">planilha do Drive</a>
           (datas, temas, observações e os links) — o OS sincroniza todo dia (<code class="rounded bg-black/[0.05] px-1">sync-aulas-praticas-os</code>).
         </p>
       `}
@@ -10007,8 +10261,8 @@ function GeradorSlidesPage({ me }) {
 
   return html`
     <div class="max-w-3xl">
-      <div class="text-sm text-muted">🎓 Pedagógico</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">Gerador de Slides</h1>
+      <div class="os-eyebrow">Pedagógico</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Gerador de Slides</h1>
       <p class="mt-1 text-sm text-muted">
         Preencha o briefing da aula. Ao enviar, a geração do deck de slides no Canva entra na fila —
         seguindo as skills do Método (metodologia, avatar, marca, MYPA e <i>slides</i>). O download do
@@ -10029,7 +10283,7 @@ function GeradorSlidesPage({ me }) {
       </div>
 
       ${!podeEditar ? null : html`
-      <form onSubmit=${enviar} class="mt-6 rounded-2xl border border-line bg-card p-5">
+      <form onSubmit=${enviar} class="mt-6 rounded-[1.6rem] border border-line bg-card shadow-card p-5">
         <div>
           <div class="text-sm font-medium text-ink">1. Tema da aula</div>
           <input class=${cx(inputCls, "mt-2")} placeholder='Ex.: "Present Perfect", "Phrasal Verbs de viagem"'
@@ -10123,10 +10377,10 @@ function GeradorSlidesPage({ me }) {
 function EmbedExterno({ titulo, icone, src }) {
   const [erro, setErro] = useState(false);
   return html`
-    <div class="flex h-screen flex-col">
-      <div class="flex items-center justify-between gap-3 border-b border-line bg-sidebar px-4 py-2.5">
+    <div class="flex h-[calc(100dvh-4rem)] flex-col">
+      <div class="flex items-center justify-between gap-3 border-b border-line bg-white px-4 py-2.5">
         <div class="flex items-center gap-2 text-sm">
-          <a href="#/" class="font-medium text-brand hover:underline">← OS</a>
+          <a href="#/" class="font-medium text-emerald-700 hover:underline">← OS</a>
           <span class="text-muted">/</span>
           <span class="font-medium text-ink">${icone} ${titulo}</span>
         </div>
@@ -10154,7 +10408,7 @@ const MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julh
 const TIPO_EVENTO = {
   evento: { label: "Evento", cls: "bg-[#e7eef4] text-[#456179]", dot: "bg-[#6b8aa3]" },
   marco: { label: "Marco", cls: "bg-brand-light text-brand-dark", dot: "bg-brand" },
-  lembrete: { label: "Lembrete", cls: "bg-[#efe9cf] text-[#7c7440]", dot: "bg-[#bfa94e]" },
+  lembrete: { label: "Lembrete", cls: "bg-[#fef3c7] text-[#92400e]", dot: "bg-[#bfa94e]" },
 };
 
 function isoDia(d) {
@@ -10284,7 +10538,7 @@ function UsoIABloco({ me }) {
   }
 
   if (rows === null || estado === null) {
-    return html`<div class="mt-6 rounded-2xl border border-line bg-card p-5 text-sm text-muted"><span class="spinner mr-2"></span>Carregando uso de IA…</div>`;
+    return html`<div class="mt-6 rounded-[1.6rem] border border-line bg-card shadow-card p-5 text-sm text-muted"><span class="spinner mr-2"></span>Carregando uso de IA…</div>`;
   }
 
   const desde24h = Date.now() - 24 * 3600000;
@@ -10315,25 +10569,25 @@ function UsoIABloco({ me }) {
       </div>
 
       ${estado.pausado ? html`
-        <div class="mt-2 rounded-lg bg-[#f4e0db] px-3 py-2 text-xs font-medium text-[#a44b43]">
+        <div class="mt-2 rounded-lg bg-[#ffe4e6] px-3 py-2 text-xs font-medium text-[#be123c]">
           Automações de IA pausadas${estado.pausado_em ? " " + tempoDesde(estado.pausado_em) : ""} — chat de alunos, Pedir a IA e
           sincronizações com IA não vão gastar tokens até alguém retomar.
         </div>` : null}
 
       <div class="mt-3 grid gap-4 lg:grid-cols-3">
-        <div class="rounded-2xl border border-line bg-card p-5">
+        <div class="rounded-[1.6rem] border border-line bg-card shadow-card p-5">
           <div class="text-xs uppercase tracking-wide text-muted">Últimas 24h</div>
           <div class="mt-1 text-2xl font-semibold text-ink">${nf(tokens24h)}</div>
           <div class="text-xs text-muted">tokens · ${fmtBRL(custo24h)} (estimado)</div>
         </div>
-        <div class="rounded-2xl border border-line bg-card p-5 lg:col-span-2">
+        <div class="rounded-[1.6rem] border border-line bg-card shadow-card p-5 lg:col-span-2">
           <div class="flex items-end justify-between gap-2">
             <div class="text-xs uppercase tracking-wide text-muted">Tokens por dia (30 dias)</div>
             <div class="text-xs text-muted">~${fmtBRL(custoTotal30)} no período</div>
           </div>
           <div class="mt-3 flex h-20 items-end gap-[2px]">
             ${dias.map((d) => html`
-              <div key=${d} class="min-w-[2px] flex-1 rounded-t bg-brand/70" title=${`${d}: ${nf(porDia[d])} tokens`}
+              <div key=${d} class="min-w-[2px] flex-1 rounded-t bg-emerald-500/80" title=${`${d}: ${nf(porDia[d])} tokens`}
                 style=${`height:${Math.max(2, Math.round((porDia[d] / maxDia) * 100))}%`}></div>`)}
           </div>
         </div>
@@ -10411,7 +10665,7 @@ function HomePage({ me, sections }) {
 
   const Chip = ({ it }) => {
     if (it.tipo === "feriado") {
-      return html`<span class=${cx("inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium", it.facultativo ? "bg-[#efe9cf] text-[#7c7440]" : "bg-[#f4e0db] text-[#a44b43]")}>
+      return html`<span class=${cx("inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium", it.facultativo ? "bg-[#fef3c7] text-[#92400e]" : "bg-[#ffe4e6] text-[#be123c]")}>
         <span>${it.facultativo ? "🟡" : "🇧🇷"}</span>${it.titulo}${it.facultativo ? " (facultativo)" : ""}</span>`;
     }
     const t = TIPO_EVENTO[it.tipo] || TIPO_EVENTO.evento;
@@ -10421,12 +10675,12 @@ function HomePage({ me, sections }) {
 
   return html`
     <div>
-      <div class="text-sm text-muted">🏠 Início</div>
-      <h1 class="mt-1 text-2xl font-semibold text-ink">Boas-vindas ao OS Tia do Inglês${nome1 ? `, ${nome1}` : ""} 👋</h1>
+      <div class="os-eyebrow">Início</div>
+      <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Boas-vindas ao OS Tia do Inglês${nome1 ? `, ${nome1}` : ""}</h1>
       <p class="mt-1 text-sm text-muted">${fmtDiaLongo(hoje)}</p>
       ${liToken && liToken.nivel !== "ok" ? html`
-        <a href="#/conteudo/linkedin" class=${cx("mt-4 block rounded-2xl border p-4 text-sm transition hover:border-brand/40",
-          liToken.nivel === "expirado" ? "border-[#e3b7ae] bg-[#faefec] text-[#a44b43]" : "border-[#e8dca0] bg-[#fbf5d9] text-[#6f6224]")}>
+        <a href="#/conteudo/linkedin" class=${cx("mt-4 block rounded-2xl border p-4 text-sm transition hover:border-emerald-200",
+          liToken.nivel === "expirado" ? "border-[#fda4af] bg-[#fff1f2] text-[#be123c]" : "border-[#fde68a] bg-[#fffbeb] text-[#78350f]")}>
           <b>LinkedIn:</b> ${liToken.nivel === "expirado"
             ? "a conexão expirou e os posts aprovados não estão sendo publicados. Clique para reconectar."
             : `a conexão expira em ${liToken.dias} dia${liToken.dias === 1 ? "" : "s"}. Clique para reconectar e não interromper as publicações.`}
@@ -10434,7 +10688,7 @@ function HomePage({ me, sections }) {
 
       ${!data ? html`<div class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>` : html`
         <div class="mt-6 grid gap-4 lg:grid-cols-2">
-          <div class="rounded-2xl border border-line bg-card p-5">
+          <div class="rounded-[1.6rem] border border-line bg-card shadow-card p-5">
             <div class="text-sm font-semibold uppercase tracking-wider text-muted">Hoje</div>
             ${(() => {
               const it = itensDoDia(hoje);
@@ -10444,7 +10698,7 @@ function HomePage({ me, sections }) {
             })()}
           </div>
 
-          <div class="rounded-2xl border border-line bg-card p-5">
+          <div class="rounded-[1.6rem] border border-line bg-card shadow-card p-5">
             <div class="text-sm font-semibold uppercase tracking-wider text-muted">Próximos 7 dias</div>
             ${semana.filter((d) => d.iso !== hoje).length
               ? html`<ul class="mt-3 space-y-2.5">
@@ -10455,43 +10709,43 @@ function HomePage({ me, sections }) {
                     </li>`)}
                 </ul>`
               : html`<p class="mt-3 text-sm text-muted">Semana sem feriados ou eventos cadastrados.</p>`}
-            <a href="#/agenda/calendario" class="mt-3 inline-block text-xs font-medium text-brand hover:underline">Abrir o calendário →</a>
+            <a href="#/agenda/calendario" class="mt-3 inline-block text-xs font-medium text-emerald-700 hover:underline">Abrir o calendário →</a>
           </div>
         </div>
 
         <div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-          <a href="#/base" class="rounded-xl border border-line bg-card p-4 transition hover:border-brand/40">
+          <a href="#/base" class="rounded-[1.35rem] border border-line bg-card shadow-card p-4 transition hover:border-emerald-200">
             <div class="text-xs uppercase tracking-wide text-muted">Base de Conhecimento</div>
             <div class="mt-1 text-2xl font-semibold text-ink">${nf(data.docCount)}</div>
             <div class="text-xs text-muted">documentos</div>
           </a>
-          <a href="#/cs/pesquisas" class="rounded-xl border border-line bg-card p-4 transition hover:border-brand/40">
+          <a href="#/cs/pesquisas" class="rounded-[1.35rem] border border-line bg-card shadow-card p-4 transition hover:border-emerald-200">
             <div class="text-xs uppercase tracking-wide text-muted">Pesquisas de alunos</div>
             <div class="mt-1 text-2xl font-semibold text-ink">${pAtivas}/6</div>
             <div class="text-xs text-muted">ativas</div>
           </a>
-          <a href="#/conteudo/metricas" class="rounded-xl border border-line bg-card p-4 transition hover:border-brand/40">
+          <a href="#/conteudo/metricas" class="rounded-[1.35rem] border border-line bg-card shadow-card p-4 transition hover:border-emerald-200">
             <div class="text-xs uppercase tracking-wide text-muted">Conteúdo (30 dias)</div>
             <div class="mt-1 text-2xl font-semibold text-ink">${nf(cont30.posts)}</div>
             <div class="text-xs text-muted">posts · ${nfShort(cont30.views)} views 7d</div>
           </a>
-          <a href="#/cs/envios-livros" class=${cx("rounded-xl border p-4 transition hover:border-brand/40", envioResumo.atrasados > 0 ? "border-[#e3b7ae] bg-[#faefec]" : "border-line bg-card")}>
+          <a href="#/cs/envios-livros" class=${cx("rounded-xl border p-4 transition hover:border-emerald-200", envioResumo.atrasados > 0 ? "border-[#fda4af] bg-[#fff1f2]" : "border-line bg-card")}>
             <div class="text-xs uppercase tracking-wide text-muted">Envios de livros</div>
-            <div class=${cx("mt-1 text-2xl font-semibold", envioResumo.atrasados > 0 ? "text-[#a44b43]" : "text-ink")}>${nf(envioResumo.pendentes)}</div>
+            <div class=${cx("mt-1 text-2xl font-semibold", envioResumo.atrasados > 0 ? "text-[#be123c]" : "text-ink")}>${nf(envioResumo.pendentes)}</div>
             <div class="text-xs text-muted">${envioResumo.atrasados > 0 ? `⚠️ ${envioResumo.atrasados} atrasado(s)` : "pendente(s)"}</div>
           </a>
-          <a href="#/ferramentas" class="rounded-xl border border-line bg-card p-4 transition hover:border-brand/40">
+          <a href="#/ferramentas" class="rounded-[1.35rem] border border-line bg-card shadow-card p-4 transition hover:border-emerald-200">
             <div class="text-xs uppercase tracking-wide text-muted">Ferramentas</div>
-            <div class=${cx("mt-1 text-2xl font-semibold", ferrErro ? "text-[#a44b43]" : "text-ink")}>${ferrErro ? ferrErro : "OK"}</div>
+            <div class=${cx("mt-1 text-2xl font-semibold", ferrErro ? "text-[#be123c]" : "text-ink")}>${ferrErro ? ferrErro : "OK"}</div>
             <div class="text-xs text-muted">${ferrErro ? "com erro" : "tudo conectado"}</div>
           </a>
         </div>
 
         <div class="mt-4 flex flex-wrap gap-2">
-          <a href="#/pedir-ia" class="rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink/80 hover:border-brand/40">✨ Pedir a IA</a>
-          <a href="#/base" class="rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink/80 hover:border-brand/40">📚 Base de Conhecimento</a>
-          <a href="#/agenda/calendario" class="rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink/80 hover:border-brand/40">📅 Calendário</a>
-          <a href="#/cs/pesquisas" class="rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink/80 hover:border-brand/40">🤝 Pesquisas de Alunos</a>
+          <a href="#/pedir-ia" class="rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink/80 hover:border-emerald-200">✨ Pedir a IA</a>
+          <a href="#/base" class="rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink/80 hover:border-emerald-200">📚 Base de Conhecimento</a>
+          <a href="#/agenda/calendario" class="rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink/80 hover:border-emerald-200">📅 Calendário</a>
+          <a href="#/cs/pesquisas" class="rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink/80 hover:border-emerald-200">🤝 Pesquisas de Alunos</a>
         </div>
 
         <${UsoIABloco} me=${me} />
@@ -10569,7 +10823,7 @@ function EventoModal({ dataISO, evento, me, onClose, onSaved }) {
           <textarea class=${cx(inputCls, "min-h-[70px]")} value=${descricao} onInput=${(e) => setDescricao(e.target.value)}></textarea>
         <//>
         <div class="flex items-center justify-between pt-1">
-          ${evento ? html`<button type="button" class="text-sm text-[#a44b43] hover:underline" onClick=${excluir} disabled=${busy}>Excluir</button>` : html`<span></span>`}
+          ${evento ? html`<button type="button" class="text-sm text-[#be123c] hover:underline" onClick=${excluir} disabled=${busy}>Excluir</button>` : html`<span></span>`}
           <div class="flex gap-2">
             <${Btn} variant="ghost" type="button" onClick=${onClose}>Cancelar<//>
             <${Btn} type="submit" loading=${busy}>Salvar<//>
@@ -10631,17 +10885,17 @@ function AgendaPage({ me, view }) {
 
   return html`
     <div>
-      <div class="text-sm text-muted">📅 Agenda</div>
+      <div class="os-eyebrow">Agenda</div>
       <div class="mt-1 flex flex-wrap items-center justify-between gap-3">
-        <h1 class="text-2xl font-semibold text-ink">${listaView ? "Próximos eventos" : "Calendário"}</h1>
-        <div class="flex gap-2 text-sm">
-          <a href="#/agenda/calendario" class=${cx("rounded-lg px-3 py-1.5", !listaView ? "bg-brand-light font-medium text-brand-dark" : "text-ink/60 hover:bg-black/[0.04]")}>Calendário</a>
-          <a href="#/agenda/datas-importantes" class=${cx("rounded-lg px-3 py-1.5", listaView ? "bg-brand-light font-medium text-brand-dark" : "text-ink/60 hover:bg-black/[0.04]")}>Lista</a>
+        <h1 class="os-titulo text-2xl sm:text-[1.75rem]">${listaView ? "Próximos eventos" : "Calendário"}</h1>
+        <div class="flex rounded-xl bg-slate-100 p-1 text-xs font-black uppercase tracking-widest">
+          <a href="#/agenda/calendario" class=${cx("rounded-lg px-4 py-2 transition", !listaView ? "bg-[#07110e] text-white shadow" : "text-slate-500 hover:text-slate-800")}>Calendário</a>
+          <a href="#/agenda/datas-importantes" class=${cx("rounded-lg px-4 py-2 transition", listaView ? "bg-[#07110e] text-white shadow" : "text-slate-500 hover:text-slate-800")}>Lista</a>
         </div>
       </div>
 
       ${!listaView && html`
-        <div class="mt-4 rounded-2xl border border-line bg-card p-3 sm:p-4">
+        <div class="mt-4 rounded-[1.6rem] border border-line bg-card shadow-card p-3 sm:p-4">
           <div class="mb-3 flex items-center justify-between">
             <div class="flex items-center gap-1">
               <button class="rounded-md px-2 py-1 text-muted hover:bg-black/[0.05]" onClick=${() => mudarMes(-1)}>‹</button>
@@ -10663,12 +10917,12 @@ function AgendaPage({ me, view }) {
               const fers = ferPorDia[iso] || [];
               const evs = evPorDia[iso] || [];
               return html`
-                <div class=${cx("min-h-[92px] bg-white p-1.5 text-left align-top transition", !noMes && "bg-[#faf8f4] text-muted", podeEditar && "cursor-pointer hover:bg-brand-light/40")}
+                <div class=${cx("min-h-[92px] bg-white p-1.5 text-left align-top transition", !noMes && "bg-[#f8fafc] text-muted", podeEditar && "cursor-pointer hover:bg-brand-light/40")}
                   onClick=${podeEditar ? () => setModal({ dataISO: iso }) : null}>
                   <div class="flex items-center justify-between">
-                    <span class=${cx("inline-grid h-6 w-6 place-items-center rounded-full text-xs", isHoje ? "bg-brand font-semibold text-white" : noMes ? "text-ink/80" : "text-muted")}>${dt.getDate()}</span>
+                    <span class=${cx("inline-grid h-6 w-6 place-items-center rounded-full text-xs", isHoje ? "bg-emerald-600 font-bold text-white" : noMes ? "text-ink/80" : "text-muted")}>${dt.getDate()}</span>
                   </div>
-                  ${fers.map((f) => html`<div class=${cx("mt-1 truncate rounded px-1 py-0.5 text-[10px] font-medium", f.facultativo ? "bg-[#efe9cf] text-[#7c7440]" : "bg-[#f4e0db] text-[#a44b43]")} title=${f.nome}>${f.nome}</div>`)}
+                  ${fers.map((f) => html`<div class=${cx("mt-1 truncate rounded px-1 py-0.5 text-[10px] font-medium", f.facultativo ? "bg-[#fef3c7] text-[#92400e]" : "bg-[#ffe4e6] text-[#be123c]")} title=${f.nome}>${f.nome}</div>`)}
                   ${evs.map((e) => {
                     const t = TIPO_EVENTO[e.tipo] || TIPO_EVENTO.evento;
                     return html`<div class=${cx("mt-1 flex items-center gap-1 truncate rounded px-1 py-0.5 text-[10px] font-medium", t.cls)}
@@ -10683,8 +10937,8 @@ function AgendaPage({ me, view }) {
           </div>
 
           <div class="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-muted">
-            <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded bg-[#f4e0db]"></span>Feriado nacional</span>
-            <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded bg-[#efe9cf]"></span>Ponto facultativo</span>
+            <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded bg-[#ffe4e6]"></span>Feriado nacional</span>
+            <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded bg-[#fef3c7]"></span>Ponto facultativo</span>
             <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded-full bg-[#6b8aa3]"></span>Evento</span>
             <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded-full bg-brand"></span>Marco</span>
             <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded-full bg-[#bfa94e]"></span>Lembrete</span>
@@ -10695,7 +10949,7 @@ function AgendaPage({ me, view }) {
 
       <div class=${listaView ? "mt-4" : "mt-6"}>
         ${!listaView ? html`<h2 class="mb-2 text-sm font-semibold uppercase tracking-wider text-muted">Próximos 30 dias</h2>` : null}
-        <div class="overflow-hidden rounded-2xl border border-line bg-card">
+        <div class="overflow-hidden rounded-[1.6rem] border border-line bg-card shadow-card">
           ${proximos.length === 0
             ? html`<div class="px-5 py-8 text-center text-sm text-muted">Nenhum feriado ou evento nos próximos 30 dias.</div>`
             : html`<ul class="divide-y divide-line">
@@ -10783,7 +11037,7 @@ function Router({ route, me, sections, reload }) {
   const item = grupo && grupo.itens.find((it) => it.slug === p1);
   if (grupo && item) return html`<${ModuloEmConstrucao} grupo=${grupo} item=${item} />`;
   if (grupo) return html`<${ModuloEmConstrucao} grupo=${grupo} item=${grupo.itens[0]} />`;
-  return html`<${Empty} title="Página não encontrada" icon="🧭"><a class="text-brand" href="#/">Voltar ao início</a><//>`;
+  return html`<${Empty} title="Página não encontrada" icon="🧭"><a class="text-emerald-700" href="#/">Voltar ao início</a><//>`;
 }
 
 function App() {
@@ -10794,8 +11048,30 @@ function App() {
   const route = useRoute();
 
   // onAuthStateChange dispara INITIAL_SESSION ao assinar — não é preciso getSession().
+  // Segurança (bloco "Segurança da sessão" no topo): confere a sessão salva no servidor, aplica a
+  // inatividade de 8 h e mostra o motivo quando a sessão cai sozinha (refresh recusado, 401).
   useEffect(() => {
-    const { data: sub } = sb.auth.onAuthStateChange((_event, s) => setSession(s ?? null));
+    const { data: sub } = sb.auth.onAuthStateChange((event, s) => {
+      const tinha = sessaoAtiva;
+      if (event === "INITIAL_SESSION" && s && inativoDemais()) {
+        // Sessão salva, mas ninguém mexeu no OS há mais de 8 h (em nenhuma aba): sai antes de abrir.
+        sessaoAtiva = false;
+        avisoSaida = MSG_INATIVIDADE; // o Login aparece já com o motivo
+        setTimeout(() => encerrarSessao(""), 0); // aviso já entregue ao Login acima
+        setSession(null);
+        return;
+      }
+      sessaoAtiva = !!s;
+      if (s && (event === "SIGNED_IN" || event === "INITIAL_SESSION") && !tinha) {
+        if (event === "SIGNED_IN" || !ultimaAtividade()) marcarAtividade(true);
+        if (event === "INITIAL_SESSION") conferirSessao(); // valida no servidor (getUser)
+      }
+      if (event === "SIGNED_OUT" && tinha && !saindoAgora && !avisoSaida &&
+          Date.now() - (Number(lsGet(CHAVE_SAIDA)) || 0) > 10 * 1000) {
+        avisoSaida = MSG_SESSAO_EXPIROU; // caiu sem a pessoa clicar em Sair (refresh recusado, outra aba)
+      }
+      setSession(s ?? null);
+    });
     return () => sub.subscription.unsubscribe();
   }, []);
 
@@ -10850,7 +11126,7 @@ function App() {
           ? html`
             <div>Não foi possível carregar seu perfil.</div>
             <${Btn} variant="ghost" onClick=${() => loadProfile(session)}>Tentar de novo<//>
-            <button class="text-xs text-muted hover:text-ink/75" onClick=${() => sb.auth.signOut()}>Sair</button>`
+            <button class="text-xs text-muted hover:text-ink/75" onClick=${() => sairDoSistema()}>Sair</button>`
           : html`<span class="spinner mr-2"></span> Carregando…`}
       </div>
       <${Toaster} />`;

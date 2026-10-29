@@ -285,7 +285,7 @@ com `os.useAoDesfazer`. Operações em lote: registrar uma ação por lote (fun�
   emerald-300 + anel emerald-100.
 - Abas segmentadas: trilho `bg-slate-100 p-1 rounded-xl`; ativa `bg-[#07110e] text-white shadow`; texto `font-black uppercase tracking-widest`.
 - Pill de período: `rounded-lg border-emerald-100 bg-emerald-50 text-emerald-800 font-bold`.
-- Menu lateral do Craft (`#07110e`, item ativo emerald-500) **não** é copiado: o OS mantém o próprio Shell.
+- Menu lateral do Craft (`#07110e`, item ativo emerald-500): desde a v84 (29/10/2026) é o `Shell` do OS inteiro (ver CLAUDE.md > Design).
 - Ícones: Lucide (`<Icone nome="..."/>` em comum.js).
 
 ---
