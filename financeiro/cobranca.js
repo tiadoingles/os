@@ -5,9 +5,12 @@
 // CRUD completo com DESFAZER. "Atualizar da Hotmart" chama a sincronização na hora; ao abrir a tela ela roda
 // sozinha (sem travar a tela) se a última sincronização ok tiver mais de 30 min.
 // Situação calculada aqui: Vencido = aberto e vencimento < hoje (data local); A vencer = aberto e >= hoje.
+// Duas abas: "A receber" (manuais, parcelas/assinaturas e boletos/Pix ainda válidos) e "Recuperação de vendas"
+// (venda avulsa da Hotmart com status OVERDUE = boleto/Pix gerado no checkout e não pago: compra abandonada,
+// não dívida de aluna). Ver ehRecuperacao().
 import { html } from "htm/preact";
 import { useState, useEffect, useMemo, useRef } from "preact/hooks";
-import { os, escopoFin, podeEditarFin, FinPage, Icone, ConfirmDialog, KpiCardDestaque, Pill, brl, cn, dataBR, normalizarTexto, parseValorBR, useLocalState } from "./comum.js";
+import { os, escopoFin, podeEditarFin, FinPage, Icone, ConfirmDialog, AbasToggle, KpiCardDestaque, Pill, brl, cn, dataBR, normalizarTexto, parseValorBR, useLocalState } from "./comum.js";
 import { chamarHotmart, BannerSemCredenciais } from "./hotmart.js";
 
 const ESCOPO = escopoFin("cobranca");
@@ -77,6 +80,11 @@ function baixarCsv(nome, cab, linhas) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/** Boleto/Pix da Hotmart que venceu sem pagamento (compra abandonada): vai para a aba Recuperação de vendas. */
+export function ehRecuperacao(c) {
+  return c.origem === "hotmart" && !c.previsto && c.status_hotmart === "OVERDUE";
+}
+
 const parcelaTxt = (c) => (c.parcela_num ? `${c.parcela_num}${c.parcelas_total ? "/" + c.parcelas_total : ""}` : "");
 const rotSituacao = { vencido: "Vencido", a_vencer: "A vencer", pago: "Pago", cancelado: "Cancelado" };
 
@@ -89,6 +97,8 @@ export function CobrancaPage({ me }) {
   const [pedindoSync, setPedindoSync] = useState(false);
   const [semCred, setSemCred] = useState(false);
   const autoFeito = useRef(false);
+  const [aba, setAba] = useLocalState("cobranca:aba", "receber");
+  const recup = aba === "recuperacao";
   const [situacao, setSituacao] = useLocalState("cobranca:situacao", "aberto");
   const [origem, setOrigem] = useLocalState("cobranca:origem", "all");
   const [produto, setProduto] = useLocalState("cobranca:produto", "all");
@@ -125,23 +135,41 @@ export function CobrancaPage({ me }) {
     if (Date.now() - ultimaOk > AUTO_SYNC_MS) sincronizar(false);
   }, [linhas, sync]);
   os.useAoDesfazer && os.useAoDesfazer(ESCOPO, carregar);
-  useEffect(() => { setLimite(POR_PAGINA); }, [situacao, origem, produto, tipo, de, ate, previstas, busca]);
+  useEffect(() => { setLimite(POR_PAGINA); }, [aba, situacao, origem, produto, tipo, de, ate, previstas, busca]);
 
   const produtos = useMemo(() => [...new Set((linhas || []).map((c) => c.produto).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR")), [linhas]);
 
-  // Filtros que valem para cards e tabela (tudo menos Situação).
+  const qtdAbas = useMemo(() => {
+    let r = 0, n = 0;
+    for (const c of linhas || []) if (c.status === "aberto") ehRecuperacao(c) ? r++ : n++;
+    return { receber: n, recuperacao: r };
+  }, [linhas]);
+
+  // Filtros que valem para cards e tabela (tudo menos Situação). Na Recuperação, origem/tipo/previstas não se aplicam.
   const base = useMemo(() => {
     const t = normalizarTexto(busca.trim());
     return (linhas || []).filter((c) =>
-      (origem === "all" || c.origem === origem) &&
+      ehRecuperacao(c) === recup &&
+      (recup || ((origem === "all" || c.origem === origem) && (tipo === "all" || c.tipo === tipo) && (previstas || !c.previsto))) &&
       (produto === "all" || c.produto === produto) &&
-      (tipo === "all" || c.tipo === tipo) &&
-      (previstas || !c.previsto) &&
       (!de || c.vencimento >= de) && (!ate || c.vencimento <= ate) &&
       (!t || normalizarTexto(`${c.cliente_nome} ${c.cliente_email} ${c.transacao}`).includes(t)));
-  }, [linhas, origem, produto, tipo, previstas, de, ate, busca]);
+  }, [linhas, recup, origem, produto, tipo, previstas, de, ate, busca]);
 
   const cards = useMemo(() => {
+    if (recup) {
+      // Na Recuperação o "vencimento" é a data do pedido: separa pelo quão recente foi a compra abandonada.
+      const d7 = somarDias(hoje, -7), d30 = somarDias(hoje, -30);
+      const acc = { aberto: [0, 0], d7: [0, 0], d30: [0, 0], antigas: [0, 0] };
+      const add = (k, v) => { acc[k][0] += v; acc[k][1] += 1; };
+      for (const c of base) {
+        if (c.status !== "aberto") continue;
+        const v = Number(c.valor) || 0;
+        add("aberto", v);
+        add(c.vencimento >= d7 ? "d7" : c.vencimento >= d30 ? "d30" : "antigas", v);
+      }
+      return acc;
+    }
     const em30 = somarDias(hoje, 30);
     const acc = { aberto: [0, 0], vencido: [0, 0], prox30: [0, 0], depois: [0, 0] };
     const add = (k, v) => { acc[k][0] += v; acc[k][1] += 1; };
@@ -154,12 +182,13 @@ export function CobrancaPage({ me }) {
       else add("depois", v);
     }
     return acc;
-  }, [base, hoje]);
+  }, [base, hoje, recup]);
 
   const visiveis = useMemo(() => base.filter((c) => {
+    if (recup) return c.status === "aberto";
     const s = situacaoCobranca(c, hoje);
     return situacao === "aberto" ? c.status === "aberto" : s === situacao;
-  }), [base, situacao, hoje]);
+  }), [base, situacao, hoje, recup]);
   const totalVisivel = visiveis.reduce((a, c) => a + (Number(c.valor) || 0), 0);
   const semHotmart = linhas && !linhas.some((c) => c.origem === "hotmart");
 
@@ -225,8 +254,8 @@ export function CobrancaPage({ me }) {
 
   function exportar() {
     const cab = ["Vencimento", "Cliente", "E-mail", "Telefone", "Produto", "Descrição", "Parcela", "Forma de pagamento", "Valor", "Situação", "Prevista", "Origem", "Tipo", "Transação", "Observações"];
-    baixarCsv(`Cobrancas_${hoje}`, cab, visiveis.map((c) => [dataBR(c.vencimento), c.cliente_nome, c.cliente_email, c.cliente_telefone, c.produto, c.descricao,
-      parcelaTxt(c), c.forma_pagamento, Number(c.valor) || 0, rotSituacao[situacaoCobranca(c, hoje)], c.previsto ? "Sim" : "Não",
+    baixarCsv(`${recup ? "Recuperacao_vendas" : "Cobrancas"}_${hoje}`, cab, visiveis.map((c) => [dataBR(c.vencimento), c.cliente_nome, c.cliente_email, c.cliente_telefone, c.produto, c.descricao,
+      parcelaTxt(c), c.forma_pagamento, Number(c.valor) || 0, ehRecuperacao(c) ? "Não pago" : rotSituacao[situacaoCobranca(c, hoje)], c.previsto ? "Sim" : "Não",
       c.origem === "hotmart" ? "Hotmart" : "Manual", ROT_TIPO[c.tipo] || c.tipo, c.transacao, c.observacoes]));
   }
 
@@ -257,40 +286,50 @@ export function CobrancaPage({ me }) {
       </div>
     </section>
 
-    <section class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <${AbasToggle} class="max-w-xl" valor=${aba} onChange=${setAba} opcoes=${[
+      ["receber", `A receber${linhas ? " (" + qtdAbas.receber + ")" : ""}`],
+      ["recuperacao", `Recuperação de vendas${linhas ? " (" + qtdAbas.recuperacao + ")" : ""}`]]} />
+    ${recup ? html`<p class="-mt-2 text-xs font-semibold text-slate-500">Boletos e Pix gerados no checkout da Hotmart que venceram sem pagamento. São compras abandonadas, não dívidas de alunas: use a lista para recuperar vendas. A data é a do pedido.</p>` : null}
+
+    ${recup ? html`<section class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <${KpiCardDestaque} rotulo="Compras não pagas" valor=${cards.aberto[0]} icone="wallet" tom="dark" dica=${qtd(cards.aberto[1])} carregando=${carregando} />
+      <${KpiCardDestaque} rotulo="Últimos 7 dias" valor=${cards.d7[0]} icone="alert" tom="emerald" dica=${qtd(cards.d7[1])} carregando=${carregando} />
+      <${KpiCardDestaque} rotulo="De 8 a 30 dias" valor=${cards.d30[0]} icone="calendar" tom="light" dica=${qtd(cards.d30[1])} carregando=${carregando} />
+      <${KpiCardDestaque} rotulo="Mais de 30 dias" valor=${cards.antigas[0]} icone="trending-up" tom="light" dica=${qtd(cards.antigas[1])} carregando=${carregando} />
+    </section>` : html`<section class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <${KpiCardDestaque} rotulo="Total em aberto" valor=${cards.aberto[0]} icone="wallet" tom="dark" dica=${qtd(cards.aberto[1])} carregando=${carregando} />
       <${KpiCardDestaque} rotulo="Vencido" valor=${cards.vencido[0]} icone="alert" tom="negative" dica=${qtd(cards.vencido[1])} carregando=${carregando} />
       <${KpiCardDestaque} rotulo="A vencer nos próximos 30 dias" valor=${cards.prox30[0]} icone="calendar" tom="emerald" dica=${qtd(cards.prox30[1])} carregando=${carregando} />
       <${KpiCardDestaque} rotulo="A vencer depois" valor=${cards.depois[0]} icone="trending-up" tom="light" dica=${qtd(cards.depois[1])} carregando=${carregando} />
-    </section>
+    </section>`}
 
     <section class="rounded-[1.4rem] border border-slate-200 bg-white p-3 shadow-sm">
       <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
-        <select aria-label="Situação" value=${situacao} onChange=${(e) => setSituacao(e.target.value)} class="filter-select h-11 py-0">
+        ${recup ? null : html`<select aria-label="Situação" value=${situacao} onChange=${(e) => setSituacao(e.target.value)} class="filter-select h-11 py-0">
           <option value="aberto">Todas em aberto</option><option value="vencido">Vencidas</option><option value="a_vencer">A vencer</option>
           <option value="pago">Pagas</option><option value="cancelado">Canceladas</option>
         </select>
         <select aria-label="Origem" value=${origem} onChange=${(e) => setOrigem(e.target.value)} class="filter-select h-11 py-0">
           <option value="all">Todas as origens</option><option value="hotmart">Hotmart</option><option value="manual">Manual</option>
-        </select>
+        </select>`}
         <select aria-label="Produto" value=${produto} onChange=${(e) => setProduto(e.target.value)} class="filter-select h-11 py-0">
           <option value="all">Todos os produtos</option>
           ${produtos.map((p) => html`<option value=${p}>${p}</option>`)}
         </select>
-        <select aria-label="Tipo" value=${tipo} onChange=${(e) => setTipo(e.target.value)} class="filter-select h-11 py-0">
+        ${recup ? null : html`<select aria-label="Tipo" value=${tipo} onChange=${(e) => setTipo(e.target.value)} class="filter-select h-11 py-0">
           <option value="all">Todos os tipos</option>
           ${TIPOS.map(([v, r]) => html`<option value=${v}>${r}</option>`)}
-        </select>
-        <input type="date" aria-label="Vencimento de" title="Vencimento de" value=${de} onInput=${(e) => setDe(e.target.value)} class="filter-select h-11 py-0" />
-        <input type="date" aria-label="Vencimento até" title="Vencimento até" value=${ate} onInput=${(e) => setAte(e.target.value)} class="filter-select h-11 py-0" />
+        </select>`}
+        <input type="date" aria-label=${recup ? "Pedido de" : "Vencimento de"} title=${recup ? "Pedido de" : "Vencimento de"} value=${de} onInput=${(e) => setDe(e.target.value)} class="filter-select h-11 py-0" />
+        <input type="date" aria-label=${recup ? "Pedido até" : "Vencimento até"} title=${recup ? "Pedido até" : "Vencimento até"} value=${ate} onInput=${(e) => setAte(e.target.value)} class="filter-select h-11 py-0" />
         <label class="relative sm:col-span-2 lg:col-span-1 xl:col-span-1">
           <${Icone} nome="search" class="pointer-events-none absolute left-4 top-3.5 h-4 w-4 text-slate-400" />
           <input value=${busca} onInput=${(e) => setBusca(e.target.value)} placeholder="Cliente, e-mail ou transação..." class="filter-select h-11 py-0 pl-11" />
         </label>
-        <label class="flex h-11 cursor-pointer items-center gap-3 rounded-2xl border border-slate-200 px-4 text-xs font-bold text-slate-700">
+        ${recup ? null : html`<label class="flex h-11 cursor-pointer items-center gap-3 rounded-2xl border border-slate-200 px-4 text-xs font-bold text-slate-700">
           <input type="checkbox" checked=${previstas} onChange=${(e) => setPrevistas(e.target.checked)} class="h-4 w-4 accent-emerald-500" />
           Incluir parcelas previstas
-        </label>
+        </label>`}
       </div>
       ${de || ate ? html`<button type="button" onClick=${() => { setDe(""); setAte(""); }} class="mt-2 px-2 text-xs font-bold text-emerald-700 hover:underline">Limpar período</button>` : null}
     </section>
@@ -309,7 +348,7 @@ export function CobrancaPage({ me }) {
       </div>
       <div class="overflow-x-auto"><table class="w-full min-w-[1300px]">
         <thead><tr class="bg-slate-50 text-left text-[13.5px] font-black uppercase tracking-widest text-slate-400">
-          <th class="px-4 py-3">Vencimento</th><th class="px-4 py-3">Cliente</th><th class="px-4 py-3">Produto</th><th class="px-4 py-3">Descrição / parcela</th>
+          <th class="px-4 py-3">${recup ? "Pedido" : "Vencimento"}</th><th class="px-4 py-3">Cliente</th><th class="px-4 py-3">Produto</th><th class="px-4 py-3">Descrição / parcela</th>
           <th class="px-4 py-3">Forma</th><th class="px-4 py-3 text-right">Valor</th><th class="px-4 py-3">Situação</th><th class="px-4 py-3">Origem</th><th class="px-4 py-3 text-right">Ações</th>
         </tr></thead>
         <tbody>
@@ -342,6 +381,10 @@ export function CobrancaPage({ me }) {
 
 function BadgeSituacao({ c, hoje }) {
   const s = situacaoCobranca(c, hoje);
+  if (s === "vencido" && ehRecuperacao(c)) {
+    const n = diasEntre(c.vencimento, hoje);
+    return html`<${Pill} tom="neutro" class="whitespace-nowrap">Não pago · pedido há ${n} dia${n === 1 ? "" : "s"}<//>`;
+  }
   if (s === "vencido") {
     const n = diasEntre(c.vencimento, hoje);
     return html`<${Pill} tom="rosa" class="whitespace-nowrap">Vencido · há ${n} dia${n === 1 ? "" : "s"}<//>`;
