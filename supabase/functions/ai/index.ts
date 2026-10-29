@@ -1,6 +1,7 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { linkedinSemana, linkedinReescrever } from "./linkedin.ts";
 import { arenaGerar, arenaAjustar, arenaRegrasSugerir } from "./arena.ts";
+import { carrosselRoteiro, carrosselReescrever } from "./carrossel.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -305,6 +306,7 @@ function areaDaAcao(action: unknown, body: Record<string, any>): string | null {
     return s === "cs-suporte" ? "cs" : "bc";
   }
   if (action === "linkedin_semana" || action === "linkedin_reescrever") return "conteudo";
+  if (action === "carrossel_roteiro" || action === "carrossel_reescrever") return "conteudo";
   if (action === "arena_gerar" || action === "arena_ajustar" || action === "arena_regras_sugerir") return "pedagogico";
   return null;
 }
@@ -323,6 +325,7 @@ Deno.serve(async (req: Request) => {
   try { body = await req.json(); } catch { /* vazio */ }
   const action = body.action;
   const ehArena = action === "arena_gerar" || action === "arena_ajustar" || action === "arena_regras_sugerir";
+  const ehCarrossel = action === "carrossel_roteiro" || action === "carrossel_reescrever";
 
   // Modo de teste das ações arena_* (sem senha de usuário): header x-arena-teste igual ao token guardado em
   // app_config.chave='arena_teste_token' (tabela só-admin, lida com service_role). Sem essa linha na tabela,
@@ -344,7 +347,7 @@ Deno.serve(async (req: Request) => {
 
   // Acesso por aba, conferido aqui no servidor (ADM tem todas). Cada ação exige a aba da tela que a usa:
   // classify (sugerir seção) = Base; ask com secao_slug cs-suporte (FAQ) = CS; ask com outra seção = Base;
-  // ask sem seção (Gerador de conteúdos; Pedir a IA é só do ADM) = Conteúdo; linkedin_* = Conteúdo;
+  // ask sem seção (Gerador de conteúdos; Pedir a IA é só do ADM) = Conteúdo; linkedin_* e carrossel_* = Conteúdo;
   // arena_* = Pedagógico. "status" só pede login.
   let ehAdmin = false;
   if (!modoTeste) {
@@ -370,12 +373,12 @@ Deno.serve(async (req: Request) => {
     return json({ configured: false, error: "IA nao conectada. Um admin precisa definir o segredo ANTHROPIC_API_KEY nas Edge Functions do Supabase." });
   }
 
-  if ((action === "classify" || action === "ask" || action === "linkedin_semana" || action === "linkedin_reescrever" || ehArena) && (await iaPausada(modoTeste ? sbService : sb))) {
+  if ((action === "classify" || action === "ask" || action === "linkedin_semana" || action === "linkedin_reescrever" || ehArena || ehCarrossel) && (await iaPausada(modoTeste ? sbService : sb))) {
     return json({ configured: true, paused: true, error: MSG_PAUSADO });
   }
 
   const wsId = await getWorkspaceId(sbService);
-  if ((action === "classify" || action === "linkedin_semana" || action === "linkedin_reescrever" || ehArena) && await tetoBloqueia()) return RESP_TETO();
+  if ((action === "classify" || action === "linkedin_semana" || action === "linkedin_reescrever" || ehArena || ehCarrossel) && await tetoBloqueia()) return RESP_TETO();
 
   try {
     // ---- LinkedIn da Tia (Conteúdo > LinkedIn): fila semanal e reescrita (ver linkedin.ts) ----
@@ -385,6 +388,17 @@ Deno.serve(async (req: Request) => {
       const r = action === "linkedin_semana"
         ? await linkedinSemana(sb, u.user.id, body, chamar, log, sbService)
         : await linkedinReescrever(sb, u.user.id, body, chamar, log, sbService);
+      return json(r.body, r.status);
+    }
+
+    // ---- Produtor de carrosséis (Conteúdo): roteiro slide a slide e reescrita de um slide (ver carrossel.ts) ----
+    if (ehCarrossel) {
+      const ctx = {
+        sb, sbGuia: sbService, uid: u.user.id,
+        anthropic: (system: string, user: string, maxTokens: number, opts?: { schema?: unknown; effort?: string }) => anthropic(system, user, maxTokens, wsId, opts),
+        log: (origem: string, usage: any) => logAiUsage(sbService, origem, MODEL, usage, uid),
+      };
+      const r = action === "carrossel_roteiro" ? await carrosselRoteiro(ctx, body) : await carrosselReescrever(ctx, body);
       return json(r.body, r.status);
     }
 

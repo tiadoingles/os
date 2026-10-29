@@ -24,7 +24,7 @@ const DIAS = ["segunda", "terça", "quarta", "quinta", "sexta"];
 // seguem a estrutura de roteiro e vão de 1.500 a 2.500 caracteres; os demais formatos, de 900 a 1.500.
 // Mesma regra do front (liFaixaTamanho em app.js).
 export function ehFormatoRoteiro(formato: string): boolean {
-  const f = String(formato || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  const f = String(formato || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   return /historia|case|depoimento/.test(f);
 }
 export function faixaTamanho(formato: string): { min: number; max: number } {
@@ -39,7 +39,7 @@ export const REGRAS_LINKEDIN = [
   "- Uma ideia só por post. Estrutura: gancho → desenvolvimento → virada/lição → 1 pergunta aberta → 0 a 3 hashtags.",
   "- O texto (antes das hashtags) TERMINA com uma pergunta aberta para comentário.",
   "- De 0 a 3 hashtags, no fim, escolhidas entre: #inglês #inglêsparaadultos #inglêsnotrabalho #aprendizagemacelerada #carreira #desenvolvimentopessoal #fluência.",
-  "- No máximo 1 emoji no post inteiro, e só destes: 🚀 🧠 🇺🇸 🙏 ❤️ (de preferência nenhum).",
+  "- No máximo 1 emoji no post inteiro, e só destes: \u{1f680} \u{1f9e0} \u{1f1fa}\u{1f1f8} \u{1f64f} \u{2764}\u{fe0f} (de preferência nenhum).",
   "- NUNCA link no corpo do post (se precisar de link, ele vai no primeiro comentário).",
   "- NUNCA mencionar idade, nem positivamente (nada de 'depois dos 40', 'na minha idade', 'maduras').",
   "- NUNCA usar estatística ou número de pesquisa ('X% das alunas', 'pesquisas mostram que 7 em cada 10').",
@@ -143,7 +143,7 @@ const BLOCO_EXEMPLO_ROTEIRO = [
 ].join("\n");
 
 // ---------- verificação automática das regras (vira aviso na observacao) ----------
-const EMOJIS_OK = ["🚀", "🧠", "🇺🇸", "🙏", "❤️", "❤"];
+const EMOJIS_OK = ["\u{1f680}", "\u{1f9e0}", "\u{1f1fa}\u{1f1f8}", "\u{1f64f}", "\u{2764}\u{fe0f}", "\u{2764}"];
 const fmtN = (n: number) => n.toLocaleString("pt-BR");
 export function checarPost(texto: string, formato = ""): string[] {
   const avisos: string[] = [];
@@ -164,7 +164,7 @@ export function checarPost(texto: string, formato = ""): string[] {
   const picto = (t.replace(/\p{Regional_Indicator}/gu, "").match(/\p{Extended_Pictographic}/gu) || []);
   const emojis = [...flags, ...picto];
   if (emojis.length > 1) avisos.push(`${emojis.length} emojis (máximo 1)`);
-  const fora = emojis.filter((e) => !EMOJIS_OK.includes(e) && !(e === "🇺🇸"));
+  const fora = emojis.filter((e) => !EMOJIS_OK.includes(e) && !(e === "\u{1f1fa}\u{1f1f8}"));
   if (fora.length) avisos.push(`emoji fora da marca (${fora.join(" ")})`);
   if (/\b\d{1,3}\s?%/.test(t)) avisos.push("parece ter estatística (%)");
   return avisos;

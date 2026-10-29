@@ -84,7 +84,7 @@ como backend.
     (leitura; o insert público do teste continua) e `sync_status` (leitura das chaves `metas-planilha`,
     `mentorados-planilha`, `teste-vac-planilha`, `nivelamento-planilha`, `pesquisas-respostas`); RPCs `os_restaurar_cs_metas`/`os_restaurar_diagnostico`.
   - `conteudo`: `conteudo_calendario`, `conteudo_objetivo_resumo`, `conteudo_insights`, `ig_dia`, `ig_perfil`, `ig_post`,
-    `linkedin_posts`; RPC `linkedin_conexao_status`.
+    `linkedin_posts`, `conteudo_carrosseis`; RPC `linkedin_conexao_status`.
   - `financeiro`: `fin_contas`, `fin_dre_grupos` (sem insert/delete; trigger só deixa mudar `nome`), `fin_dre_categorias`
     (padrão protegidas por trigger; `fora_dre`), `fin_importacoes`, `fin_lancamentos` (remover = `cancelado_em`), `fin_vendas`,
     `fin_cobrancas` (OS só cria/edita/apaga `origem='manual'`; Hotmart só `observacoes`, trigger); cobranças NUNCA entram sozinhas no Fluxo/DRE — botão "Fluxo/DRE" cria `fin_lancamentos` manual conciliado com `cobranca_ref` ('hotmart:<chave_externa>' | 'manual:<id>', índice único entre não cancelados), `fin_hotmart_pedidos`
@@ -104,7 +104,7 @@ como backend.
   `mentorados-sheet`, `teste-vac-sheet`, `nivelamento-sheet`, `pesquisas-respostas` = `cs` (os crons continuam pelo
   `x-sync-token`; a op `perguntar` da `pesquisas-respostas` exige usuário com `cs`, nunca o token); `ai`: `classify` = `bc`,
   `ask` com `secao_slug=cs-suporte` = `cs`, com outra seção = `bc`, sem seção (Gerador de conteúdos; Pedir a IA é só do
-  ADM na interface) = `conteudo`, `linkedin_*` = `conteudo` (o guia editorial é lido com service_role depois da
+  ADM na interface) = `conteudo`, `linkedin_*` e `carrossel_*` = `conteudo` (o guia editorial é lido com service_role depois da
   checagem), `arena_*` = `pedagogico`, `status` só pede login; `linkedin`: `status`/`auth_url` = `conteudo`,
   `desconectar` = ADM; `sync` (botões): `envios`/`pesquisas`/`chat-categorias`/`regenerar_resumo_pesquisa` = `cs`,
   `conteudo-metricas`/`conteudo-insights` = `conteudo`, `aulas-praticas` = `pedagogico`, `drive` = `bc`.
@@ -207,11 +207,19 @@ como backend.
   em `montarEstrutura`, ritmo de cores da seção 6 em `aplicarRitmo` (`fixo:true` não muda; nunca dois azuis seguidos),
   checklist automático das seções 9/10 em `checklist`. Marcação nos campos: `*x*` destaque, `_x_` itálico, Enter quebra.
   `Fit` reduz a fonte até o mínimo do manual; passou disso, aviso "não cabe". O slide zera estilos herdáveis (o
-  html-to-image copia o estilo computado e a miniatura fica num `<button>`). Ainda **sem banco**: rascunho só no
-  `localStorage os.carrossel.rascunho` (sem as fotos), foto por upload local (data URL, sem CORS). Pendente: Fase 2
-  (IA escreve o roteiro: ações `carrossel_*` na função `ai` + guia na Base + tabela `conteudo_carrosseis`), Fase 3
-  (fotos da pasta do Drive em `conteudo_fotos` + bucket) e o arquivo do símbolo do logo (a marca d'água usa hoje a forma
-  do balão). Exportação testada no Chrome; no Safari a 1ª renderização é feita duas vezes (bug do WebKit com data URL).
+  html-to-image copia o estilo computado e a miniatura fica num `<button>`). Rascunho em edição também no
+  `localStorage os.carrossel.rascunho` (sem as fotos), foto por upload local (data URL, sem CORS). Exportação testada no
+  Chrome; no Safari a 1ª renderização é feita duas vezes (bug do WebKit com data URL).
+  **Fase 2 (IA, 29/10/2026)**: ações `carrossel_roteiro` (briefing → slides + legenda + correcoes/duvidas/pendencias;
+  structured outputs com todas as chaves obrigatórias, `validarRoteiro` + 1 nova tentativa; max_tokens escala com a
+  quantidade) e `carrossel_reescrever` (1 slide + instrução) no arquivo `carrossel.ts` da função `ai` (aba Conteúdo, pausa,
+  teto diário, custo `ai:carrossel_*`). O prompt lê o guia `kb_documents.chave_externa='carrossel:manual'` (seção
+  Documentação e Processos; mudar regra = nova versão do guia) + `conteudo_insights` + temas recentes. Nomes de modelo/campo
+  iguais aos de `MODELOS` no front (mantenha os dois). Histórico em `public.conteudo_carrosseis` (SQL
+  `scripts/migrations/20261029h_conteudo_carrosseis.sql`; RLS `app.tem_area('conteudo')`, gatilhos `set_updated_at` e
+  `zz_os_atividade`): gerar com IA já grava rascunho (origem `ia`), Salvar/Excluir com DESFAZER (escopo `conteudo/carrosseis`);
+  slides em jsonb sem as fotos. Pendente: Fase 3 (fotos do Drive "4. Materiais Visuais/1. Fotos & Videos" em
+  `conteudo_fotos` + bucket; logo branco "Logo Tia do Inglês branco.png" na marca d'água, hoje a forma do balão).
 
 - **Gerador de Materiais das Arenas** (`#/pedagogico/gerador-materiais`, `GeradorMateriaisPage`/`FormArena`/
   `PedidoArena`/`RegrasArena`; SQL em `scripts/migrations/20261016_arenas_previa_regras.sql`, teste de RLS em

@@ -856,6 +856,7 @@ function escopoDesfazer(route) {
   if (p0 === "farol") return "farol";
   if (p0 === "ferramentas") return "ferramentas";
   if (p0 === "conteudo" && p1 === "linkedin") return LI_ESCOPO;
+  if (p0 === "conteudo" && p1 === "carrosseis") return "conteudo/carrosseis"; // ESCOPO em conteudo/carrosseis.js
   if (p0 === "pedagogico" && p1 === "gerador-materiais") return ARENA_ESCOPO;
   if (p0 === "base" || p0 === "secao" || p0 === "doc") return "base";
   if (p0 === "admin") return "admin";
@@ -2519,6 +2520,7 @@ function haQuantoTempo(iso) {
 }
 // Nome amigável de cada tabela no histórico (área do OS + o que é). Tabela fora da lista aparece pelo nome técnico.
 const TABELAS_HISTORICO = {
+  conteudo_carrosseis: "Conteúdo · carrossel",
   kb_documents: "Base de Conhecimento · documento", kb_sections: "Base de Conhecimento · seção", kb_document_versions: "Base de Conhecimento · versão",
   agenda_eventos: "Agenda · evento", aulas_agenda: "Agenda · aula", arena_regras: "Pedagógico · regras das Arenas",
   materiais_pedidos: "Pedagógico · material", slides_pedidos: "Pedagógico · slides", fluent_mind_flashcards_banco: "Pedagógico · flash card",
@@ -11288,6 +11290,9 @@ configurarFinanceiro({
   registrarDesfazer, useAoDesfazer, desfazerCriacao, desfazerEdicao, desfazerExclusao,
 });
 
-configurarCarrosseis({ notify, errMsg, Btn, cx, inputCls, carregarJSZip });
+configurarCarrosseis({
+  sb, notify, errMsg, Btn, cx, inputCls, carregarJSZip, aiCall,
+  registrarDesfazer, useAoDesfazer, desfazerCriacao, desfazerEdicao, desfazerExclusao,
+});
 
 render(html`<${App} />`, document.getElementById("app"));

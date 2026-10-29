@@ -1,15 +1,17 @@
 // Conteúdo → Produtor de carrosséis (#/conteudo/carrosseis).
 // Monta carrosséis/posts do Instagram nos modelos do "Manual de carrosséis" da O20 (out/2026) e exporta
 // PNG 1080×1350 no navegador (html-to-image + JSZip, carregados só na hora de exportar).
-// Fase 1: modelos + editor manual + exportação. Fase 2 (IA escreve o roteiro) e Fase 3 (fotos do Drive)
-// entram depois — por enquanto a foto vem de upload local (data URL, sem problema de CORS no PNG).
+// Fase 1: modelos + editor manual + exportação. Fase 2: a IA escreve o roteiro (ações carrossel_roteiro/carrossel_reescrever
+// da Edge Function "ai", arquivo carrossel.ts — mesmos nomes de modelo/campo daqui) e o histórico fica em conteudo_carrosseis.
+// Fase 3 (fotos do Drive) entra depois — por enquanto a foto vem de upload local (data URL, sem problema de CORS no PNG).
 // Marcação nos textos: *palavra* = destaque (grifo na capa, vermelho escuro no papel, turquesa no azul),
 // _trecho_ = itálico (final da frase de virada), Enter = quebra de linha forçada.
 import { html } from "htm/preact";
 import { useState, useEffect, useLayoutEffect, useRef, useMemo } from "preact/hooks";
 
 /* ============================ Dependências do app ============================ */
-// Preenchido por app.js (configurarCarrosseis) antes do primeiro render: notify, errMsg, Btn, cx, inputCls, carregarJSZip.
+// Preenchido por app.js (configurarCarrosseis) antes do primeiro render: sb, notify, errMsg, Btn, cx, inputCls, carregarJSZip,
+// aiCall, registrarDesfazer, useAoDesfazer, desfazerCriacao, desfazerEdicao, desfazerExclusao.
 const os = {};
 export function configurarCarrosseis(deps) { Object.assign(os, deps); }
 
@@ -533,7 +535,7 @@ function avisosDoSlide(s, fotos, estourou) {
 const POR_EXTENSO = { duas: 2, dois: 2, "três": 3, quatro: 4, cinco: 5, seis: 6, sete: 7, oito: 8, nove: 9, dez: 10 };
 function checklist(slides, briefing) {
   const a = [];
-  const campos = slides.flatMap((s) => Object.entries(s).filter(([k, v]) => typeof v === "string" && !["id", "modelo", "fundo", "posTexto", "alinhar"].includes(k)).map(([, v]) => v));
+  const campos = slides.flatMap((s) => Object.entries(s).filter(([k, v]) => typeof v === "string" && !["id", "modelo", "fundo", "posTexto", "alinhar", "foto_sugerida"].includes(k)).map(([, v]) => v));
   const todo = campos.join("\n");
   if (/\bebook\b/i.test(todo)) a.push("Escreva \"e-book\", não \"ebook\".");
   if (/\b(3[0-24-9]|[12]\d)\s*anos de (experi[eê]ncia|carreira|sala de aula|profiss)/i.test(todo)) a.push("Confira os anos de experiência: são 33 anos (desde outubro de 2026).");
@@ -626,6 +628,19 @@ async function exportar(raiz, n, tema, onProgresso) {
   baixar(await zip.generateAsync({ type: "blob" }), `${base}.zip`);
 }
 
+/* ============================ Histórico (conteudo_carrosseis) ============================ */
+const ESCOPO = "conteudo/carrosseis"; // pilha do DESFAZER (escopoDesfazer em app.js)
+const TABELA = "conteudo_carrosseis";
+const STATUS = { rascunho: "Rascunho", aprovado: "Aprovado", postado: "Postado" };
+async function fetchCarrosseis() {
+  const { data, error } = await os.sb.from(TABELA).select("id,tema,tipo,formato,status,origem,created_at,updated_at")
+    .order("updated_at", { ascending: false }).limit(30);
+  if (error) throw error;
+  return data || [];
+}
+// Fotos não vão para o banco (data URL pesada): fica só a referência e o enquadramento.
+const slidesParaSalvar = (slides) => slides.map((s) => ({ ...s }));
+
 /* ============================ Rascunho local ============================ */
 const CHAVE_RASCUNHO = "os.carrossel.rascunho";
 // Rascunho de versão antiga: descarta slides de modelo que não existe mais e volta o formato para "lista".
@@ -636,6 +651,7 @@ function lerRascunho() {
     d.slides = (Array.isArray(d.slides) ? d.slides : []).filter((s) => s && MODELOS[s.modelo]);
     if (d.briefing && !FORMATOS[d.briefing.formato]) d.briefing.formato = "lista";
     if (d.briefing && !MODELOS[d.briefing.modeloUnico]) d.briefing.modeloUnico = "capa";
+    if (d.atualId && typeof d.atualId !== "string") d.atualId = null;
     return d;
   } catch { return null; }
 }
@@ -653,10 +669,19 @@ export function CarrosselPage() {
   const [tick, setTick] = useState(0);
   const [estouro, setEstouro] = useState(new Set());
   const [exportando, setExportando] = useState(null);
+  const [atualId, setAtualId] = useState(r0?.atualId || null); // linha de conteudo_carrosseis em edição
+  const [status, setStatus] = useState(r0?.status || "rascunho");
+  const [historico, setHistorico] = useState(null);
+  const [gerando, setGerando] = useState(false);
+  const [salvando, setSalvando] = useState(false);
+  const [retorno, setRetorno] = useState(r0?.retorno || null); // { correcoes, duvidas, pendencias } da última geração
   const galeria = useRef(null);
+  const recarregar = () => fetchCarrosseis().then(setHistorico).catch((e) => { notify(errMsg(e), "err"); setHistorico([]); });
+  useEffect(() => { recarregar(); }, []);
+  os.useAoDesfazer(ESCOPO, () => { recarregar(); });
 
   useEffect(() => { document.fonts && document.fonts.ready.then(() => setTick((t) => t + 1)); }, []);
-  useEffect(() => { salvarRascunho({ briefing, slides, legenda }); }, [briefing, slides, legenda]);
+  useEffect(() => { salvarRascunho({ briefing, slides, legenda, atualId, status, retorno }); }, [briefing, slides, legenda, atualId, status, retorno]);
   useEffect(() => {
     const t = setTimeout(() => {
       const novo = medirEstouro(galeria.current);
@@ -675,14 +700,117 @@ export function CarrosselPage() {
     if (briefing.tipo === "unico") s = [novo(briefing.modeloUnico, briefing.modeloUnico === "capa" ? { headline: "Headline com a *palavra* grifada" } : {})];
     else s = montarEstrutura(briefing.formato, briefing.qtd);
     if (briefing.youtube && briefing.tipo !== "unico") s = comVersaoYoutube(s);
-    setSlides(s); setSel(0);
+    setSlides(s); setSel(0); setAtualId(null); setStatus("rascunho"); setRetorno(null);
+  }
+
+  async function gerarComIA() {
+    if (!briefing.tema.trim()) return notify("Escreva o tema do carrossel.", "err");
+    if (briefing.ctaTipo === "comentario" && !String(briefing.palavra || "").trim()) return notify("Escreva a palavra-chave do comentário.", "err");
+    if (slides.length && !confirm("Substituir os slides atuais pelo roteiro da IA?")) return;
+    setGerando(true);
+    try {
+      const d = await os.aiCall("carrossel_roteiro", {
+        tema: briefing.tema, tipo: briefing.tipo, formato: briefing.formato, qtd: briefing.qtd,
+        cta_tipo: briefing.ctaTipo || "bio", palavra: briefing.palavra || "", modelo_unico: briefing.modeloUnico,
+        observacoes: briefing.observacoes || "",
+      });
+      if (!d || d.configured === false) return notify((d && d.error) || "A IA não está conectada.", "err");
+      if (d.paused || d.limite_diario) return notify(d.error, "err");
+      let s = (d.slides || []).filter((x) => MODELOS[x.modelo]).map((x) => ({
+        ...x, id: novo("x").id,
+        ...(briefing.formato === "storytelling" && x.modelo === "conteudo" ? { fundo: "papel", fixo: true } : {}),
+      }));
+      if (!s.length) return notify("A IA não devolveu slides. Tente de novo.", "err");
+      if (briefing.youtube && briefing.tipo !== "unico") s = comVersaoYoutube(s);
+      const leg = d.legenda || "";
+      const ret = { correcoes: d.correcoes || [], duvidas: d.duvidas || [], pendencias: d.pendencias || [] };
+      setSlides(s); setLegenda(leg); setSel(0); setRetorno(ret); setStatus("rascunho");
+      // Já entra no histórico como rascunho (origem ia); DESFAZER apaga.
+      const { data: criado, error } = await os.sb.from(TABELA).insert({
+        tema: briefing.tema.trim(), tipo: briefing.tipo, formato: briefing.tipo === "unico" ? null : briefing.formato,
+        briefing, slides: slidesParaSalvar(s), legenda: leg, origem: "ia",
+      }).select("*").single();
+      if (error) { setAtualId(null); notify("Roteiro gerado, mas não salvou no histórico: " + errMsg(error), "err"); }
+      else {
+        setAtualId(criado.id);
+        os.registrarDesfazer(ESCOPO, "Gerar carrossel com IA", os.desfazerCriacao(TABELA, criado, "carrossel"), { mensagem: "Roteiro gerado e salvo no histórico" });
+        recarregar();
+      }
+    } catch (e) { notify(errMsg(e), "err"); }
+    finally { setGerando(false); }
+  }
+
+  async function salvar(novoStatus) {
+    if (!slides.length) return;
+    if (!briefing.tema.trim()) return notify("Escreva o tema antes de salvar.", "err");
+    setSalvando(true);
+    try {
+      const st = novoStatus || status;
+      const linha = { tema: briefing.tema.trim(), tipo: briefing.tipo, formato: briefing.tipo === "unico" ? null : briefing.formato,
+        briefing, slides: slidesParaSalvar(slides), legenda, status: st };
+      if (atualId) {
+        const { data: antes } = await os.sb.from(TABELA).select("*").eq("id", atualId).maybeSingle();
+        if (antes) {
+          const { data: depois, error } = await os.sb.from(TABELA).update(linha).eq("id", atualId).select("*").single();
+          if (error) throw error;
+          os.registrarDesfazer(ESCOPO, "Salvar carrossel", os.desfazerEdicao(TABELA, antes, depois, "carrossel"), { mensagem: "Carrossel salvo" });
+          setStatus(st); recarregar(); return;
+        }
+      }
+      const { data: criado, error } = await os.sb.from(TABELA).insert(linha).select("*").single();
+      if (error) throw error;
+      setAtualId(criado.id); setStatus(st);
+      os.registrarDesfazer(ESCOPO, "Salvar carrossel", os.desfazerCriacao(TABELA, criado, "carrossel"), { mensagem: "Carrossel salvo no histórico" });
+      recarregar();
+    } catch (e) { notify(errMsg(e), "err"); }
+    finally { setSalvando(false); }
+  }
+
+  async function abrir(id) {
+    if (slides.length && !confirm("Abrir este carrossel no editor? O que não foi salvo agora se perde.")) return;
+    try {
+      const { data, error } = await os.sb.from(TABELA).select("*").eq("id", id).single();
+      if (error) throw error;
+      const b = { ...briefing, ...(data.briefing || {}), tema: data.tema, tipo: data.tipo };
+      if (!FORMATOS[b.formato]) b.formato = "lista";
+      setBriefing(b);
+      setSlides((data.slides || []).filter((x) => MODELOS[x.modelo]).map((x) => ({ ...x, id: x.id || novo("x").id })));
+      setLegenda(data.legenda || ""); setAtualId(data.id); setStatus(data.status); setRetorno(null); setSel(0);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (e) { notify(errMsg(e), "err"); }
+  }
+
+  async function excluir(h) {
+    if (!confirm(`Excluir "${h.tema}" do histórico?`)) return;
+    try {
+      const { data: antes, error: e1 } = await os.sb.from(TABELA).select("*").eq("id", h.id).single();
+      if (e1) throw e1;
+      const { error } = await os.sb.from(TABELA).delete().eq("id", h.id);
+      if (error) throw error;
+      if (atualId === h.id) setAtualId(null);
+      os.registrarDesfazer(ESCOPO, "Excluir carrossel", os.desfazerExclusao(TABELA, antes, "carrossel"), { mensagem: "Carrossel excluído" });
+      recarregar();
+    } catch (e) { notify(errMsg(e), "err"); }
+  }
+
+  async function reescrever(i, instrucao) {
+    const d = await os.aiCall("carrossel_reescrever", {
+      tema: briefing.tema, indice: i, instrucao,
+      slide: slides[i], vizinhos: slides.map(({ foto, id, ...r }) => r),
+    });
+    if (!d || !d.slide) throw new Error((d && d.error) || "A IA não devolveu o slide.");
+    // Casa pelo id (a Tia pode mover/excluir slides enquanto a IA responde) e mantém o que é escolha de layout dela.
+    const alvo = slides[i];
+    const keep = { id: alvo.id, foto: alvo.foto, fixo: alvo.fixo, ...(alvo.alinhar ? { alinhar: alvo.alinhar } : {}) };
+    setSlides((arr) => arr.map((s) => (s.id === alvo.id ? { ...d.slide, ...keep } : s)));
+    (d.avisos || []).forEach((a) => notify(a, "info"));
   }
   function carregarExemplo(k) {
     if (slides.length && !confirm("Substituir os slides atuais pelo exemplo?")) return;
     const ex = EXEMPLOS[k];
     setBriefing((b) => ({ ...b, tema: ex.tema, formato: ex.formato, tipo: "carrossel", qtd: ex.slides.length }));
     setSlides(aplicarRitmo(ex.slides.map((s) => ({ ...s, id: novo("x").id }))));
-    setLegenda(ex.legenda); setSel(0);
+    setLegenda(ex.legenda); setSel(0); setAtualId(null); setStatus("rascunho"); setRetorno(null);
   }
   function comVersaoYoutube(s) {
     const ult = s[s.length - 1];
@@ -749,7 +877,7 @@ export function CarrosselPage() {
     <div>
       <div class="os-eyebrow">Conteúdo</div>
       <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Produtor de carrosséis</h1>
-      <p class="mt-1 text-xs text-muted">Monta os slides nos modelos do Manual de carrosséis e exporta PNG 1080 × 1350. O roteiro com IA e o banco de fotos do Drive chegam nas próximas fases.</p>
+      <p class="mt-1 text-xs text-muted">A IA escreve o roteiro nos modelos do Manual de carrosséis (guia na Base de Conhecimento), você revisa e exporta PNG 1080 × 1350. O banco de fotos do Drive chega na próxima fase.</p>
 
       <div class="mt-5 rounded-[1.6rem] border border-line bg-card shadow-card p-5">
         <div class="grid gap-4 lg:grid-cols-[1fr_auto]">
@@ -789,7 +917,27 @@ export function CarrosselPage() {
                 ${Object.entries(MODELOS).map(([k, m]) => html`<option value=${k}>${m.nome}</option>`)}
               </select>
             </label>`}
-          <${Btn} onClick=${montar}>Montar estrutura<//>
+        </div>
+        <div class="mt-4 grid gap-4 lg:grid-cols-[auto_1fr]">
+          <div>
+            <div class="text-xs font-medium uppercase tracking-wide text-muted">CTA</div>
+            <div class="mt-1 flex flex-wrap items-center gap-2">
+              <${Radio} val="bio" cur=${briefing.ctaTipo || "bio"} set=${(v) => setB("ctaTipo", v)}>Link da bio<//>
+              <${Radio} val="comentario" cur=${briefing.ctaTipo || "bio"} set=${(v) => setB("ctaTipo", v)}>Comentário com palavra-chave<//>
+              ${briefing.ctaTipo === "comentario" ? html`<input class=${cx(inputCls, "w-40")} placeholder="Ex.: MEMORIA" value=${briefing.palavra || ""}
+                onInput=${(e) => setB("palavra", e.target.value.toUpperCase())} />` : null}
+            </div>
+          </div>
+          <label class="block">
+            <span class="text-xs font-medium uppercase tracking-wide text-muted">Observações para a IA (opcional)</span>
+            <input class=${cx(inputCls, "mt-1")} value=${briefing.observacoes || ""} onInput=${(e) => setB("observacoes", e.target.value)}
+              placeholder="Ex.: usar a história do carro esquecido no mercado; foco em quem viaja" />
+          </label>
+        </div>
+        <div class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+          <${Btn} onClick=${gerarComIA} loading=${gerando} disabled=${travado}>${gerando ? "Escrevendo o roteiro…" : "Gerar com IA"}<//>
+          <${Btn} variant="ghost" onClick=${montar} disabled=${gerando || travado}>Montar em branco<//>
+          <span class="text-xs text-muted">Cada geração consome créditos da IA.</span>
           <div class="flex items-center gap-2 pb-1 text-xs text-muted">
             Exemplos:
             <button type="button" class="underline hover:text-ink" onClick=${() => carregarExemplo("simple-past")}>Simple Past</button>
@@ -803,6 +951,24 @@ export function CarrosselPage() {
         <div class="mt-6 rounded-[1.6rem] border border-dashed border-slate-200 bg-white/80 px-6 py-14 text-center text-sm text-muted">
           Escolha o formato e clique em <b>Montar estrutura</b>, ou abra um dos exemplos.
         </div>` : html`
+        ${retorno && (retorno.correcoes.length || retorno.duvidas.length || retorno.pendencias.length) ? html`
+          <div class="mt-6 grid gap-4 lg:grid-cols-3">
+            ${[["O que a IA corrigiu", retorno.correcoes, "bg-emerald-500"], ["Dúvidas para você confirmar", retorno.duvidas, "bg-sky-500"],
+              ["Ainda fora do manual (ajuste no editor)", retorno.pendencias, "bg-amber-500"]].filter(([, l]) => l.length).map(([t, l, cor]) => html`
+              <div class="rounded-[1.35rem] border border-line bg-card shadow-card p-4">
+                <div class="text-sm font-semibold text-ink">${t}</div>
+                <ul class="mt-2 space-y-1 text-sm text-ink/80">${l.map((a) => html`<li class="flex gap-2"><span class=${cx("mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full", cor)}></span><span>${a}</span></li>`)}</ul>
+              </div>`)}
+          </div>` : null}
+
+        <div class="mt-6 flex flex-wrap items-center gap-3 rounded-[1.35rem] border border-line bg-card px-4 py-3 shadow-card">
+          <span class="text-sm text-muted">${atualId ? "No histórico" : "Ainda não salvo no histórico"}</span>
+          <select class=${cx(inputCls, "w-auto")} value=${status} onChange=${(e) => setStatus(e.target.value)}>
+            ${Object.entries(STATUS).map(([k, v]) => html`<option value=${k}>${v}</option>`)}
+          </select>
+          <${Btn} onClick=${() => salvar()} loading=${salvando} disabled=${travado}>Salvar<//>
+        </div>
+
         <div class="mt-6 grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
           <div class="min-w-0">
             <div class="flex flex-wrap items-center justify-between gap-2">
@@ -823,7 +989,7 @@ export function CarrosselPage() {
           </div>
 
           <div class="rounded-[1.6rem] border border-line bg-card shadow-card p-5">
-            ${atual ? html`<${EditorSlide} key=${atual.id} s=${atual} i=${sel} upd=${upd} fotos=${fotos} escolherFoto=${escolherFoto} />` : null}
+            ${atual ? html`<${EditorSlide} key=${atual.id} s=${atual} i=${sel} upd=${upd} fotos=${fotos} escolherFoto=${escolherFoto} reescrever=${reescrever} travado=${travado} />` : null}
           </div>
         </div>
 
@@ -865,12 +1031,37 @@ export function CarrosselPage() {
               placeholder="1ª linha com a palavra-chave do tema. Uma frase por linha, sem travessão. 4 ou 5 hashtags, com #inglesparaadultos e #tiadoingles."></textarea>
           </div>
         </div>`}
+
+      <h2 class="mt-9 text-sm font-semibold uppercase tracking-wider text-muted">Histórico</h2>
+      <div class="mt-3 rounded-[1.6rem] border border-line bg-card shadow-card">
+        ${historico === null ? html`<div class="p-5 text-sm text-muted">Carregando…</div>`
+          : !historico.length ? html`<div class="p-5 text-sm text-muted">Nenhum carrossel salvo ainda.</div>`
+          : html`<ul class="divide-y divide-line">${historico.map((h) => html`
+            <li key=${h.id} class=${cx("flex flex-wrap items-center gap-3 px-5 py-3", h.id === atualId && "bg-emerald-50/60")}>
+              <div class="min-w-0 flex-1">
+                <div class="truncate text-sm font-semibold text-ink">${h.tema}</div>
+                <div class="text-xs text-muted">${h.tipo === "unico" ? "Post único" : (FORMATOS[h.formato]?.nome || "Carrossel")} · ${h.origem === "ia" ? "IA" : "manual"} · ${new Date(h.updated_at).toLocaleDateString("pt-BR")}</div>
+              </div>
+              <span class=${cx("rounded-lg px-2 py-0.5 text-xs font-bold", h.status === "postado" ? "bg-slate-100 text-slate-700" : h.status === "aprovado" ? "bg-emerald-50 text-emerald-800" : "bg-amber-50 text-amber-800")}>${STATUS[h.status] || h.status}</span>
+              <button type="button" class="text-sm font-medium text-emerald-800 underline" onClick=${() => abrir(h.id)}>Abrir</button>
+              <button type="button" class="text-sm text-rose-700 underline" onClick=${() => excluir(h)}>Excluir</button>
+            </li>`)}</ul>`}
+      </div>
     </div>`;
 }
 
 /* ============================ Editor do slide selecionado ============================ */
-function EditorSlide({ s, i, upd, fotos, escolherFoto }) {
-  const { cx, inputCls } = os;
+function EditorSlide({ s, i, upd, fotos, escolherFoto, reescrever, travado }) {
+  const { cx, inputCls, Btn, notify, errMsg } = os;
+  const [instrucao, setInstrucao] = useState("");
+  const [ocupado, setOcupado] = useState(false);
+  async function pedirIA() {
+    if (!instrucao.trim()) return notify("Escreva o que mudar neste slide.", "err");
+    setOcupado(true);
+    try { await reescrever(i, instrucao.trim()); setInstrucao(""); }
+    catch (e) { notify(errMsg(e), "err"); }
+    finally { setOcupado(false); }
+  }
   const m = MODELOS[s.modelo];
   const foto = s.foto && fotos[s.foto.id];
   const aj = s.foto || {};
@@ -898,6 +1089,7 @@ function EditorSlide({ s, i, upd, fotos, escolherFoto }) {
         if (tipo === "foto") return html`
           <div>
             <div class="text-xs font-medium uppercase tracking-wide text-muted">${rot}</div>
+            ${s.foto_sugerida ? html`<div class="mt-1 rounded-lg bg-slate-50 px-2.5 py-1.5 text-xs text-ink/80">Foto sugerida pela IA: ${s.foto_sugerida}</div>` : null}
             <input type="file" accept="image/*" class="mt-1 block w-full text-sm" onChange=${(e) => { escolherFoto(i, e.target.files[0]); e.target.value = ""; }} />
             ${foto ? html`
               <div class="mt-1 text-xs text-muted">${foto.nome} · ${foto.w} × ${foto.h} px</div>
@@ -932,5 +1124,11 @@ function EditorSlide({ s, i, upd, fotos, escolherFoto }) {
           </label>`;
       })}
       <p class="text-xs text-muted">Marcação: <code>*palavra*</code> destaque · <code>_trecho_</code> itálico · Enter força a quebra de linha.</p>
+      <div class="border-t border-line pt-4">
+        <div class="text-xs font-medium uppercase tracking-wide text-muted">Reescrever este slide com IA</div>
+        <textarea rows="2" class=${cx(inputCls, "mt-1")} value=${instrucao} onInput=${(e) => setInstrucao(e.target.value)}
+          placeholder="Ex.: deixe o título mais curto; troque o exemplo por um de viagem"></textarea>
+        <${Btn} variant="ghost" class="mt-2" onClick=${pedirIA} loading=${ocupado} disabled=${travado}>Reescrever<//>
+      </div>
     </div>`;
 }
