@@ -198,6 +198,21 @@ como backend.
   hashtags viram `{hashtag|\#|tag}`); `LinkedIn-Version` na constante `LINKEDIN_VERSION` (renovar antes
   do sunset, ~1 ano por versão). Aviso na Início quando o token expira em ≤7 dias.
 
+- **Produtor de carrosséis** (`#/conteudo/carrosseis`, `CarrosselPage` em `conteudo/carrosseis.js`; Fase 1, 29/10/2026).
+  Monta carrosséis/posts do Instagram nos 12 modelos do "Manual de carrosséis" da O20 (out/2026; cópia em
+  `~/Downloads/Manual-Carrosseis-Tia-do-Ingles.docx`) e exporta PNG 1080×1350 no navegador (html-to-image via esm.sh,
+  carregado só ao exportar, com as fontes DM Sans/DM Serif Display embutidas em data URL + `carregarJSZip` do app.js
+  para o .zip). Módulo próprio no molde do Financeiro: dependências por `configurarCarrosseis()`, linha no importmap com
+  o mesmo `?v=N`. Tokens em `CARROSSEL_TOKENS`, modelos em `MODELOS`, formatos (lista, cultura, educativo, storytelling)
+  em `montarEstrutura`, ritmo de cores da seção 6 em `aplicarRitmo` (`fixo:true` não muda; nunca dois azuis seguidos),
+  checklist automático das seções 9/10 em `checklist`. Marcação nos campos: `*x*` destaque, `_x_` itálico, Enter quebra.
+  `Fit` reduz a fonte até o mínimo do manual; passou disso, aviso "não cabe". O slide zera estilos herdáveis (o
+  html-to-image copia o estilo computado e a miniatura fica num `<button>`). Ainda **sem banco**: rascunho só no
+  `localStorage os.carrossel.rascunho` (sem as fotos), foto por upload local (data URL, sem CORS). Pendente: Fase 2
+  (IA escreve o roteiro: ações `carrossel_*` na função `ai` + guia na Base + tabela `conteudo_carrosseis`), Fase 3
+  (fotos da pasta do Drive em `conteudo_fotos` + bucket) e o arquivo do símbolo do logo (a marca d'água usa hoje a forma
+  do balão). Exportação testada no Chrome; no Safari a 1ª renderização é feita duas vezes (bug do WebKit com data URL).
+
 - **Gerador de Materiais das Arenas** (`#/pedagogico/gerador-materiais`, `GeradorMateriaisPage`/`FormArena`/
   `PedidoArena`/`RegrasArena`; SQL em `scripts/migrations/20261016_arenas_previa_regras.sql`, teste de RLS em
   `teste_rls_arena_regras.sql`). Desde 16/10/2026 gera **sob demanda dentro do OS** (a tarefa local

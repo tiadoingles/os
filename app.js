@@ -5,6 +5,8 @@ import { createClient } from "@supabase/supabase-js";
 import { marked } from "marked";
 // Aba Financeiro (cópia do Craft Green): módulos em ./financeiro/, versionados pelo importmap do index.html.
 import { FinanceiroPage, configurarFinanceiro } from "./financeiro/index.js";
+// Conteúdo → Produtor de carrosséis: módulo próprio, versionado pelo importmap do index.html.
+import { CarrosselPage, configurarCarrosseis } from "./conteudo/carrosseis.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -293,6 +295,8 @@ const NAV = [
       desc: "Dashboard do calendário de conteúdo: produção, desempenho orgânico e posts por objetivo." },
     { slug: "gerador-conteudos", nome: "Gerador de conteúdos",
       desc: "Gera ideias e conteúdos a partir dos insights das pesquisas de alunos." },
+    { slug: "carrosseis", nome: "Produtor de carrosséis",
+      desc: "Monta carrosséis e posts do Instagram nos modelos do Manual de carrosséis e exporta PNG 1080 × 1350." },
     { slug: "linkedin", nome: "LinkedIn",
       desc: "Fila de posts do LinkedIn pessoal da Tia: gerar a semana com IA, revisar, aprovar e copiar." },
   ]},
@@ -11145,6 +11149,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "farol") return html`<${FarolPage} me=${me} />`;
   if (p0 === "conteudo" && (p1 === "metricas" || p1 === "instagram")) return html`<${ConteudoMetricasPage} />`;
   if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
+  if (p0 === "conteudo" && p1 === "carrosseis") return html`<${CarrosselPage} />`;
   if (p0 === "conteudo" && p1 === "linkedin") return html`<${LinkedinPage} me=${me} />`;
   if (p0 === "cs" && p1 === "faq") return html`<${FaqPage} me=${me} />`;
   if (p0 === "cs" && p1 === "envios-livros") return html`<${EnviosLivrosPage} me=${me} />`;
@@ -11282,5 +11287,7 @@ configurarFinanceiro({
   sb, notify, errMsg, temArea, ehAdmin, Modal, Btn,
   registrarDesfazer, useAoDesfazer, desfazerCriacao, desfazerEdicao, desfazerExclusao,
 });
+
+configurarCarrosseis({ notify, errMsg, Btn, cx, inputCls, carregarJSZip });
 
 render(html`<${App} />`, document.getElementById("app"));
