@@ -135,11 +135,15 @@ const NAV = [
     { slug: "visao-geral", nome: "Visão Geral", desc: "Resultado da empresa (DRE resumida, receita × despesas) e posição de caixa." },
     { slug: "dre", nome: "DRE", desc: "DRE gerencial: 22 linhas × 12 meses, total, análise vertical e exportação." },
     { slug: "fluxo-caixa", nome: "Fluxo de Caixa", desc: "Consolidado do ano, mensal e contas a pagar (previsão recorrente)." },
+    { slug: "cobranca", nome: "Cobrança", desc: "Pagamentos em aberto, vencidos e a vencer da Hotmart + cobranças manuais." },
     { slug: "vendas", nome: "Relatório de Vendas", desc: "Vendas por competência das plataformas (Hotmart, Eduzz e outras)." },
     { slug: "conciliacao", nome: "Conciliação", desc: "Classificar extratos e cartões nas categorias da DRE." },
     { slug: "importacao", nome: "Importação", desc: "Extrato bancário, fatura de cartão e relatórios das plataformas de vendas." },
     { slug: "contas", nome: "Contas Bancárias", desc: "Bancos, apelidos e saldo base do fluxo de caixa." },
     { slug: "estrutura-dre", nome: "Estrutura da DRE", desc: "Nomes das 22 linhas e categorias usadas na conciliação." },
+    { slug: "hotmart", nome: "Hotmart", desc: "Pergunte à Hotmart e use as ações da integração (vendas, assinaturas, alunos, cupons)." },
+    { slug: "nfe", nome: "NF-e", desc: "Notas fiscais emitidas (integração em breve)." },
+    { slug: "coproducao", nome: "Co-Produção", desc: "Espelho da planilha Calculo Investimento (Tia × Agência Fad)." },
   ]},
 
   { id: "conteudo", nome: "Conteúdo", icone: "✍️", itens: [

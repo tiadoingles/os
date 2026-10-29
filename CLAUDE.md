@@ -84,8 +84,11 @@ como backend.
   - `conteudo`: `conteudo_calendario`, `conteudo_objetivo_resumo`, `conteudo_insights`, `ig_dia`, `ig_perfil`, `ig_post`,
     `linkedin_posts`; RPC `linkedin_conexao_status`.
   - `financeiro`: `fin_contas`, `fin_dre_grupos` (sem insert/delete; trigger só deixa mudar `nome`), `fin_dre_categorias`
-    (padrão protegidas por trigger; `fora_dre`), `fin_importacoes`, `fin_lancamentos` (remover = `cancelado_em`), `fin_vendas`;
-    RPCs `fin_saldos_ate`, `fin_restaurar_estrutura_padrao` (security invoker).
+    (padrão protegidas por trigger; `fora_dre`), `fin_importacoes`, `fin_lancamentos` (remover = `cancelado_em`), `fin_vendas`,
+    `fin_cobrancas` (OS só cria/edita/apaga `origem='manual'`; Hotmart só `observacoes`, trigger), `fin_hotmart_pedidos`
+    (só leitura: histórico gravado pela Edge Function `hotmart`), `fin_coproducao` (só leitura, espelho da planilha);
+    RPCs `fin_saldos_ate`, `fin_restaurar_estrutura_padrao` (security invoker); `fin_hotmart_carregar`/`_finalizar` só
+    service_role.
   - `comercial`: nenhuma tabela ainda.
   - **Só ADM**: `app_config`, `ai_usage_log`, `farol_config`, `farol_indicadores`, `os_ferramentas`, `os_squad_agentes`,
     `sync_status` (escrita e demais chaves), `automacao_estado` (escrita; a leitura é de qualquer logado porque as Edge
@@ -235,6 +238,12 @@ como backend.
   etc. por `configurarFinanceiro()`. **Cache**: cada arquivo de `financeiro/` tem uma linha no importmap do
   `index.html` com o mesmo `?v=N` do app.js — bump todas juntas; arquivo novo = linha nova. Rotas `#/financeiro/*`
   usam largura total (`.fin-shell`) e o `.fin-page` aplica `zoom:.75` no desktop (o Craft usa html 12px).
+  Abas extras (29/10/2026): **Cobrança** (Hotmart em aberto/vencido/a vencer + manuais), **Hotmart** (pergunta livre com IA
+  + 15 consultas + 6 ações confirmadas, nunca reembolso), **NF-e** (placeholder) e **Co-Produção** (espelho da planilha
+  "Calculo Investimento", Edge Function `coproducao-sheet` + cron `os-coproducao-planilha-diario` 9h20). Hotmart = API
+  oficial sob demanda pela Edge Function `hotmart` (`supabase/functions/hotmart`), secrets `HOTMART_CLIENT_ID`,
+  `HOTMART_CLIENT_SECRET`, `HOTMART_BASIC`; `op` = consulta | acao | pergunta | sync_cobrancas (trava em
+  `sync_status.solicitado_em` de `hotmart-cobrancas`; nunca apaga a lista se uma busca falhar).
 
 ## Convenções
 

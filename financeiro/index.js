@@ -13,6 +13,10 @@ import { ConciliacaoPage } from "./conciliacao.js";
 import { ImportacaoPage } from "./importacao.js";
 import { ContasPage } from "./contas.js";
 import { EstruturaDrePage } from "./estrutura-dre.js";
+import { HotmartPage } from "./hotmart.js";
+import { CobrancaPage } from "./cobranca.js";
+import { NfePage } from "./nfe.js";
+import { CoproducaoPage } from "./coproducao.js";
 
 export const TELAS_FIN = {
   "visao-geral": VisaoGeralPage,
@@ -23,6 +27,10 @@ export const TELAS_FIN = {
   importacao: ImportacaoPage,
   contas: ContasPage,
   "estrutura-dre": EstruturaDrePage,
+  hotmart: HotmartPage,
+  cobranca: CobrancaPage,
+  nfe: NfePage,
+  coproducao: CoproducaoPage,
 };
 
 /** Router do Financeiro: a guarda de acesso (rotaPermitida) já rodou no Router do app. */
