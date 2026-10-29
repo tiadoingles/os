@@ -240,9 +240,10 @@ como backend.
   usam largura total (`.fin-shell`) e o `.fin-page` aplica `zoom:.75` no desktop (o Craft usa html 12px).
   Abas extras (29/10/2026): **Cobrança** (Hotmart em aberto/vencido/a vencer + manuais), **Hotmart** (pergunta livre com IA
   + 15 consultas + 6 ações confirmadas, nunca reembolso), **NF-e** (placeholder) e **Co-Produção** (espelho da planilha
-  "Calculo Investimento", Edge Function `coproducao-sheet` + cron `os-coproducao-planilha-diario` 9h20). Hotmart = API
-  oficial sob demanda pela Edge Function `hotmart` (`supabase/functions/hotmart`), secrets `HOTMART_CLIENT_ID`,
-  `HOTMART_CLIENT_SECRET`, `HOTMART_BASIC`; `op` = consulta | acao | pergunta | sync_cobrancas (trava em
+  "Calculo Investimento", Edge Function `coproducao-sheet` + cron `os-coproducao-planilha-diario` 9h20). Hotmart = sob demanda
+  pela Edge Function `hotmart` (`supabase/functions/hotmart`), cliente do **MCP remoto da Hotmart**
+  (`https://developers.hotmart.com/mcp/v1`, o mesmo do conector do Claude) com um só secret `HOTMART_BASIC` (token Basic
+  da credencial); `hotmart_sale_refund` e `hotmart_batch_*` bloqueados no cliente; escrita só via op `acao` confirmada; `op` = consulta | acao | pergunta | sync_cobrancas (trava em
   `sync_status.solicitado_em` de `hotmart-cobrancas`; nunca apaga a lista se uma busca falhar).
 
 ## Convenções

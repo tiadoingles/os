@@ -6,9 +6,9 @@
 //   sync_cobrancas                                  -> recarrega fin_cobrancas (fin_hotmart_carregar/finalizar)
 // Toda consulta/ação/pergunta/sync fica registrada em fin_hotmart_pedidos (histórico).
 // verify_jwt=false: autorização feita aqui (usuário ADM ou com a aba Financeiro).
-// Segredos: HOTMART_CLIENT_ID, HOTMART_CLIENT_SECRET, HOTMART_BASIC (credenciais da Hotmart);
+// Transporte: MCP da Hotmart (o mesmo do conector do Claude), segredo HOTMART_BASIC (token Basic da credencial);
 //           ANTHROPIC_API_KEY (+ AI_MODEL, ANTHROPIC_WORKSPACE_ID opcionais), compartilhados com a função "ai".
-// Documentação usada: https://developers.hotmart.com/docs/pt-BR/ (ver comentários de cada endpoint).
+// As ferramentas MCP devolvem o mesmo JSON da API REST: https://developers.hotmart.com/docs/pt-BR/ (ver comentários).
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const ALLOWED = new Set(["https://tiadoingles.github.io"]);
@@ -63,29 +63,30 @@ const tr = (m: Record<string, string>, v: unknown) => (v == null ? "" : m[String
 type Tabela = { colunas: string[]; linhas: unknown[][] };
 type Resultado = { resposta: string; dados: Tabela | null };
 
-/* ============================ Hotmart: token e chamadas ============================ */
-const BASE = "https://developers.hotmart.com";
+/* ============================ Hotmart: cliente MCP ============================ */
+// Mesmo servidor MCP do conector Hotmart do Claude (https://developers.hotmart.com/mcp/v1), Streamable HTTP com
+// JSON-RPC. Autenticação: "Authorization: Basic <HOTMART_BASIC>" (base64 de client_id:client_secret). Handshake
+// initialize -> notifications/initialized -> tools/call; Mcp-Session-Id guardado em memória (por isolate) e refeito
+// se expirar. As ferramentas devolvem content[].text com JSON (às vezes {"result":"<json>"}) igual ao da API REST.
+const MCP_URL = "https://developers.hotmart.com/mcp/v1";
 const LIMITE_LINHAS = 300;
 class SemCredenciais extends Error {}
 class ErroHotmart extends Error {}
 class ErroParametro extends Error {}
 
-let tokenCache: { token: string; exp: number } | null = null;
-function credenciais() {
-  const id = Deno.env.get("HOTMART_CLIENT_ID") ?? "", secret = Deno.env.get("HOTMART_CLIENT_SECRET") ?? "", basic = Deno.env.get("HOTMART_BASIC") ?? "";
-  if (!id || !secret || !basic) throw new SemCredenciais();
-  return { id, secret, basic: basic.replace(/^Basic\s+/i, "") };
-}
-// Autenticação: https://developers.hotmart.com/docs/pt-BR/start/app-auth/
-async function tokenHotmart(forcar = false): Promise<string> {
-  if (!forcar && tokenCache && tokenCache.exp > Date.now() + 60_000) return tokenCache.token;
-  const c = credenciais();
-  const url = `https://api-sec-vlc.hotmart.com/security/oauth/token?grant_type=client_credentials&client_id=${encodeURIComponent(c.id)}&client_secret=${encodeURIComponent(c.secret)}`;
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Basic ${c.basic}` } });
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok || !d?.access_token) throw new ErroHotmart(`Não foi possível autenticar na Hotmart (${mensagemHotmart(r.status, d)}). Confira HOTMART_CLIENT_ID, HOTMART_CLIENT_SECRET e HOTMART_BASIC.`);
-  tokenCache = { token: d.access_token, exp: Date.now() + (Number(d.expires_in) || 3600) * 1000 };
-  return tokenCache.token;
+/** Nunca chamadas pelo OS (reembolso e operações em lote): checado dentro de mcp(), antes de qualquer requisição. */
+const NEGADAS = new Set(["hotmart_sale_refund"]);
+const negada = (nome: string) => NEGADAS.has(nome) || nome.startsWith("hotmart_batch_");
+/** Ferramentas que alteram dados: só pela op 'acao' com confirmado === true. */
+const ESCRITA = new Set(["hotmart_subscription_cancel", "hotmart_subscription_reactivate", "hotmart_subscription_due_day_update",
+  "hotmart_coupon_create", "hotmart_coupon_delete", "hotmart_negotiation_generate"]);
+/** Allowlist da pergunta livre: só leitura (_list/_get), nunca _app, escrita ou negadas. */
+const leitura = (nome: string) => (nome.endsWith("_list") || nome.endsWith("_get")) && !nome.endsWith("_app") && !negada(nome) && !ESCRITA.has(nome);
+
+function basic(): string {
+  const b = (Deno.env.get("HOTMART_BASIC") ?? "").replace(/^Basic\s+/i, "").trim();
+  if (!b) throw new SemCredenciais();
+  return b;
 }
 const ERROS_PT: Record<string, string> = {
   invalid_parameter: "parâmetro inválido",
@@ -105,48 +106,128 @@ const ERROS_PT: Record<string, string> = {
   invalid_client: "credenciais da Hotmart recusadas",
   unauthorized: "credenciais da Hotmart recusadas",
 };
-function mensagemHotmart(status: number, d: any): string {
-  const cod = String(d?.error || d?.code || "").trim();
+/** Texto de erro vindo da Hotmart (string ou {error, error_description}) em português quando o código é conhecido. */
+function erroTexto(v: any): string {
+  if (v == null) return "erro desconhecido";
+  if (typeof v === "string") return v.slice(0, 400);
+  const cod = String(v.error || v.code || "").trim();
   const pt = ERROS_PT[cod] || ERROS_PT[cod.toLowerCase()];
-  const desc = d?.error_description || d?.message || "";
-  if (status === 429) return "limite de chamadas da Hotmart atingido (500 por minuto); aguarde um minuto";
-  if (status === 404 && !pt) return "não encontrado na Hotmart";
-  return pt ? `${pt}${desc && !pt.includes(desc) ? ` — ${desc}` : ""}` : desc ? `HTTP ${status}: ${desc}` : `HTTP ${status}`;
+  const desc = v.error_description || v.message || v.detail || "";
+  if (pt) return `${pt}${desc && !pt.includes(desc) ? ` — ${desc}` : ""}`;
+  return desc || cod || JSON.stringify(v).slice(0, 300);
 }
-type Q = Record<string, string | number | boolean | (string | number)[] | null | undefined>;
-async function hm(metodo: string, caminho: string, { query, body }: { query?: Q; body?: unknown } = {}, tentativa = 0): Promise<any> {
-  const u = new URL(BASE + caminho);
-  for (const [k, v] of Object.entries(query || {})) {
-    if (v === null || v === undefined || v === "") continue;
-    if (Array.isArray(v)) v.forEach((x) => u.searchParams.append(k, String(x)));
-    else u.searchParams.set(k, String(v));
+
+let sessao: { id: string | null } | null = null;
+let ferramentasCache: any[] | null = null;
+let rpcSeq = 0;
+type Envio = { status: number; sessao: string | null; msgs: any[]; texto: string };
+async function enviar(msg: unknown, sessionId: string | null): Promise<Envio> {
+  const headers: Record<string, string> = { Authorization: `Basic ${basic()}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
+  if (sessionId) headers["Mcp-Session-Id"] = sessionId;
+  const r = await fetch(MCP_URL, { method: "POST", headers, body: JSON.stringify(msg) });
+  const texto = await r.text();
+  const msgs: any[] = [];
+  const pegar = (s: string) => { try { const j = JSON.parse(s); Array.isArray(j) ? msgs.push(...j) : msgs.push(j); } catch { /* não JSON */ } };
+  if ((r.headers.get("content-type") || "").includes("text/event-stream")) {
+    for (const evento of texto.replace(/\r/g, "").split("\n\n")) {
+      const dados = evento.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, "")).join("\n");
+      if (dados.trim()) pegar(dados);
+    }
+  } else if (texto.trim()) pegar(texto);
+  return { status: r.status, sessao: r.headers.get("mcp-session-id"), msgs, texto };
+}
+async function abrirSessao() {
+  const id = ++rpcSeq;
+  const r = await enviar({ jsonrpc: "2.0", id, method: "initialize",
+    params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "os-tia-do-ingles", version: "1.0.0" } } }, null);
+  if (r.status === 401 || r.status === 403) throw new ErroHotmart("Token Basic da Hotmart inválido.");
+  const m = r.msgs.find((x) => x && x.id === id);
+  if (!m || m.error) throw new ErroHotmart(`Não foi possível conectar ao MCP da Hotmart: ${m?.error?.message || `HTTP ${r.status}`}.`);
+  const nova = { id: r.sessao };
+  sessao = nova;
+  await enviar({ jsonrpc: "2.0", method: "notifications/initialized" }, nova.id);
+  return nova;
+}
+async function rpc(method: string, params: unknown, tentativa = 0): Promise<any> {
+  // Cópia local: chamadas em paralelo (Promise.all) podem zerar a sessão global enquanto esta espera.
+  const atual = sessao ?? await abrirSessao();
+  const id = ++rpcSeq;
+  const r = await enviar({ jsonrpc: "2.0", id, method, params }, atual.id);
+  if (r.status === 401 || r.status === 403) { sessao = null; throw new ErroHotmart("Token Basic da Hotmart inválido."); }
+  const m = r.msgs.find((x) => x && x.id === id);
+  const sessaoVencida = (r.status === 404 || r.status === 400) && !m || (m?.error && /session/i.test(String(m.error.message || "")));
+  if (sessaoVencida && tentativa === 0) { sessao = null; return rpc(method, params, 1); }
+  if (r.status === 429) throw new ErroHotmart("Hotmart: limite de chamadas atingido; aguarde um minuto.");
+  if (!m) throw new ErroHotmart(`Hotmart MCP: ${r.status >= 400 ? `HTTP ${r.status}` : "resposta vazia"}${r.texto ? ` — ${r.texto.slice(0, 200)}` : ""}.`);
+  if (m.error) throw new ErroHotmart(`Hotmart MCP: ${m.error.message || "erro"}.`);
+  return m.result;
+}
+/** tools/list (com paginação por cursor), em cache por isolate. */
+async function ferramentas(): Promise<any[]> {
+  if (ferramentasCache) return ferramentasCache;
+  const todas: any[] = [];
+  let cursor: string | undefined;
+  for (let i = 0; i < 20; i++) {
+    const r = await rpc("tools/list", cursor ? { cursor } : {});
+    todas.push(...(r?.tools || []));
+    cursor = r?.nextCursor;
+    if (!cursor) break;
   }
-  const token = await tokenHotmart(tentativa > 0);
-  const r = await fetch(u.toString(), {
-    method: metodo,
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const txt = await r.text();
-  let d: any = null;
-  try { d = txt ? JSON.parse(txt) : null; } catch { d = { message: txt.slice(0, 200) }; }
-  if (r.status === 401 && tentativa === 0) return hm(metodo, caminho, { query, body }, 1);
-  if (!r.ok) throw new ErroHotmart(`Hotmart: ${mensagemHotmart(r.status, d)}.`);
-  return d;
+  ferramentasCache = todas;
+  return todas;
 }
-/** Lista paginada (page_info.next_page_token). Endpoints que devolvem array puro vêm numa página só. */
-async function paginar(caminho: string, query: Q, limite = LIMITE_LINHAS): Promise<{ itens: any[]; total: number | null; truncado: boolean }> {
+/** content[].text -> JSON; desembrulha {"result":"<json>"} (até 3 níveis). */
+function desembrulhar(res: any): any {
+  if (res?.structuredContent && !res?.content?.length) return res.structuredContent;
+  const texto = (res?.content || []).filter((c: any) => c?.type === "text").map((c: any) => c.text).join("");
+  let v: any;
+  try { v = JSON.parse(texto); } catch { return texto; }
+  for (let i = 0; i < 3 && v && typeof v === "object" && !Array.isArray(v) && typeof v.result === "string"; i++) {
+    try { v = JSON.parse(v.result); } catch { v = v.result; break; }
+  }
+  if (v && typeof v === "object" && !Array.isArray(v) && v.result && typeof v.result === "object" && Object.keys(v).length === 1) v = v.result;
+  return v;
+}
+/** Chama uma ferramenta do MCP. Argumentos fora do inputSchema do servidor são descartados; obrigatórios são conferidos. */
+async function mcp(nome: string, args: Record<string, unknown> = {}, { escrita = false } = {}): Promise<any> {
+  if (negada(nome)) throw new ErroHotmart(`A ferramenta ${nome} é bloqueada no OS (reembolso e operações em lote são feitos só no painel da Hotmart).`);
+  if (ESCRITA.has(nome) && !escrita) throw new ErroHotmart(`A ferramenta ${nome} altera dados e só pode ser usada por uma ação confirmada.`);
+  const def = (await ferramentas()).find((t) => t.name === nome);
+  if (!def) throw new ErroHotmart(`A ferramenta ${nome} não está disponível no MCP da Hotmart.`);
+  const props = def.inputSchema?.properties || {};
+  const a: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (v === undefined || v === null || v === "") continue;
+    if (!(k in props)) { console.warn(`hotmart: ${nome} não aceita o argumento ${k}`); continue; }
+    a[k] = v;
+  }
+  for (const req of def.inputSchema?.required || []) if (!(req in a)) throw new ErroParametro(`Falta o parâmetro ${req} para ${nome}.`);
+  const res = await rpc("tools/call", { name: nome, arguments: a });
+  const v = desembrulhar(res);
+  if (res?.isError) throw new ErroHotmart(`Hotmart: ${erroTexto(v)}.`);
+  if (v && typeof v === "object" && !Array.isArray(v) && v.error && !v.items) throw new ErroHotmart(`Hotmart: ${erroTexto(v)}.`);
+  return v;
+}
+/** Lista paginada (page_token / page_info.next_page_token). Ferramenta sem page_token no schema = uma página só. */
+// estrito (sync das cobranças): resposta sem lista ou com mais páginas do que o limite vira erro, para a carga
+// nunca seguir com dados parciais (o fin_hotmart_finalizar apagaria o que faltou).
+async function paginar(nome: string, args: Record<string, unknown>, limite = LIMITE_LINHAS, estrito = false): Promise<{ itens: any[]; total: number | null; truncado: boolean }> {
+  const def = (await ferramentas()).find((t) => t.name === nome);
+  const props = def?.inputSchema?.properties || {};
   const itens: any[] = [];
   let token: string | undefined, total: number | null = null;
   for (let pag = 0; pag < 100; pag++) {
-    const d = await hm("GET", caminho, { query: { ...query, max_results: Math.min(500, limite), page_token: token } });
-    if (Array.isArray(d)) { itens.push(...d); break; }
-    itens.push(...(d?.items || []));
+    const d = await mcp(nome, { ...args, ...("max_results" in props ? { max_results: Math.min(500, limite) } : {}), page_token: token });
+    if (Array.isArray(d)) { itens.push(...d); token = undefined; break; }
+    if (estrito && !Array.isArray(d?.items)) throw new ErroHotmart(`Hotmart: resposta inesperada de ${nome} (sem lista de itens).`);
+    itens.push(...(Array.isArray(d?.items) ? d.items : []));
     if (d?.page_info?.total_results != null) total = Number(d.page_info.total_results);
     token = d?.page_info?.next_page_token;
-    if (!token || itens.length >= limite) break;
+    if (!token || !("page_token" in props) || itens.length >= limite) break;
   }
-  return { itens: itens.slice(0, limite), total, truncado: itens.length > limite || (!!token && itens.length >= limite) };
+  const truncado = itens.length > limite || !!token;
+  if (estrito && truncado) throw new ErroHotmart(`Hotmart: ${nome} tem mais de ${limite} itens (ou mais páginas do que dá para ler); carga interrompida.`);
+  return { itens: itens.slice(0, limite), total, truncado };
 }
 
 /* ============================ Validação de parâmetros ============================ */
@@ -190,7 +271,7 @@ function subdominio(p: any): string {
 }
 /** Produto por ID (número) ou por nome (busca na lista de produtos). */
 async function resolverProduto(valor: string): Promise<{ id: number; nome: string; ucode?: string }> {
-  const lista = (await paginar("/products/api/v1/products", {}, 500)).itens;
+  const lista = (await paginar("hotmart_products_list", {}, 500)).itens;
   if (/^\d+$/.test(valor)) {
     const p = lista.find((x) => String(x.id) === valor);
     return { id: Number(valor), nome: p?.name || valor, ucode: p?.ucode };
@@ -237,7 +318,7 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
       let product_id: number | undefined, nomeProd = "";
       const prod = txt(p, "produto");
       if (prod) { const r = await resolverProduto(prod); product_id = r.id; nomeProd = r.nome; }
-      const { itens, total, truncado } = await paginar("/payments/api/v1/sales/history", { start_date: per.start_date, end_date: per.end_date, transaction_status: status || undefined, product_id });
+      const { itens, total, truncado } = await paginar("hotmart_sales_history_list", { start_date: per.start_date, end_date: per.end_date, transaction_status: status || undefined, product_id });
       const soma = somaPorMoeda(itens.map((v) => ({ valor: Number(v.purchase?.price?.value), moeda: v.purchase?.price?.currency_code })));
       const resposta = `**${total ?? itens.length} venda(s)** ${status ? `com status ${tr(STATUS_VENDA, status)} ` : "aprovadas/completas "}de ${per.rotulo}${nomeProd ? ` · ${nomeProd}` : ""}, somando **${soma}** (valor pago pelo comprador).${avisoCorte(itens.length, truncado, total)}`;
       return { resposta, dados: { colunas: COLS_VENDA, linhas: itens.map(linhaVenda) } };
@@ -251,7 +332,7 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
     // https://developers.hotmart.com/docs/pt-BR/v1/sales/sales-summary/
     async exec(p) {
       const per = periodo(p);
-      const { itens } = await paginar("/payments/api/v1/sales/summary", { start_date: per.start_date, end_date: per.end_date }, 50);
+      const { itens } = await paginar("hotmart_sales_summary_list", { start_date: per.start_date, end_date: per.end_date }, 50);
       const linhas = itens.map((i) => [i.total_value?.currency_code || "", i.total_items ?? 0, dinheiro(i.total_value?.value, i.total_value?.currency_code)]);
       const resp = itens.length ? itens.map((i) => `**${dinheiro(i.total_value?.value, i.total_value?.currency_code)}** em ${i.total_items ?? 0} venda(s)`).join("; ") : "Nenhuma venda aprovada";
       return { resposta: `${resp} de ${per.rotulo}.`, dados: { colunas: ["Moeda", "Vendas", "Total"], linhas } };
@@ -266,10 +347,10 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
     async exec(p) {
       const t = obrig(p, "transacao", "Código da transação").toUpperCase();
       const [h, pr, us, co] = await Promise.all([
-        hm("GET", "/payments/api/v1/sales/history", { query: { transaction: t } }),
-        hm("GET", "/payments/api/v1/sales/price/details", { query: { transaction: t } }),
-        hm("GET", "/payments/api/v1/sales/users", { query: { transaction: t } }),
-        hm("GET", "/payments/api/v1/sales/commissions", { query: { transaction: t } }),
+        mcp("hotmart_sales_history_list", { transaction: t }),
+        mcp("hotmart_sales_price_details_list", { transaction: t }),
+        mcp("hotmart_sales_participants_list", { transaction: t }),
+        mcp("hotmart_sales_commissions_list", { transaction: t }),
       ]);
       const v = h?.items?.[0];
       if (!v) return { resposta: `Nenhuma venda encontrada com a transação ${t}.`, dados: null };
@@ -300,7 +381,7 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
     // https://developers.hotmart.com/docs/pt-BR/v1/sales/sales-commissions/
     async exec(p) {
       const per = periodo(p);
-      const { itens, truncado, total } = await paginar("/payments/api/v1/sales/commissions", { start_date: per.start_date, end_date: per.end_date });
+      const { itens, truncado, total } = await paginar("hotmart_sales_commissions_list", { start_date: per.start_date, end_date: per.end_date });
       const linhas: unknown[][] = [];
       const porPapel = new Map<string, { valor: number; moeda: string }[]>();
       for (const i of itens) for (const c of i.commissions || []) {
@@ -321,7 +402,7 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
       const e = email(p, "email", "E-mail do cliente")!;
       const desde = Date.parse("2015-01-01T00:00:00-03:00");
       const status = [undefined, "WAITING_PAYMENT", "PRINTED_BILLET", "OVERDUE", "CANCELLED", "REFUNDED", "CHARGEBACK", "EXPIRED"];
-      const lotes = await Promise.all(status.map((s) => paginar("/payments/api/v1/sales/history", { buyer_email: e, start_date: desde, end_date: Date.now(), transaction_status: s }, 100)));
+      const lotes = await Promise.all(status.map((s) => paginar("hotmart_sales_history_list", { buyer_email: e, start_date: desde, end_date: Date.now(), transaction_status: s }, 100)));
       const vistos = new Set<string>(); const itens: any[] = [];
       for (const l of lotes) for (const v of l.itens) { const k = v.purchase?.transaction; if (k && !vistos.has(k)) { vistos.add(k); itens.push(v); } }
       itens.sort((a, b) => (b.purchase?.order_date || 0) - (a.purchase?.order_date || 0));
@@ -338,7 +419,7 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
     // https://developers.hotmart.com/docs/pt-BR/v1/subscription/get-subscribers/
     async exec(p) {
       const st = txt(p, "status"), e = email(p, "email", "E-mail", false);
-      const { itens, total, truncado } = await paginar("/payments/api/v1/subscriptions", { status: st || undefined, subscriber_email: e || undefined });
+      const { itens, total, truncado } = await paginar("hotmart_subscriptions_list", { status: st || undefined, subscriber_email: e || undefined });
       const linhas = itens.map((s) => [s.subscriber?.name || "", s.subscriber?.email || "", s.subscriber_code || "", s.subscription_id ?? "", s.product?.name || "",
         s.plan?.name || "", tr(STATUS_ASSIN, s.status), dataBR(s.accession_date), dataBR(s.date_next_charge), dinheiro(s.price?.value, s.price?.currency_code),
         s.plan?.max_charge_cycles ?? ""]);
@@ -354,7 +435,7 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
     async exec() {
       const sts = ["ACTIVE", "DELAYED", "STARTED", "INACTIVE", "OVERDUE", "CANCELLED_BY_CUSTOMER", "CANCELLED_BY_SELLER", "CANCELLED_BY_ADMIN"];
       const r = await Promise.all(sts.map(async (s) => {
-        const d = await hm("GET", "/payments/api/v1/subscriptions", { query: { status: s, max_results: 1 } });
+        const d = await mcp("hotmart_subscriptions_list", { status: s, max_results: 1 });
         return [tr(STATUS_ASSIN, s), Number(d?.page_info?.total_results ?? (d?.items || []).length)];
       }));
       const ativ = r[0][1], atr = r[1][1];
@@ -369,7 +450,7 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
     // Transações de assinatura: https://developers.hotmart.com/docs/pt-BR/v1/subscription/get-subscription-transactions/
     async exec(p) {
       const e = email(p, "email", "E-mail do cliente")!;
-      const { itens, truncado } = await paginar("/payments/api/v1/subscriptions/transactions", { subscriber_email: e, transaction_date: Date.parse("2015-01-01T00:00:00-03:00"), end_transaction_date: Date.now() });
+      const { itens, truncado } = await paginar("hotmart_subscription_transactions_list", { subscriber_email: e, transaction_date: Date.parse("2015-01-01T00:00:00-03:00"), end_transaction_date: Date.now() });
       itens.sort((a, b) => (a.subscriber_code || "").localeCompare(b.subscriber_code || "") || (a.recurrency?.number || 0) - (b.recurrency?.number || 0));
       const linhas = itens.map((t) => [t.product?.name || "", tr(COBRANCA, t.billing_type), t.subscriber_code || "", t.subscription_id ?? "",
         `${t.recurrency?.number ?? ""}${t.max_cycles ? "/" + t.max_cycles : ""}`, tr(STATUS_RECORR, t.recurrency?.status), dataBR(t.recurrency?.start_datetime),
@@ -385,10 +466,10 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
     schema: {}, obrig: [],
     async exec() {
       const [atr, ativ, cc, cs] = await Promise.all([
-        paginar("/payments/api/v1/subscriptions", { status: "DELAYED" }),
-        hm("GET", "/payments/api/v1/subscriptions", { query: { status: "ACTIVE", max_results: 1 } }),
-        hm("GET", "/payments/api/v1/subscriptions", { query: { status: "CANCELLED_BY_CUSTOMER", max_results: 1 } }),
-        hm("GET", "/payments/api/v1/subscriptions", { query: { status: "CANCELLED_BY_SELLER", max_results: 1 } }),
+        paginar("hotmart_subscriptions_list", { status: "DELAYED" }),
+        mcp("hotmart_subscriptions_list", { status: "ACTIVE", max_results: 1 }),
+        mcp("hotmart_subscriptions_list", { status: "CANCELLED_BY_CUSTOMER", max_results: 1 }),
+        mcp("hotmart_subscriptions_list", { status: "CANCELLED_BY_SELLER", max_results: 1 }),
       ]);
       const nAtr = atr.total ?? atr.itens.length, nAtiv = Number(ativ?.page_info?.total_results ?? 0);
       const linhas = atr.itens.map((s) => [s.subscriber?.name || "", s.subscriber?.email || "", s.subscriber_code || "", s.subscription_id ?? "", s.product?.name || "",
@@ -404,7 +485,7 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
     // https://developers.hotmart.com/docs/pt-BR/v1/club/get-users-club/
     async exec(p) {
       const sub = subdominio(p);
-      const { itens, total, truncado } = await paginar("/club/api/v1/users", { subdomain: sub });
+      const { itens, total, truncado } = await paginar("hotmart_students_list", { subdomain: sub });
       const linhas = itens.map((u) => [u.name || "", u.email || "", u.status || "", u.role || "", pct(u.progress?.completed_percentage),
         `${u.progress?.completed ?? ""}/${u.progress?.total ?? ""}`, dataBR(u.first_access_date), dataBR(u.last_access_date), u.access_count ?? "", u.engagement || ""]);
       const media = itens.length ? itens.reduce((a, u) => a + (Number(u.progress?.completed_percentage) || 0), 0) / itens.length : 0;
@@ -419,10 +500,10 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
     // https://developers.hotmart.com/docs/pt-BR/v1/club/get-lessons-club/
     async exec(p) {
       const e = email(p, "email", "E-mail do aluno")!, sub = subdominio(p);
-      const us = await hm("GET", "/club/api/v1/users", { query: { subdomain: sub, email: e } });
+      const us = await mcp("hotmart_students_list", { subdomain: sub, email: e });
       const u = (us?.items || [])[0];
       if (!u) return { resposta: `Nenhum aluno com o e-mail ${e} na área de membros ${sub}.`, dados: null };
-      const d = await hm("GET", `/club/api/v1/users/${encodeURIComponent(u.user_id)}/lessons`, { query: { subdomain: sub } });
+      const d = await mcp("hotmart_student_progress_get", { user_id: String(u.user_id), subdomain: sub });
       const ls: any[] = d?.lessons || (Array.isArray(d) ? d : []);
       const feitas = ls.filter((l) => l.is_completed);
       return { resposta: `**${u.name || e}**: ${feitas.length} de ${ls.length} página(s) concluída(s) (${pct(u.progress?.completed_percentage)}), último acesso em ${dataBR(u.last_access_date) || "sem registro"}.`,
@@ -436,11 +517,11 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
     // https://developers.hotmart.com/docs/pt-BR/v1/club/get-modules-club/ e .../get-pages-club/
     async exec(p) {
       const sub = subdominio(p);
-      const mods: any[] = await hm("GET", "/club/api/v1/modules", { query: { subdomain: sub } }).then((d) => (Array.isArray(d) ? d : d?.items || []));
+      const mods: any[] = await mcp("hotmart_modules_list", { subdomain: sub }).then((d) => (Array.isArray(d) ? d : d?.items || []));
       mods.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
       const linhas: unknown[][] = [];
       for (const m of mods.slice(0, 40)) {
-        const pgs: any[] = await hm("GET", `/club/api/v1/modules/${encodeURIComponent(m.module_id)}/pages`, { query: { subdomain: sub } }).then((d) => (Array.isArray(d) ? d : d?.items || [])).catch(() => []);
+        const pgs: any[] = await mcp("hotmart_module_pages_list", { module_id: String(m.module_id), subdomain: sub }).then((d) => (Array.isArray(d) ? d : d?.items || [])).catch(() => []);
         if (!pgs.length) linhas.push([m.sequence ?? "", m.name || "", simNao(m.is_extra), "", "", "", ""]);
         for (const pg of pgs) linhas.push([m.sequence ?? "", m.name || "", simNao(m.is_extra), pg.page_order ?? "", pg.name || "", pg.type || "", pg.total_comments ?? ""]);
         if (linhas.length >= LIMITE_LINHAS) break;
@@ -455,13 +536,13 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
     schema: {}, obrig: [],
     // https://developers.hotmart.com/docs/pt-BR/v1/product/product-list/ , product-offers/ , product-plans/
     async exec() {
-      const { itens } = await paginar("/products/api/v1/products", {}, 500);
+      const { itens } = await paginar("hotmart_products_list", {}, 500);
       const linhas: unknown[][] = [];
       for (const pr of itens.slice(0, 40)) {
         const base = [pr.name || "", pr.id ?? "", pr.status || "", pr.format || ""];
         const [of, pl] = await Promise.all([
-          pr.ucode ? paginar(`/products/api/v1/products/${pr.ucode}/offers`, {}, 50).catch(() => ({ itens: [] as any[] })) : { itens: [] as any[] },
-          pr.ucode && pr.is_subscription ? paginar(`/products/api/v1/products/${pr.ucode}/plans`, {}, 50).catch(() => ({ itens: [] as any[] })) : { itens: [] as any[] },
+          pr.id ? paginar("hotmart_product_offers_list", { product_id: Number(pr.id) }, 50).catch(() => ({ itens: [] as any[] })) : { itens: [] as any[] },
+          pr.id && pr.is_subscription ? paginar("hotmart_product_plans_list", { product_id: Number(pr.id) }, 50).catch(() => ({ itens: [] as any[] })) : { itens: [] as any[] },
         ]);
         if (!of.itens.length && !pl.itens.length) linhas.push([...base, "", "", "", "", ""]);
         for (const o of of.itens) linhas.push([...base, "Oferta", o.code || "", o.name || o.description || (o.is_main_offer ? "Principal" : ""), o.payment_mode || "", dinheiro(o.price?.value, o.price?.currency_code)]);
@@ -479,7 +560,7 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
     // https://developers.hotmart.com/docs/pt-BR/v1/coupon/coupon-get-coupon/
     async exec(p) {
       const prod = await resolverProduto(obrig(p, "produto", "Produto"));
-      const { itens, truncado } = await paginar(`/products/api/v1/coupon/product/${prod.id}`, {});
+      const { itens, truncado } = await paginar("hotmart_coupons_list", { product_id: Number(prod.id) });
       const linhas = itens.map((c) => [c.id ?? "", c.coupon_code || "", pct((Number(c.discount) || 0) * 100), c.status || "", simNao(c.active), dataBR(c.start_date), dataBR(c.end_date)]);
       return { resposta: `**${itens.length} cupom(ns)** de ${prod.nome} (ID ${prod.id}); ${itens.filter((c) => c.active).length} ativo(s).${avisoCorte(itens.length, truncado)}`,
         dados: { colunas: ["ID do cupom", "Código", "Desconto", "Status", "Ativo", "Início", "Fim"], linhas } };
@@ -492,12 +573,12 @@ const CONSULTAS: Record<string, { rotulo: string; descricao: string; schema: Rec
     // https://developers.hotmart.com/docs/pt-BR/v1/tickets/get-info-tickets/ e .../get-participants-tickets/
     // ASSUNÇÃO: o event_id é o ID do produto de formato ETICKET (o exemplo da doc devolve o mesmo id em product.id).
     async exec() {
-      const prods = (await paginar("/products/api/v1/products", {}, 500)).itens.filter((x) => String(x.format || "").toUpperCase() === "ETICKET");
+      const prods = (await paginar("hotmart_products_list", {}, 500)).itens.filter((x) => String(x.format || "").toUpperCase() === "ETICKET");
       if (!prods.length) return { resposta: "Nenhum produto do tipo ingresso (evento) na conta.", dados: null };
       const linhas: unknown[][] = [], resumo: string[] = [];
       for (const pr of prods.slice(0, 10)) {
-        const info = await hm("GET", `/events/api/v1/${pr.id}/info`).catch(() => null);
-        const parts = await paginar(`/events/api/v1/${pr.id}/participants`, {}, 200).catch(() => ({ itens: [] as any[], total: null }));
+        const info = await mcp("hotmart_event_info_get", { event_id: Number(pr.id) }).catch(() => null);
+        const parts = await paginar("hotmart_event_participants_list", { event_id: Number(pr.id) }, 200).catch(() => ({ itens: [] as any[], total: null }));
         resumo.push(`${pr.name}: ${parts.total ?? parts.itens.length} participante(s)${info?.start_event_date ? `, ${dataBR(info.start_event_date)}` : ""}`);
         for (const x of parts.itens) linhas.push([pr.name || "", dataBR(info?.start_event_date), x.participant?.name || "", x.participant?.email || "", x.lot?.name || "", x.eticket?.ticket_status || "", x.eticket?.checkin_status || ""]);
         if (linhas.length >= LIMITE_LINHAS) break;
@@ -512,20 +593,20 @@ const ACOES: Record<string, { rotulo: string; exec: (p: any) => Promise<Resultad
   // https://developers.hotmart.com/docs/pt-BR/v1/subscription/cancel-subscription/
   cancelar_assinatura: { rotulo: "Cancelar assinatura", async exec(p) {
     const code = obrig(p, "subscriber_code", "Código do assinante");
-    const r = await hm("POST", `/payments/api/v1/subscriptions/${encodeURIComponent(code)}/cancel`, { body: { send_mail: p?.enviar_email !== false } });
+    const r = await mcp("hotmart_subscription_cancel", { subscriber_code: code, send_mail: p?.enviar_email !== false }, { escrita: true });
     return { resposta: `Assinatura **${code}** cancelada na Hotmart. Status agora: ${r?.status || "atualizado"}.${p?.enviar_email !== false ? " O assinante recebe o e-mail de cancelamento." : ""}`, dados: null };
   } },
   // https://developers.hotmart.com/docs/pt-BR/v1/subscription/reactivate-subscription/
   reativar_assinatura: { rotulo: "Reativar assinatura", async exec(p) {
     const code = obrig(p, "subscriber_code", "Código do assinante");
-    const r = await hm("POST", `/payments/api/v1/subscriptions/${encodeURIComponent(code)}/reactivate`, { body: { charge: p?.cobrar_agora === true } });
+    const r = await mcp("hotmart_subscription_reactivate", { subscriber_code: code, charge: p?.cobrar_agora === true }, { escrita: true });
     return { resposta: `Assinatura **${code}** reativada na Hotmart${p?.cobrar_agora === true ? " com cobrança imediata" : ""}. Status retornado: ${r?.status || "atualizado"}.`, dados: null };
   } },
   // https://developers.hotmart.com/docs/pt-BR/v1/subscription/change-due-day/
   mudar_dia_cobranca: { rotulo: "Mudar dia de cobrança", async exec(p) {
     const code = obrig(p, "subscriber_code", "Código do assinante");
     const dia = inteiro(p, "dia", "Dia de cobrança", { min: 1, max: 31 })!;
-    await hm("PATCH", `/payments/api/v1/subscriptions/${encodeURIComponent(code)}`, { body: { due_day: dia } });
+    await mcp("hotmart_subscription_due_day_update", { subscriber_code: code, due_day: dia }, { escrita: true });
     return { resposta: `Dia de cobrança da assinatura **${code}** alterado para o dia **${dia}**.`, dados: null };
   } },
   // https://developers.hotmart.com/docs/pt-BR/v1/coupon/coupon-post-coupon/ (discount é fração: 0 < discount < 0,99;
@@ -538,32 +619,28 @@ const ACOES: Record<string, { rotulo: string; exec: (p: any) => Promise<Resultad
     const fim = dataIso(p, "validade_fim", "Válido até", false);
     const body: Record<string, unknown> = { code: codigo, discount: Math.round(pctDesc) / 100 };
     if (fim) body.end_date = msDia(fim, true);
-    await hm("POST", `/products/api/v1/product/${produto}/coupon`, { body });
+    await mcp("hotmart_coupon_create", { product_id: produto, ...body }, { escrita: true });
     return { resposta: `Cupom **${codigo}** criado no produto ${produto} com **${pctDesc}%** de desconto${fim ? `, válido até ${fim.split("-").reverse().join("/")}` : ""}.`, dados: null };
   } },
   // https://developers.hotmart.com/docs/pt-BR/v1/coupon/coupon-delete-coupon/
   apagar_cupom: { rotulo: "Apagar cupom", async exec(p) {
     const id = inteiro(p, "cupom_id", "ID do cupom", { min: 1 })!;
-    await hm("DELETE", `/products/api/v1/coupon/${id}`);
+    await mcp("hotmart_coupon_delete", { coupon_id: id }, { escrita: true });
     return { resposta: `Cupom **${id}** apagado na Hotmart.`, dados: null };
   } },
-  // https://developers.hotmart.com/docs/pt-BR/v1/negotiate/generate-negotiation/ — desconto é VALOR ABSOLUTO (type CUSTOM).
+  // https://developers.hotmart.com/docs/pt-BR/v1/negotiate/generate-negotiation/ — no MCP o desconto é FRAÇÃO (0 a 1).
   gerar_negociacao: { rotulo: "Gerar negociação de parcelas em atraso (Pix)", async exec(p) {
     const sid = inteiro(p, "subscription_id", "ID da assinatura", { min: 1 })!;
     const rec = Array.isArray(p?.recorrencias) ? p.recorrencias.map(Number) : String(p?.recorrencias ?? "").split(/[,;\s]+/).filter(Boolean).map(Number);
     if (!rec.length || rec.length > 5 || !rec.every((n: number) => Number.isInteger(n) && n > 0)) throw new ErroParametro("Recorrências: informe de 1 a 5 números inteiros.");
-    if (p?.desconto_pct != null && p?.desconto_pct !== "") throw new ErroParametro("A Hotmart aceita desconto em valor (R$), não em percentual. Use o campo Desconto (R$).");
+    const pctNeg = inteiro(p, "desconto_pct", "Desconto (%)", { req: false, min: 0, max: 99 });
     const body: Record<string, unknown> = { subscription_id: sid, recurrences: rec, payment_type: "PIX" };
-    if (p?.desconto_valor != null && p?.desconto_valor !== "") {
-      const v = Number(p.desconto_valor);
-      if (!Number.isFinite(v) || v < 0) throw new ErroParametro("Desconto (R$): valor inválido.");
-      if (v > 0) body.discount = { type: "CUSTOM", value: Math.round(v * 100) / 100 };
-    }
-    const r = await hm("POST", "/payments/api/v1/installments/negotiate", { body });
+    if (pctNeg) body.discount = pctNeg / 100;
+    const r = await mcp("hotmart_negotiation_generate", body, { escrita: true });
     const pg = r?.payment || {};
     const linhas: unknown[][] = [["Transação", r?.transaction || ""], ["Forma", pg.type || "PIX"], ["Vence em", dataBR(pg.expiration_date)],
       ["Pix copia e cola", pg.pix_code || ""], ["QR Code do Pix", pg.pix_qrcode || ""]].filter((l) => l[1]);
-    return { resposta: `Negociação gerada para a assinatura **${sid}** (recorrência(s) ${rec.join(", ")}). Envie o Pix abaixo à aluna${pg.expiration_date ? `; vence em ${dataBR(pg.expiration_date)}` : ""}.`, dados: { colunas: ["Campo", "Valor"], linhas } };
+    return { resposta: `Negociação gerada para a assinatura **${sid}** (recorrência(s) ${rec.join(", ")}). ${pctNeg ? ` Desconto de ${pctNeg}%.` : ""} Envie o Pix abaixo à aluna${pg.expiration_date ? `; vence em ${dataBR(pg.expiration_date)}` : ""}.`, dados: { colunas: ["Campo", "Valor"], linhas } };
   } },
 };
 
@@ -593,7 +670,7 @@ async function syncCobrancasTravado(sb: any): Promise<{ ok: boolean; pulado?: bo
     // 'vendas': WAITING_PAYMENT, PRINTED_BILLET e OVERDUE dos últimos 18 meses (sales/history, um status por chamada).
     const desde = new Date(); desde.setMonth(desde.getMonth() - 18);
     for (const s of ["WAITING_PAYMENT", "PRINTED_BILLET", "OVERDUE"]) {
-      const { itens } = await paginar("/payments/api/v1/sales/history", { transaction_status: s, start_date: desde.getTime(), end_date: Date.now() }, 5000);
+      const { itens } = await paginar("hotmart_sales_history_list", { transaction_status: s, start_date: desde.getTime(), end_date: Date.now() }, 5000, true);
       for (const v of itens) {
         const pu = v.purchase || {};
         if (!pu.transaction || !Number(pu.order_date)) continue; // fin_hotmart_carregar faz order_date::bigint
@@ -609,7 +686,7 @@ async function syncCobrancasTravado(sb: any): Promise<{ ok: boolean; pulado?: bo
     // (cobranças mensais; a doc avisa até 24 h de defasagem e padrão de 30 dias).
     const ult = new Map<string, any>();
     for (const billing of ["SMART_INSTALLMENT", "SUBSCRIPTION"]) for (const status of ["ACTIVE", "DELAYED"]) {
-      const { itens } = await paginar("/payments/api/v1/subscriptions/transactions", { billing_type: billing, subscription_status: status, transaction_date: Date.now() - 62 * 86400000, end_transaction_date: Date.now() }, 5000);
+      const { itens } = await paginar("hotmart_subscription_transactions_list", { billing_type: billing, subscription_status: status, transaction_date: Date.now() - 62 * 86400000, end_transaction_date: Date.now() }, 5000, true);
       for (const t of itens) {
         const k = t.subscriber_code; if (!k) continue;
         const atual = ult.get(k);
@@ -681,14 +758,16 @@ const MSG_PAUSADO = "As automações de IA estão pausadas no momento (botão de
 const SYSTEM = `Você é o assistente do Financeiro da Tia do Inglês e responde perguntas sobre a conta da Hotmart em português do Brasil.
 Regras: responda primeiro, de forma curta e direta; use só números devolvidos pelas ferramentas (nunca invente nem estime valores); datas em DD/MM/AAAA e dinheiro em R$; sem emojis; uma ideia por frase.
 Você só tem ferramentas de leitura. Se pedirem para cancelar, reativar, mudar dia de cobrança, criar/apagar cupom, negociar ou reembolsar, explique que isso é feito pelos botões de Ações da tela Hotmart (reembolso só no painel da Hotmart).
+As ferramentas recebem e devolvem datas em Unix ms (converta para DD/MM/AAAA no fuso de Brasília) e descontos como fração (0,25 = 25%).
 Se faltar um dado obrigatório (ex.: e-mail, período, subdomínio da área de membros), peça esse dado. Hoje é ${"{HOJE}"} (fuso de Brasília).`;
 
 // usage é preenchido pelo chamador e acumulado aqui, para o custo ser registrado mesmo se uma rodada falhar no meio.
 async function responderPergunta(sb: any, pergunta: string, usage: { input_tokens: number; output_tokens: number }): Promise<{ resultado: Resultado }> {
-  const tools = Object.entries(CONSULTAS).map(([slug, c]) => ({
-    name: slug, description: `${c.rotulo}. ${c.descricao}`,
-    input_schema: { type: "object", properties: c.schema, required: c.obrig },
-  }));
+  // Só ferramentas de leitura do MCP (allowlist leitura()), com o inputSchema do próprio servidor.
+  const tools = (await ferramentas()).filter((t) => leitura(t.name)).map((t) => {
+    const { $schema: _x, ...schema } = (t.inputSchema && typeof t.inputSchema === "object" ? t.inputSchema : {}) as Record<string, unknown>;
+    return { name: t.name, description: String(t.description || t.name).slice(0, 1000), input_schema: { type: "object", properties: {}, ...schema } };
+  });
   const headers: Record<string, string> = { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" };
   const ws = await workspaceId(sb);
   if (ws) headers["anthropic-workspace-id"] = ws;
@@ -717,12 +796,10 @@ async function responderPergunta(sb: any, pergunta: string, usage: { input_token
     for (const u of usos) {
       let conteudo: string, erro = false;
       try {
-        const c = CONSULTAS[u.name];
-        if (!c) throw new ErroParametro("ferramenta desconhecida");
-        const res = await c.exec(u.input || {});
-        if (res.dados?.linhas?.length) ultimaTabela = res.dados;
-        const linhas = res.dados ? res.dados.linhas.slice(0, 120) : [];
-        conteudo = JSON.stringify({ resumo: res.resposta, colunas: res.dados?.colunas || [], linhas, linhas_omitidas: res.dados ? Math.max(0, res.dados.linhas.length - linhas.length) : 0 }).slice(0, 24000);
+        if (!leitura(String(u.name))) throw new ErroParametro("ferramenta não permitida na pergunta livre (só leitura)");
+        const v = await mcp(String(u.name), (u.input || {}) as Record<string, unknown>);
+        const bruto = JSON.stringify(v ?? null);
+        conteudo = bruto.length > 24000 ? bruto.slice(0, 24000) + " …(resposta cortada; refine os filtros)" : bruto;
       } catch (e) {
         if (e instanceof SemCredenciais) throw e;
         erro = true; conteudo = String((e as Error).message || e);
@@ -735,7 +812,7 @@ async function responderPergunta(sb: any, pergunta: string, usage: { input_token
 }
 
 /* ============================ Servidor ============================ */
-const MSG_SEM_CRED = "Credenciais da Hotmart ainda não configuradas no Supabase (HOTMART_CLIENT_ID, HOTMART_CLIENT_SECRET, HOTMART_BASIC).";
+const MSG_SEM_CRED = "Credencial da Hotmart ainda não configurada no Supabase (segredo HOTMART_BASIC — o mesmo token Basic usado no conector Hotmart do Claude).";
 
 async function usuario(req: Request, sb: any): Promise<{ id: string; nome: string | null; ok: boolean } | null> {
   const jwt = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
@@ -772,7 +849,7 @@ Deno.serve(async (req: Request) => {
       const parametros = body.parametros && typeof body.parametros === "object" ? body.parametros : {};
       const base = { tipo: "consulta", acao, rotulo: c.rotulo, parametros };
       try {
-        credenciais();
+        basic();
         const r = await c.exec(parametros);
         await registrar({ ...base, status: "concluido", resposta: r.resposta, resposta_dados: r.dados });
         return json({ ok: true, resposta: r.resposta, dados: r.dados }, 200, origin);
@@ -791,7 +868,7 @@ Deno.serve(async (req: Request) => {
       const parametros = body.parametros && typeof body.parametros === "object" ? body.parametros : {};
       const base = { tipo: "acao", acao, rotulo: a.rotulo, parametros, confirmado_em: iniciado };
       try {
-        credenciais();
+        basic();
         const r = await a.exec(parametros);
         await registrar({ ...base, status: "concluido", resposta: r.resposta, resposta_dados: r.dados });
         return json({ ok: true, resposta: r.resposta, dados: r.dados }, 200, origin);
@@ -807,7 +884,7 @@ Deno.serve(async (req: Request) => {
       const pergunta = String(body.pergunta || "").trim();
       if (!pergunta) return json({ ok: false, error: "Escreva a pergunta." }, 400, origin);
       if (pergunta.length > 4000) return json({ ok: false, error: "A pergunta pode ter no máximo 4.000 caracteres." }, 400, origin);
-      credenciais();
+      basic();
       if (!ANTHROPIC_KEY) return json({ ok: false, error: "IA não conectada: falta o segredo ANTHROPIC_API_KEY nas Edge Functions." }, 200, origin);
       if (await iaPausada(sb)) return json({ ok: false, pausado: true, error: MSG_PAUSADO }, 200, origin);
       const base = { tipo: "pergunta", pergunta, parametros: {} };
@@ -826,7 +903,7 @@ Deno.serve(async (req: Request) => {
     }
 
     if (op === "sync_cobrancas") {
-      credenciais();
+      basic();
       const r = await syncCobrancas(sb);
       if (!r.pulado) {
         await registrar({ tipo: "sync", rotulo: "Atualizar cobranças", parametros: {}, status: r.ok ? "concluido" : "erro",

@@ -4,7 +4,7 @@
 // (Claude com as consultas como ferramentas; custo em ai_usage_log). A função grava cada chamada em
 // public.fin_hotmart_pedidos, que esta tela lista como Histórico (só leitura). Ações exigem confirmação explícita
 // (confirmado:true). Sem DESFAZER: as ações alteram dados na Hotmart, fora do banco do OS.
-// Credenciais (segredos da função): HOTMART_CLIENT_ID, HOTMART_CLIENT_SECRET, HOTMART_BASIC.
+// A função fala com o MCP da Hotmart (o mesmo do conector do Claude); segredo único: HOTMART_BASIC.
 import { html } from "htm/preact";
 import { useState, useEffect, useRef } from "preact/hooks";
 import { os, podeEditarFin, FinPage, Icone, Pill, cn, parseValorBR, useLocalState } from "./comum.js";
@@ -67,7 +67,7 @@ export const ACOES = [
   { slug: "gerar_negociacao", rotulo: "Gerar negociação de parcelas em atraso (Pix)", campos: [
     { k: "subscription_id", rotulo: "ID da assinatura (subscription id)", tipo: "int", obrig: true, min: 1 },
     { k: "recorrencias", rotulo: "Recorrências em atraso", tipo: "lista", obrig: true, dica: "Números separados por vírgula, de 1 a 5 itens. Ex.: 3, 4" },
-    { k: "desconto_valor", rotulo: "Desconto em R$ (opcional)", tipo: "decimal", min: 0, dica: "A Hotmart só aceita desconto em valor absoluto na negociação." }] },
+    { k: "desconto_pct", rotulo: "Desconto (%) (opcional)", tipo: "int", min: 0, max: 99 }] },
 ];
 const POR_SLUG = Object.fromEntries([...CONSULTAS.map((c) => [c.slug, { ...c, tipo: "consulta" }]), ...ACOES.map((a) => [a.slug, { ...a, tipo: "acao" }])]);
 
@@ -179,10 +179,10 @@ export function BannerSemCredenciais() {
   return html`<div role="alert" class="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs font-bold text-amber-900">
     <${Icone} nome="alert" class="h-5 w-5 shrink-0" />
     <div class="space-y-1.5">
-      <p class="text-sm font-black">Credenciais da Hotmart ainda não configuradas</p>
-      <p class="font-semibold">Para conectar, crie uma credencial em Hotmart › Ferramentas › Credenciais Hotmart (API) e cadastre 3 segredos nas Edge Functions do Supabase:
-        <code class="rounded bg-white px-1">HOTMART_CLIENT_ID</code> (Client ID), <code class="rounded bg-white px-1">HOTMART_CLIENT_SECRET</code> (Client Secret) e
-        <code class="rounded bg-white px-1">HOTMART_BASIC</code> (o token "Basic" da mesma credencial).</p>
+      <p class="text-sm font-black">Credencial da Hotmart ainda não configurada</p>
+      <p class="font-semibold">Cadastre o segredo <code class="rounded bg-white px-1">HOTMART_BASIC</code> nas Edge Functions do Supabase.
+        É o mesmo token Basic configurado no conector Hotmart do app do Claude, que fica em Hotmart › Ferramentas › Credenciais Hotmart
+        (<a href="https://app-vlc.hotmart.com/tools/credentials" target="_blank" rel="noopener noreferrer" class="underline">app-vlc.hotmart.com/tools/credentials</a>).</p>
       <a href=${LINK_SEGREDOS} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 font-black text-emerald-700 underline">
         Abrir os segredos das Edge Functions no Supabase<${Icone} nome="arrow-up-right" class="h-3.5 w-3.5" /></a>
     </div>
@@ -239,7 +239,7 @@ export function HotmartPage({ me }) {
       <h1 class="mt-2 text-3xl font-black tracking-[-0.045em] text-[#07110e]">Hotmart</h1>
       <p class="mt-2 flex items-start gap-2 text-sm font-medium text-slate-500">
         <${Icone} nome="info" class="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" />
-        <span>As respostas vêm na hora, direto da API oficial da Hotmart. Os botões de consulta não têm custo; as perguntas livres usam IA e têm um custo pequeno por pergunta.</span>
+        <span>O OS usa o MCP da Hotmart, a mesma integração do conector Hotmart do Claude, e as respostas vêm na hora. Os botões de consulta não têm custo; as perguntas livres usam IA e têm um custo pequeno por pergunta.</span>
       </p>
     </section>
 
