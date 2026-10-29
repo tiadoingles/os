@@ -87,7 +87,7 @@ como backend.
     `linkedin_posts`; RPC `linkedin_conexao_status`.
   - `financeiro`: `fin_contas`, `fin_dre_grupos` (sem insert/delete; trigger só deixa mudar `nome`), `fin_dre_categorias`
     (padrão protegidas por trigger; `fora_dre`), `fin_importacoes`, `fin_lancamentos` (remover = `cancelado_em`), `fin_vendas`,
-    `fin_cobrancas` (OS só cria/edita/apaga `origem='manual'`; Hotmart só `observacoes`, trigger), `fin_hotmart_pedidos`
+    `fin_cobrancas` (OS só cria/edita/apaga `origem='manual'`; Hotmart só `observacoes`, trigger); cobranças NUNCA entram sozinhas no Fluxo/DRE — botão "Fluxo/DRE" cria `fin_lancamentos` manual conciliado com `cobranca_ref` ('hotmart:<chave_externa>' | 'manual:<id>', índice único entre não cancelados), `fin_hotmart_pedidos`
     (só leitura: histórico gravado pela Edge Function `hotmart`), `fin_coproducao` (só leitura, espelho da planilha);
     RPCs `fin_saldos_ate`, `fin_restaurar_estrutura_padrao` (security invoker); `fin_hotmart_carregar`/`_finalizar` só
     service_role.

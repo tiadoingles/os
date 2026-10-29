@@ -8,9 +8,13 @@
 // Duas abas: "A receber" (manuais, parcelas/assinaturas e boletos/Pix ainda válidos) e "Recuperação de vendas"
 // (venda avulsa da Hotmart com status OVERDUE = boleto/Pix gerado no checkout e não pago: compra abandonada,
 // não dívida de aluna). Ver ehRecuperacao().
+// Fluxo de Caixa / DRE: NADA entra sozinho (eles só leem fin_lancamentos + fin_vendas). A ação "Fluxo/DRE" de cada
+// linha abre um popup e cria um fin_lancamentos manual, já conciliado, com cobranca_ref = refCobranca(c)
+// ('hotmart:<chave_externa>' | 'manual:<id>'; texto e não FK porque a sincronização recria as linhas da Hotmart).
+// Índice único em cobranca_ref (lançamentos não cancelados) impede lançar a mesma cobrança duas vezes.
 import { html } from "htm/preact";
 import { useState, useEffect, useMemo, useRef } from "preact/hooks";
-import { os, escopoFin, podeEditarFin, FinPage, Icone, ConfirmDialog, AbasToggle, KpiCardDestaque, Pill, brl, cn, dataBR, normalizarTexto, parseValorBR, useLocalState } from "./comum.js";
+import { os, escopoFin, podeEditarFin, FinPage, Icone, ConfirmDialog, AbasToggle, fetchContas, fetchGrupos, fetchCategorias, nomeDre, KpiCardDestaque, Pill, brl, cn, dataBR, normalizarTexto, parseValorBR, useLocalState } from "./comum.js";
 import { chamarHotmart, BannerSemCredenciais } from "./hotmart.js";
 
 const ESCOPO = escopoFin("cobranca");
@@ -49,6 +53,13 @@ async function fetchCobrancas() {
     if (!data || data.length < 1000) return out;
   }
 }
+/** Lançamentos ativos (não cancelados) criados a partir de cobranças: Map cobranca_ref -> lançamento. */
+async function fetchLancadas() {
+  const { data, error } = await os.sb.from("fin_lancamentos").select("id,data,valor,cobranca_ref")
+    .not("cobranca_ref", "is", null).is("cancelado_em", null);
+  if (error) throw error;
+  return new Map((data || []).map((l) => [l.cobranca_ref, l]));
+}
 async function fetchStatusSync() {
   const { data, error } = await os.sb.from("sync_status").select("*").eq("chave", "hotmart-cobrancas").maybeSingle();
   if (error) throw error;
@@ -85,6 +96,12 @@ export function ehRecuperacao(c) {
   return c.origem === "hotmart" && !c.previsto && c.status_hotmart === "OVERDUE";
 }
 
+/** Referência estável da cobrança gravada em fin_lancamentos.cobranca_ref. */
+export function refCobranca(c) {
+  if (c.origem === "hotmart") return c.chave_externa ? "hotmart:" + c.chave_externa : null;
+  return "manual:" + c.id;
+}
+
 const parcelaTxt = (c) => (c.parcela_num ? `${c.parcela_num}${c.parcelas_total ? "/" + c.parcelas_total : ""}` : "");
 const rotSituacao = { vencido: "Vencido", a_vencer: "A vencer", pago: "Pago", cancelado: "Cancelado" };
 
@@ -94,6 +111,7 @@ export function CobrancaPage({ me }) {
   const [linhas, setLinhas] = useState(null);
   const [erroCarga, setErroCarga] = useState(false);
   const [sync, setSync] = useState(null);
+  const [lancadas, setLancadas] = useState(() => new Map());
   const [pedindoSync, setPedindoSync] = useState(false);
   const [semCred, setSemCred] = useState(false);
   const autoFeito = useRef(false);
@@ -109,6 +127,7 @@ export function CobrancaPage({ me }) {
   const [busca, setBusca] = useState("");
   const [limite, setLimite] = useState(POR_PAGINA);
   const [modal, setModal] = useState(null); // { modo:"novo"|"editar"|"obs", linha }
+  const [lancar, setLancar] = useState(null); // cobrança a lançar no Fluxo/DRE
   const [confirmacao, setConfirmacao] = useState(null);
   const [ocupadoId, setOcupadoId] = useState(null);
   const pedido = useRef(0);
@@ -118,9 +137,10 @@ export function CobrancaPage({ me }) {
     const n = ++pedido.current;
     setErroCarga(false);
     try {
-      const [ls, st] = await Promise.all([fetchCobrancas(), fetchStatusSync().catch(() => null)]);
+      const [ls, st, lc] = await Promise.all([fetchCobrancas(), fetchStatusSync().catch(() => null), fetchLancadas().catch(() => null)]);
       if (n !== pedido.current) return;
       setLinhas(ls); setSync(st);
+      if (lc) setLancadas(lc);
     } catch (e) {
       if (n !== pedido.current) return;
       os.notify(os.errMsg(e), "err"); setErroCarga(true); setLinhas((l) => l || []);
@@ -355,6 +375,7 @@ export function CobrancaPage({ me }) {
           ${carregando ? html`<tr><td colSpan="9" class="p-16 text-center text-xs font-bold text-slate-400">
               <${Icone} nome="loader" class="mx-auto mb-3 h-6 w-6 fin-spin text-emerald-600" />Carregando cobranças...</td></tr>`
             : visiveis.length ? visiveis.slice(0, limite).map((c) => html`<${LinhaCobranca} key=${c.id} c=${c} hoje=${hoje} pode=${pode} ocupado=${ocupadoId === c.id}
+                lancado=${lancadas.get(refCobranca(c))} onLancar=${() => setLancar(c)}
                 onEditar=${() => setModal({ modo: c.origem === "manual" ? "editar" : "obs", linha: c })}
                 onPaga=${() => marcarPaga(c)} onReabrir=${() => reabrir(c)} onCancelar=${() => cancelar(c)} onExcluir=${() => excluir(c)} onCopiar=${copiar} />`)
             : html`<tr><td colSpan="9" class="p-16 text-center">
@@ -376,6 +397,8 @@ export function CobrancaPage({ me }) {
       textoConfirmar=${confirmacao?.textoConfirmar} textoCancelar="Voltar" onConfirm=${() => confirmacao && confirmacao.onConfirm()} onClose=${() => setConfirmacao(null)} />
     ${modal ? html`<${ModalCobranca} modo=${modal.modo} linha=${modal.linha} produtos=${produtos} onClose=${() => setModal(null)}
       onSalvo=${() => { setModal(null); carregar(); }} />` : null}
+    ${lancar ? html`<${ModalLancarCobranca} c=${lancar} onClose=${() => setLancar(null)}
+      onSalvo=${() => { setLancar(null); carregar(); }} />` : null}
   <//>`;
 }
 
@@ -400,7 +423,7 @@ function BadgeSituacao({ c, hoje }) {
   return html`<${Pill} tom="neutro" class="whitespace-nowrap line-through">Cancelado<//>`;
 }
 
-function LinhaCobranca({ c, hoje, pode, ocupado, onEditar, onPaga, onReabrir, onCancelar, onExcluir, onCopiar }) {
+function LinhaCobranca({ c, hoje, pode, ocupado, lancado, onLancar, onEditar, onPaga, onReabrir, onCancelar, onExcluir, onCopiar }) {
   const manual = c.origem === "manual";
   const btn = "flex h-9 items-center gap-1 rounded-xl border border-slate-200 px-3 text-[14.5px] font-black uppercase tracking-widest text-slate-500 transition hover:border-emerald-200 hover:text-emerald-700 disabled:opacity-50";
   const btnIc = "flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 text-slate-400 transition disabled:opacity-50";
@@ -428,6 +451,11 @@ function LinhaCobranca({ c, hoje, pode, ocupado, onEditar, onPaga, onReabrir, on
           ${c.transacao ? html`<p class="mt-1 whitespace-nowrap text-[12px] font-medium text-slate-400" title="Procure esta transação no painel da Hotmart (Minhas vendas)">Ver na Hotmart: ${c.transacao}</p>` : null}`}
     </td>
     <td class="px-4 py-3"><div class="flex justify-end gap-2">
+      ${lancado ? html`<span class="flex h-9 items-center gap-1 whitespace-nowrap rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-[14.5px] font-black uppercase tracking-widest text-emerald-700"
+          title=${`Lançada no Fluxo de Caixa em ${dataBR(lancado.data)} (${brl(lancado.valor)}). Para desfazer, cancele o lançamento no Fluxo de Caixa.`}>
+          <${Icone} nome="check-circle" class="h-3 w-3" />No Fluxo · ${dataBR(lancado.data).slice(0, 5)}</span>`
+        : pode && refCobranca(c) ? html`<button type="button" onClick=${onLancar} disabled=${ocupado} class=${btn} title="Lançar no Fluxo de Caixa e na DRE">
+          <${Icone} nome="plus" class="h-3 w-3" />Fluxo/DRE</button>` : null}
       ${c.cliente_email ? html`<button type="button" onClick=${() => onCopiar(c.cliente_email)} aria-label="Copiar e-mail" title="Copiar e-mail" class=${cn(btnIc, "hover:border-emerald-200 hover:text-emerald-700")}><${Icone} nome="file" class="h-3.5 w-3.5" /></button>` : null}
       ${pode ? html`<button type="button" onClick=${onEditar} disabled=${ocupado} aria-label=${manual ? "Editar cobrança" : "Editar observações"} title=${manual ? "Editar" : "Observações"}
         class=${cn(btnIc, "hover:border-emerald-200 hover:text-emerald-700")}><${Icone} nome="pencil" class="h-3.5 w-3.5" /></button>` : null}
@@ -524,6 +552,150 @@ function ModalCobranca({ modo, linha, produtos, onClose, onSalvo }) {
       <div class="mt-6 flex w-full gap-3">
         <button type="button" onClick=${onClose} class="flex-1 rounded-2xl border border-slate-100 bg-slate-50 py-4 text-[17px] font-black uppercase tracking-widest text-slate-500 transition-all hover:bg-slate-100 hover:text-slate-900">Cancelar</button>
         <button type="submit" disabled=${salvando} class="premium-button-primary flex-1 py-4 text-[17px] uppercase tracking-widest disabled:opacity-50">${salvando ? "Salvando..." : "Salvar"}</button>
+      </div>
+    </form>
+  </div>`;
+}
+
+/* ============================ Lançar no Fluxo de Caixa / DRE ============================ */
+const r2 = (n) => Math.round(n * 100) / 100;
+const rotuloConta = (c) => (c.banco ? c.banco + " · " : "") + c.apelido;
+
+/** Popup que transforma uma cobrança num lançamento manual conciliado (Fluxo de Caixa e, se a categoria for de uma
+ *  linha da DRE, DRE). Nada é lançado sem este clique. */
+function ModalLancarCobranca({ c, onClose, onSalvo }) {
+  const manualAberta = c.origem === "manual" && c.status === "aberto";
+  const [contaPadrao, setContaPadrao] = useLocalState("cobranca:lancar:conta", "");
+  const [catPadrao, setCatPadrao] = useLocalState("cobranca:lancar:categoria", "");
+  const [destinoPadrao, setDestinoPadrao] = useLocalState("cobranca:lancar:destino", "dre");
+  const [aux, setAux] = useState(null); // { contas, grupos, categorias } | { erro }
+  const [f, setF] = useState(() => ({
+    destino: destinoPadrao, data: c.pago_em || hojeLocal(), conta_id: "", categoria_id: "",
+    valor: Number(c.valor || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+    historico: ["Recebimento", c.cliente_nome || c.cliente_email, c.produto, parcelaTxt(c) && "parcela " + parcelaTxt(c)].filter(Boolean).join(" · ").slice(0, 300),
+    observacao: [`Cobrança ${c.origem === "hotmart" ? "da Hotmart" : "manual"}`, c.transacao && "transação " + c.transacao,
+      `vencimento ${dataBR(c.vencimento)}`, c.forma_pagamento].filter(Boolean).join(" · "),
+    marcarPaga: true,
+  }));
+  const [erro, setErro] = useState("");
+  const [salvando, setSalvando] = useState(false);
+  const set = (k) => (e) => setF((o) => ({ ...o, [k]: e.target.value }));
+  useEffect(() => { const on = (e) => e.key === "Escape" && onClose(); addEventListener("keydown", on); return () => removeEventListener("keydown", on); }, []);
+
+  async function carregarAux() {
+    setAux(null);
+    try {
+      const [contas, grupos, categorias] = await Promise.all([fetchContas(), fetchGrupos(), fetchCategorias()]);
+      setAux({ contas, grupos, categorias });
+      setF((o) => ({ ...o,
+        conta_id: contas.some((x) => x.id === contaPadrao) ? contaPadrao : contas.length === 1 ? contas[0].id : "",
+        categoria_id: categorias.some((x) => x.id === catPadrao && !!x.fora_dre === (o.destino === "fluxo")) ? catPadrao : "" }));
+    } catch (e) { setAux({ erro: os.errMsg(e) }); }
+  }
+  useEffect(() => { carregarAux(); }, []);
+
+  const opcoesCategoria = useMemo(() => {
+    if (!aux || aux.erro) return [];
+    if (f.destino === "fluxo") {
+      const fora = aux.categorias.filter((x) => x.fora_dre).sort((a, b) => a.ordem - b.ordem).map((x) => [x.id, x.nome]);
+      return fora.length ? [{ grupo: "Fora da DRE", itens: fora }] : [];
+    }
+    return aux.grupos.filter((g) => g.tipo !== "formula").map((g) => ({
+      grupo: nomeDre(g.nome),
+      itens: aux.categorias.filter((x) => x.grupo_id === g.id && !x.fora_dre).sort((a, b) => a.ordem - b.ordem).map((x) => [x.id, x.nome]),
+    })).filter((g) => g.itens.length);
+  }, [aux, f.destino]);
+
+  function mudarDestino(d) {
+    setF((o) => ({ ...o, destino: d, categoria_id: "" }));
+  }
+
+  async function salvar(e) {
+    e.preventDefault();
+    if (salvando) return;
+    setErro("");
+    const historico = f.historico.trim(), v = parseValorBR(f.valor), ref = refCobranca(c);
+    if (!ref) return setErro("Esta cobrança não tem identificação da Hotmart; atualize da Hotmart e tente de novo.");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(f.data || "")) return setErro("Informe a data do recebimento.");
+    if (!Number.isFinite(v) || Math.abs(v) < 0.005) return setErro("Informe o valor recebido, maior que zero.");
+    if (!f.conta_id) return setErro("Selecione a conta bancária onde o dinheiro entrou.");
+    if (!historico) return setErro("Informe o histórico.");
+    if (!f.categoria_id) return setErro("Selecione a categoria.");
+    setSalvando(true);
+    try {
+      const { data: novo, error } = await os.sb.from("fin_lancamentos").insert({
+        data: f.data, conta_id: f.conta_id, historico, valor: r2(Math.abs(v)), categoria_id: f.categoria_id,
+        observacao: f.observacao.trim() || null, origem: "manual", conciliado: true, cobranca_ref: ref,
+      }).select("*").single();
+      if (error) {
+        if (error.code === "23505") throw new Error("Esta cobrança já foi lançada no Fluxo de Caixa.");
+        throw error;
+      }
+      const nome = c.cliente_nome || c.cliente_email || "cliente";
+      const rot = `lançar no Fluxo/DRE a cobrança de ${nome}`;
+      os.registrarDesfazer(ESCOPO, rot, os.desfazerCriacao("fin_lancamentos", novo, rot),
+        { mensagem: f.destino === "dre" ? "Lançado no Fluxo de Caixa e na DRE." : "Lançado no Fluxo de Caixa." });
+      setContaPadrao(f.conta_id); setCatPadrao(f.categoria_id); setDestinoPadrao(f.destino);
+      if (manualAberta && f.marcarPaga) {
+        try {
+          const { data: antes, error: e0 } = await os.sb.from("fin_cobrancas").select("*").eq("id", c.id).single();
+          if (e0) throw e0;
+          const { data: depois, error: e1 } = await os.sb.from("fin_cobrancas").update({ status: "pago", pago_em: f.data }).eq("id", c.id).select("*").single();
+          if (e1) throw e1;
+          const rp = `marcar como paga a cobrança de ${nome}`;
+          os.registrarDesfazer(ESCOPO, rp, os.desfazerEdicao("fin_cobrancas", antes, depois, rp));
+        } catch (e2) { os.notify("Lançamento feito, mas não foi possível marcar a cobrança como paga: " + os.errMsg(e2), "err"); }
+      }
+      onSalvo();
+    } catch (err) { setErro(os.errMsg(err)); setSalvando(false); }
+  }
+
+  const rot = "mb-2 block text-[14.5px] font-black uppercase tracking-widest text-slate-500";
+  const contas = aux && !aux.erro ? aux.contas : [];
+  return html`<div class="fin-page fixed inset-0 z-[100] flex items-center justify-center p-4" style="padding:1rem">
+    <div class="absolute inset-0 bg-slate-950/40 backdrop-blur-sm" onClick=${onClose}></div>
+    <form onSubmit=${salvar} role="dialog" aria-modal="true" aria-label="Lançar no Fluxo de Caixa / DRE"
+      class="relative max-h-[92vh] w-full max-w-[680px] overflow-y-auto rounded-[2.5rem] border border-white/20 bg-white p-8 shadow-[0_32px_80px_-20px_rgba(0,0,0,0.15)]" style="border-top:4px solid #10b981">
+      <button type="button" onClick=${onClose} aria-label="Fechar" class="absolute right-6 top-6 rounded-xl p-2 text-slate-400 transition-colors hover:bg-slate-50 hover:text-slate-900"><${Icone} nome="x" class="h-5 w-5" /></button>
+      <p class="text-[16px] font-black uppercase tracking-[0.2em] text-emerald-700">Entrada de dinheiro</p>
+      <h3 class="mt-2 text-xl font-black tracking-tight text-slate-900">Lançar no Fluxo de Caixa / DRE</h3>
+      <div class="mt-3 rounded-2xl border border-slate-100 bg-slate-50 p-4 text-xs font-semibold text-slate-600">
+        <p class="font-black text-slate-800">${c.cliente_nome || "Sem nome"} · ${brl(c.valor)} · vence ${dataBR(c.vencimento)}</p>
+        <p class="mt-1">${[c.produto, parcelaTxt(c) && "parcela " + parcelaTxt(c), c.forma_pagamento, c.origem === "hotmart" ? "Hotmart" : "Manual"].filter(Boolean).join(" · ")}</p>
+      </div>
+      ${aux && !aux.erro && !contas.length ? html`<p class="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs font-bold text-amber-900">
+        Nenhuma conta bancária ativa. <a class="underline" href="#/financeiro/contas" onClick=${onClose}>Cadastrar conta</a></p>` : null}
+      ${aux && aux.erro ? html`<p class="mt-4 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-xs font-bold text-rose-800">Não foi possível carregar contas e categorias.
+        <button type="button" class="underline" onClick=${carregarAux}>Tentar novamente</button></p>` : null}
+      <div class="mt-6 space-y-4">
+        <div><span class=${rot}>Onde vai entrar</span>
+          <${AbasToggle} valor=${f.destino} onChange=${mudarDestino} opcoes=${[["dre", "Fluxo de Caixa e DRE"], ["fluxo", "Só Fluxo de Caixa"]]} /></div>
+        <div class="grid gap-4 sm:grid-cols-2">
+          <label><span class=${rot}>Data do recebimento</span><input type="date" required value=${f.data} onInput=${set("data")} class="filter-select h-12 py-0" /></label>
+          <label><span class=${rot}>Valor recebido</span><input value=${f.valor} onInput=${set("valor")} inputMode="decimal" placeholder="Ex.: 1.234,56" class="filter-select h-12 py-0 tabular-nums" />
+            <span class="mt-1 block text-xs font-medium text-slate-400">O que caiu na conta (já sem as taxas, se houver).</span></label>
+          <label><span class=${rot}>Conta bancária</span>
+            <select value=${f.conta_id} onChange=${set("conta_id")} disabled=${!aux} class="filter-select h-12 py-0">
+              <option value="">${aux ? "Selecionar conta..." : "Carregando..."}</option>
+              ${contas.map((x) => html`<option value=${x.id}>${rotuloConta(x)}</option>`)}
+            </select></label>
+          <label><span class=${rot}>${f.destino === "dre" ? "Categoria da DRE" : "Categoria (fora da DRE)"}</span>
+            <select value=${f.categoria_id} onChange=${set("categoria_id")} disabled=${!aux} class="filter-select h-12 py-0">
+              <option value="">${aux ? (opcoesCategoria.length ? "Selecionar categoria..." : "Nenhuma categoria disponível") : "Carregando..."}</option>
+              ${opcoesCategoria.map((g) => html`<optgroup label=${g.grupo}>${g.itens.map((o) => html`<option value=${o[0]}>${o[1]}</option>`)}</optgroup>`)}
+            </select></label>
+          <label class="sm:col-span-2"><span class=${rot}>Histórico</span><input value=${f.historico} onInput=${set("historico")} maxLength="300" class="filter-select h-12 py-0" /></label>
+          <label class="sm:col-span-2"><span class=${rot}>Observação (opcional)</span><textarea value=${f.observacao} onInput=${set("observacao")} rows="2" maxLength="2000" class="filter-select py-3"></textarea></label>
+        </div>
+        ${manualAberta ? html`<label class="flex cursor-pointer items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3 text-xs font-bold text-slate-700">
+          <input type="checkbox" checked=${f.marcarPaga} onChange=${(e) => setF((o) => ({ ...o, marcarPaga: e.target.checked }))} class="h-4 w-4 accent-emerald-500" />
+          Marcar a cobrança como paga nesta data</label>` : null}
+        <p class="text-xs font-semibold text-slate-400">O lançamento entra já conciliado e aparece no Fluxo de Caixa${f.destino === "dre" ? " e na DRE, na linha da categoria escolhida" : " (fora da DRE)"}. Para desfazer, use DESFAZER agora ou cancele o lançamento no Fluxo de Caixa.</p>
+      </div>
+      ${erro ? html`<p role="alert" class="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-bold text-rose-800">${erro}</p>` : null}
+      <div class="mt-6 flex w-full gap-3">
+        <button type="button" onClick=${onClose} class="flex-1 rounded-2xl border border-slate-100 bg-slate-50 py-4 text-[17px] font-black uppercase tracking-widest text-slate-500 transition-all hover:bg-slate-100 hover:text-slate-900">Cancelar</button>
+        <button type="submit" disabled=${salvando || !aux || !!aux.erro || !contas.length} class="premium-button-primary flex-1 py-4 text-[17px] uppercase tracking-widest disabled:opacity-50">${salvando ? "Lançando..." : "Lançar"}</button>
       </div>
     </form>
   </div>`;
