@@ -223,8 +223,17 @@ como backend.
   `mentoria-fluent-mind` + `pnl-mentoria`; SQL `20261029i_conteudo_avatar.sql`; leitura aba Conteúdo, escrita só ADM);
   sem tema, a IA escolhe e devolve `tema`. Formato = modelo padrão, `livre` (descrição) ou `referencia` (link + nota;
   `lerReferencia` em carrossel.ts busca título/og/texto só de host público, redirecionamento manual conferido, 7 s,
-  400 KB; Instagram costuma exigir login, aí a IA segue só a nota). Pendente: Fase 3 (fotos do Drive "4. Materiais Visuais/1. Fotos & Videos" em
-  `conteudo_fotos` + bucket; logo branco "Logo Tia do Inglês branco.png" na marca d'água, hoje a forma do balão).
+  400 KB; Instagram costuma exigir login, aí a IA segue só a nota).
+  **Fase 3 (banco de fotos, 29/10/2026)**: catálogo `public.conteudo_fotos` (SQL `20261029j_conteudo_fotos.sql`; leitura e
+  update de etiquetas/descrição pela aba Conteúdo, trigger `app.conteudo_fotos_guarda` trava o resto; insert/delete só
+  service_role) preenchido pela Edge Function `fotos-drive` (`supabase/functions/fotos-drive`, aba Conteúdo): op `sync` varre a
+  pasta "4. Materiais Visuais / 1. Fotos & Videos" (`PASTA_RAIZ`) pela listagem pública `embeddedfolderview` (a pasta é
+  compartilhada por link; sem chave de API), só jpg/jpeg/png/heic/dng, ~5.000 fotos em ~100 pastas, ~25 s; desativa as que
+  sumiram só se não houve erro. op `imagem` devolve `drive.google.com/thumbnail?id=&sz=w2000` (HEIC/DNG já em JPEG) com CORS,
+  só para ids do catálogo. A galeria (`BancoFotos`) mostra miniaturas direto do Drive (`sz=w320`), filtra por pasta/subpasta/
+  busca, marca "Usada" (foto.driveId nos slides de `conteudo_carrosseis`), sugere por etiquetas x `foto_sugerida` da IA e sincroniza
+  sozinha se o catálogo estiver vazio. Slide guarda `foto.driveId` e a foto volta ao reabrir. Marca d'água = `assets/simbolo-branco.png`
+  (recortado do "Logo Tia do Inglês branco.png" do Drive de Conteúdo). Se a pasta deixar de ser pública, a galeria e a exportação param.
 
 - **Gerador de Materiais das Arenas** (`#/pedagogico/gerador-materiais`, `GeradorMateriaisPage`/`FormArena`/
   `PedidoArena`/`RegrasArena`; SQL em `scripts/migrations/20261016_arenas_previa_regras.sql`, teste de RLS em

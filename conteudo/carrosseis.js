@@ -3,7 +3,8 @@
 // PNG 1080×1350 no navegador (html-to-image + JSZip, carregados só na hora de exportar).
 // Fase 1: modelos + editor manual + exportação. Fase 2: a IA escreve o roteiro (ações carrossel_roteiro/carrossel_reescrever
 // da Edge Function "ai", arquivo carrossel.ts — mesmos nomes de modelo/campo daqui) e o histórico fica em conteudo_carrosseis.
-// Fase 3 (fotos do Drive) entra depois — por enquanto a foto vem de upload local (data URL, sem problema de CORS no PNG).
+// Fase 3: banco de fotos do Drive (conteudo_fotos + Edge Function fotos-drive, que devolve a foto com CORS); upload local
+// continua valendo. Foto do Drive fica no slide como foto.driveId e volta sozinha ao reabrir do histórico.
 // Marcação nos textos: *palavra* = destaque (grifo na capa, vermelho escuro no papel, turquesa no azul),
 // _trecho_ = itálico (final da frase de virada), Enter = quebra de linha forçada.
 import { html } from "htm/preact";
@@ -11,7 +12,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useMemo } from "preact/ho
 
 /* ============================ Dependências do app ============================ */
 // Preenchido por app.js (configurarCarrosseis) antes do primeiro render: sb, notify, errMsg, Btn, cx, inputCls, carregarJSZip,
-// aiCall, registrarDesfazer, useAoDesfazer, desfazerCriacao, desfazerEdicao, desfazerExclusao.
+// aiCall, registrarDesfazer, useAoDesfazer, desfazerCriacao, desfazerEdicao, desfazerExclusao, supabaseUrl, anonKey.
 const os = {};
 export function configurarCarrosseis(deps) { Object.assign(os, deps); }
 
@@ -283,10 +284,11 @@ function Balao({ rotulo, t, cor = T.balaoT, azulFundo }) {
   </div>`;
 }
 
-/** Marca d'água: símbolo em branco, bem grande, cortado no canto inferior direito, 3,5% (só nos slides azuis).
- * Enquanto não chega o arquivo do símbolo do logo, usa a forma do balão (que é derivada dele). */
-const MarcaDagua = () => html`<div aria-hidden="true" style=${{ position: "absolute", right: -300, bottom: -320, width: 980, height: 980,
-  background: "#fff", opacity: 0.035, borderRadius: "420px 420px 420px 60px", pointerEvents: "none" }}></div>`;
+/** Marca d'água: símbolo do logo em branco (assets/simbolo-branco.png, recortado do "Logo Tia do Inglês branco.png"),
+ * bem grande, cortado no canto inferior direito, 3,5% (só nos slides azuis). Mesma origem: o PNG exporta sem CORS. */
+const SIMBOLO_URL = new URL("../assets/simbolo-branco.png", import.meta.url).href;
+const MarcaDagua = () => html`<img aria-hidden="true" alt="" src=${SIMBOLO_URL} style=${{ position: "absolute", right: -230, bottom: -250,
+  width: 920, height: "auto", opacity: 0.035, pointerEvents: "none" }} />`;
 
 function Ponte({ t, azul }) {
   if (!t) return null;
@@ -633,6 +635,56 @@ async function exportar(raiz, n, tema, onProgresso) {
   baixar(await zip.generateAsync({ type: "blob" }), `${base}.zip`);
 }
 
+/* ============================ Banco de fotos do Drive (conteudo_fotos) ============================ */
+const thumbDrive = (id, w = 320) => `https://drive.google.com/thumbnail?id=${id}&sz=w${w}`;
+const PASTAS_PRIMEIRO = ["Marcela", "Trabalhando", "Casal", "Cenários & Objetos", "Ensaios", "Viagens"];
+async function chamarFotosDrive(body) {
+  const { data: { session } } = await os.sb.auth.getSession();
+  const r = await fetch(os.supabaseUrl + "/functions/v1/fotos-drive", {
+    method: "POST", body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", apikey: os.anonKey, Authorization: `Bearer ${session?.access_token || os.anonKey}` },
+  });
+  if (!r.ok) { let m = `HTTP ${r.status}`; try { m = (await r.json()).error || m; } catch { /* sem json */ } throw new Error(m); }
+  return r;
+}
+const cacheFotosDrive = new Map(); // driveId -> Promise<{ src, w, h, nome, driveId }>
+function carregarFotoDrive(driveId, nome) {
+  if (!cacheFotosDrive.has(driveId)) cacheFotosDrive.set(driveId, (async () => {
+    const blob = await (await chamarFotosDrive({ op: "imagem", id: driveId, w: 2000 })).blob();
+    const src = await new Promise((ok, er) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.onerror = er; fr.readAsDataURL(blob); });
+    const [w, h] = await new Promise((ok) => { const im = new Image(); im.onload = () => ok([im.naturalWidth, im.naturalHeight]); im.onerror = () => ok([0, 0]); im.src = src; });
+    return { src, w, h, nome: nome || driveId, driveId };
+  })().catch((e) => { cacheFotosDrive.delete(driveId); throw e; }));
+  return cacheFotosDrive.get(driveId);
+}
+let _catalogo = null;
+async function fetchCatalogo(forcar) {
+  if (_catalogo && !forcar) return _catalogo;
+  const out = [];
+  for (let i = 0; ; i += 1000) { // PostgREST devolve no máximo 1000 por vez
+    const { data, error } = await os.sb.from("conteudo_fotos").select("drive_id,nome,pasta,etiquetas,descricao,visto_em")
+      .eq("ativo", true).order("pasta").order("nome").range(i, i + 999);
+    if (error) throw error;
+    out.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  _catalogo = out;
+  return out;
+}
+/** Onde cada foto do Drive já foi usada (slides salvos no histórico). driveId -> [{ tema, status, data }] */
+async function fetchUsoFotos(excetoId) {
+  const { data, error } = await os.sb.from("conteudo_carrosseis").select("id,tema,status,updated_at,slides").order("updated_at", { ascending: false }).limit(300);
+  if (error) throw error;
+  const uso = {};
+  for (const c of data || []) if (c.id !== excetoId) for (const s of c.slides || []) {
+    const d = s && s.foto && s.foto.driveId;
+    if (d) (uso[d] = uso[d] || []).some((u) => u.id === c.id) || uso[d].push({ id: c.id, tema: c.tema, status: c.status, data: c.updated_at });
+  }
+  return uso;
+}
+const STOP_SUG = new Set("para com sem uma umas uns que como mais muito pela pelo entre sobre foto marcela tia".split(" "));
+const palavrasSug = (t) => [...new Set(String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/[^a-z0-9]+/).filter((w) => w.length > 3 && !STOP_SUG.has(w)))];
+
 /* ============================ Histórico (conteudo_carrosseis) ============================ */
 const ESCOPO = "conteudo/carrosseis"; // pilha do DESFAZER (escopoDesfazer em app.js)
 const TABELA = "conteudo_carrosseis";
@@ -683,11 +735,24 @@ export function CarrosselPage() {
   const [status, setStatus] = useState(r0?.status || "rascunho");
   const [historico, setHistorico] = useState(null);
   const [avatar, setAvatar] = useState(null);
+  const [usoFotos, setUsoFotos] = useState({});
   const [gerando, setGerando] = useState(false);
   const [salvando, setSalvando] = useState(false);
   const [retorno, setRetorno] = useState(r0?.retorno || null); // { correcoes, duvidas, pendencias } da última geração
   const galeria = useRef(null);
-  const recarregar = () => fetchCarrosseis().then(setHistorico).catch((e) => { notify(errMsg(e), "err"); setHistorico([]); });
+  const recarregar = () => {
+    fetchCarrosseis().then(setHistorico).catch((e) => { notify(errMsg(e), "err"); setHistorico([]); });
+    fetchUsoFotos(null).then(setUsoFotos).catch(() => { /* sem uso: só deixa de marcar as usadas */ });
+  };
+  // Fotos do Drive referenciadas nos slides (foto.driveId) carregam sozinhas, inclusive ao reabrir do histórico.
+  useEffect(() => {
+    for (const s of slides) {
+      const f = s.foto;
+      if (!f || !f.driveId || fotos[f.id]) continue;
+      carregarFotoDrive(f.driveId, f.nome).then((r) => setFotos((m) => (m[f.id] ? m : { ...m, [f.id]: r })))
+        .catch((e) => notify(`Não consegui carregar a foto do Drive: ${errMsg(e)}`, "err"));
+    }
+  }, [slides]);
   useEffect(() => { recarregar(); fetchAvatar().then(setAvatar).catch((e) => { notify(errMsg(e), "err"); setAvatar([]); }); }, []);
   os.useAoDesfazer(ESCOPO, () => { recarregar(); });
 
@@ -1054,7 +1119,8 @@ export function CarrosselPage() {
           </div>
 
           <div class="rounded-[1.6rem] border border-line bg-card shadow-card p-5">
-            ${atual ? html`<${EditorSlide} key=${atual.id} s=${atual} i=${sel} upd=${upd} fotos=${fotos} escolherFoto=${escolherFoto} reescrever=${reescrever} travado=${travado} />` : null}
+            ${atual ? html`<${EditorSlide} key=${atual.id} s=${atual} i=${sel} upd=${upd} fotos=${fotos} escolherFoto=${escolherFoto} reescrever=${reescrever} travado=${travado}
+              usoFotos=${usoFotos} atualId=${atualId} />` : null}
           </div>
         </div>
 
@@ -1116,8 +1182,9 @@ export function CarrosselPage() {
 }
 
 /* ============================ Editor do slide selecionado ============================ */
-function EditorSlide({ s, i, upd, fotos, escolherFoto, reescrever, travado }) {
+function EditorSlide({ s, i, upd, fotos, escolherFoto, reescrever, travado, usoFotos, atualId }) {
   const { cx, inputCls, Btn, notify, errMsg } = os;
+  const [banco, setBanco] = useState(false);
   const [instrucao, setInstrucao] = useState("");
   const [ocupado, setOcupado] = useState(false);
   async function pedirIA() {
@@ -1155,7 +1222,13 @@ function EditorSlide({ s, i, upd, fotos, escolherFoto, reescrever, travado }) {
           <div>
             <div class="text-xs font-medium uppercase tracking-wide text-muted">${rot}</div>
             ${s.foto_sugerida ? html`<div class="mt-1 rounded-lg bg-slate-50 px-2.5 py-1.5 text-xs text-ink/80">Foto sugerida pela IA: ${s.foto_sugerida}</div>` : null}
-            <input type="file" accept="image/*" class="mt-1 block w-full text-sm" onChange=${(e) => { escolherFoto(i, e.target.files[0]); e.target.value = ""; }} />
+            <div class="mt-1 flex flex-wrap items-center gap-2">
+              <${Btn} variant="ghost" onClick=${() => setBanco(true)} disabled=${travado}>Escolher do banco de fotos<//>
+              <label class="cursor-pointer text-xs text-muted underline hover:text-ink">ou enviar do computador
+                <input type="file" accept="image/*" class="hidden" onChange=${(e) => { escolherFoto(i, e.target.files[0]); e.target.value = ""; }} /></label>
+            </div>
+            ${banco ? html`<${BancoFotos} fechar=${() => setBanco(false)} sugestao=${s.foto_sugerida} uso=${usoFotos} atualId=${atualId}
+              escolher=${(f) => { upd(i, { foto: { id: "drive:" + f.drive_id, driveId: f.drive_id, nome: f.nome, x: 50, y: 40, zoom: 1, espelhar: false } }); setBanco(false); }} />` : null}
             ${foto ? html`
               <div class="mt-1 text-xs text-muted">${foto.nome} · ${foto.w} × ${foto.h} px</div>
               <div class="mt-2 grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1 text-xs text-muted">
@@ -1166,7 +1239,8 @@ function EditorSlide({ s, i, upd, fotos, escolherFoto, reescrever, travado }) {
               <label class="mt-2 flex items-center gap-2 text-sm text-ink/80">
                 <input type="checkbox" checked=${!!aj.espelhar} onChange=${(e) => setAj("espelhar", e.target.checked)} />
                 Espelhar (selfie com texto ao contrário no fundo)
-              </label>` : s.foto ? html`<div class="mt-1 text-xs text-amber-700">A foto não fica salva no rascunho. Escolha de novo.</div>` : null}
+              </label>` : s.foto && s.foto.driveId ? html`<div class="mt-1 text-xs text-muted"><span class="spinner mr-1"></span>Carregando a foto do Drive…</div>`
+              : s.foto ? html`<div class="mt-1 text-xs text-amber-700">Foto enviada do computador não fica salva. Escolha de novo.</div>` : null}
           </div>`;
         if (tipo === "bool") return html`
           <label class="flex items-center gap-2 text-sm text-ink/80">
@@ -1194,6 +1268,142 @@ function EditorSlide({ s, i, upd, fotos, escolherFoto, reescrever, travado }) {
         <textarea rows="2" class=${cx(inputCls, "mt-1")} value=${instrucao} onInput=${(e) => setInstrucao(e.target.value)}
           placeholder="Ex.: deixe o título mais curto; troque o exemplo por um de viagem"></textarea>
         <${Btn} variant="ghost" class="mt-2" onClick=${pedirIA} loading=${ocupado} disabled=${travado}>Reescrever<//>
+      </div>
+    </div>`;
+}
+
+/* ============================ Banco de fotos (galeria) ============================ */
+function BancoFotos({ fechar, escolher, sugestao, uso, atualId }) {
+  const { cx, inputCls, Btn, notify, errMsg } = os;
+  const [cat, setCat] = useState(null);
+  const [grupo, setGrupo] = useState("Marcela");
+  const [sub, setSub] = useState("");
+  const [busca, setBusca] = useState("");
+  const [ocultarUsadas, setOcultarUsadas] = useState(false);
+  const [limite, setLimite] = useState(60);
+  const [sincronizando, setSincronizando] = useState(false);
+  const carregar = (forcar) => fetchCatalogo(forcar).then(setCat).catch((e) => { notify(errMsg(e), "err"); setCat([]); });
+  // Primeira vez (catálogo vazio): já busca a lista no Drive.
+  useEffect(() => { fetchCatalogo(false).then((c) => { setCat(c); if (!c.length) sincronizar(); }).catch((e) => { notify(errMsg(e), "err"); setCat([]); }); }, []);
+  useEffect(() => { const k = (e) => e.key === "Escape" && fechar(); addEventListener("keydown", k); return () => removeEventListener("keydown", k); }, []);
+  useEffect(() => setLimite(60), [grupo, sub, busca, ocultarUsadas]);
+
+  async function sincronizar() {
+    setSincronizando(true);
+    try {
+      const r = await (await chamarFotosDrive({ op: "sync" })).json();
+      notify(`Lista atualizada: ${r.fotos} fotos em ${r.pastas} pastas${r.desativadas ? `, ${r.desativadas} saíram do Drive` : ""}.`, "ok");
+      await carregar(true);
+    } catch (e) { notify(errMsg(e), "err"); }
+    finally { setSincronizando(false); }
+  }
+  async function etiquetar(f) {
+    const v = prompt("Etiquetas desta foto, separadas por vírgula (ex.: sorrindo, notebook, mão no rosto)", (f.etiquetas || []).join(", "));
+    if (v == null) return;
+    const etiquetas = [...new Set(v.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean))].slice(0, 20);
+    try {
+      const { data: antes } = await os.sb.from("conteudo_fotos").select("*").eq("drive_id", f.drive_id).single();
+      const { data: depois, error } = await os.sb.from("conteudo_fotos").update({ etiquetas }).eq("drive_id", f.drive_id).select("*").single();
+      if (error) throw error;
+      os.registrarDesfazer(ESCOPO, "Etiquetar foto", os.desfazerEdicao("conteudo_fotos", antes, depois, "foto", { chave: "drive_id" }), { mensagem: "Etiquetas salvas" });
+      setCat((c) => c.map((x) => (x.drive_id === f.drive_id ? { ...x, etiquetas } : x)));
+      if (_catalogo) _catalogo = _catalogo.map((x) => (x.drive_id === f.drive_id ? { ...x, etiquetas } : x));
+    } catch (e) { notify(errMsg(e), "err"); }
+  }
+
+  const grupos = useMemo(() => {
+    const n = {};
+    for (const f of cat || []) { const g = f.pasta.split(" / ")[0]; n[g] = (n[g] || 0) + 1; }
+    return Object.entries(n).sort((a, b) => {
+      const ia = PASTAS_PRIMEIRO.indexOf(a[0]), ib = PASTAS_PRIMEIRO.indexOf(b[0]);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a[0].localeCompare(b[0]);
+    });
+  }, [cat]);
+  const subs = useMemo(() => [...new Set((cat || []).filter((f) => f.pasta.split(" / ")[0] === grupo && f.pasta !== grupo).map((f) => f.pasta))].sort(), [cat, grupo]);
+  const usada = (f) => (uso[f.drive_id] || []).filter((u) => u.id !== atualId);
+  const termos = palavrasSug(busca);
+  const lista = (cat || []).filter((f) => {
+    if (grupo !== "*" && f.pasta.split(" / ")[0] !== grupo) return false;
+    if (sub && f.pasta !== sub) return false;
+    if (ocultarUsadas && usada(f).length) return false;
+    if (termos.length) {
+      const hay = palavrasSug([f.nome, f.pasta, (f.etiquetas || []).join(" "), f.descricao].join(" ")).join(" ");
+      return termos.every((t) => hay.includes(t));
+    }
+    return true;
+  });
+  // Sugestão: fotos cujas etiquetas/descrição/pasta batem com a descrição de foto que a IA devolveu.
+  const sugeridas = useMemo(() => {
+    const ps = palavrasSug(sugestao);
+    if (!ps.length || !cat) return [];
+    return cat.map((f) => {
+      const hay = new Set(palavrasSug([(f.etiquetas || []).join(" "), f.descricao, f.pasta].join(" ")));
+      return { f, n: ps.filter((p) => hay.has(p)).length };
+    }).filter((x) => x.n > 0 && !usada(x.f).length).sort((a, b) => b.n - a.n).slice(0, 12).map((x) => x.f);
+  }, [cat, sugestao]);
+  const ultima = (cat || []).reduce((m, f) => (f.visto_em > m ? f.visto_em : m), "");
+
+  const cartao = (f, k) => {
+    const u = usada(f);
+    return html`<div key=${k} class="group relative overflow-hidden rounded-xl border border-line bg-slate-100">
+      <button type="button" class="block w-full" onClick=${() => escolher(f)} title=${f.pasta + " · " + f.nome}>
+        <img src=${thumbDrive(f.drive_id)} loading="lazy" alt="" class="aspect-[4/5] w-full object-cover" />
+      </button>
+      ${u.length ? html`<span class="absolute left-1.5 top-1.5 rounded-md bg-amber-500/90 px-1.5 text-[11px] font-bold text-white" title=${u.map((x) => x.tema).join(" · ")}>Usada${u.length > 1 ? ` ${u.length}x` : ""}</span>` : null}
+      <div class="flex items-center justify-between gap-1 px-1.5 py-1 text-[11px] text-muted">
+        <span class="truncate">${(f.etiquetas || []).join(", ") || "sem etiquetas"}</span>
+        <button type="button" class="shrink-0 underline hover:text-ink" onClick=${() => etiquetar(f)}>etiquetar</button>
+      </div>
+    </div>`;
+  };
+
+  return html`
+    <div class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4" onClick=${(e) => e.target === e.currentTarget && fechar()}>
+      <div class="w-full max-w-6xl rounded-[1.6rem] bg-white p-5 shadow-modal">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div class="text-lg font-black text-ink">Banco de fotos</div>
+            <div class="text-xs text-muted">Drive: 4. Materiais Visuais / 1. Fotos & Videos${cat ? ` · ${cat.length} fotos` : ""}${ultima ? ` · lista de ${new Date(ultima).toLocaleString("pt-BR")}` : ""}</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <${Btn} variant="ghost" onClick=${sincronizar} loading=${sincronizando}>Atualizar lista do Drive<//>
+            <${Btn} variant="subtle" onClick=${fechar}>Fechar<//>
+          </div>
+        </div>
+        ${sugestao ? html`<div class="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm text-ink/80"><b>Foto que a IA sugeriu:</b> ${sugestao}
+          ${!sugeridas.length ? html`<span class="text-xs text-muted"> · Etiquete as fotos para o banco sugerir as que combinam.</span>` : null}</div>` : null}
+        ${sugeridas.length ? html`
+          <div class="mt-3 text-xs font-bold uppercase tracking-wide text-muted">Combinam com a sugestão</div>
+          <div class="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-6">${sugeridas.map((f) => cartao(f, "s" + f.drive_id))}</div>` : null}
+        <div class="mt-4 flex flex-wrap items-end gap-3">
+          <label class="block">
+            <span class="text-xs font-medium uppercase tracking-wide text-muted">Pasta</span>
+            <select class=${cx(inputCls, "mt-1 w-auto")} value=${grupo} onChange=${(e) => { setGrupo(e.target.value); setSub(""); }}>
+              <option value="*">Todas</option>
+              ${grupos.map(([g, n]) => html`<option value=${g}>${g} (${n})</option>`)}
+            </select>
+          </label>
+          ${subs.length ? html`<label class="block">
+            <span class="text-xs font-medium uppercase tracking-wide text-muted">Subpasta</span>
+            <select class=${cx(inputCls, "mt-1 w-auto max-w-xs")} value=${sub} onChange=${(e) => setSub(e.target.value)}>
+              <option value="">Todas de ${grupo}</option>
+              ${subs.map((x) => html`<option value=${x}>${x.split(" / ").slice(1).join(" / ")}</option>`)}
+            </select>
+          </label>` : null}
+          <label class="block min-w-[14rem] flex-1">
+            <span class="text-xs font-medium uppercase tracking-wide text-muted">Buscar (etiquetas, pasta, nome)</span>
+            <input class=${cx(inputCls, "mt-1")} value=${busca} onInput=${(e) => setBusca(e.target.value)} placeholder="Ex.: sorrindo notebook" />
+          </label>
+          <label class="flex items-center gap-2 pb-2 text-sm text-ink/80">
+            <input type="checkbox" checked=${ocultarUsadas} onChange=${(e) => setOcultarUsadas(e.target.checked)} /> Esconder as já usadas
+          </label>
+        </div>
+        ${cat === null ? html`<p class="mt-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</p>`
+          : !cat.length ? html`<p class="mt-6 text-sm text-muted">A lista ainda está vazia. Clique em <b>Atualizar lista do Drive</b> (leva cerca de 1 minuto).</p>`
+          : html`
+            <div class="mt-4 grid grid-cols-3 gap-2 sm:grid-cols-6">${lista.slice(0, limite).map((f) => cartao(f, f.drive_id))}</div>
+            ${!lista.length ? html`<p class="mt-4 text-sm text-muted">Nenhuma foto com esse filtro.</p>` : null}
+            ${lista.length > limite ? html`<div class="mt-4 text-center"><${Btn} variant="ghost" onClick=${() => setLimite((l) => l + 60)}>Mostrar mais (${lista.length - limite} restantes)<//></div>` : null}`}
       </div>
     </div>`;
 }

@@ -11291,7 +11291,7 @@ configurarFinanceiro({
 });
 
 configurarCarrosseis({
-  sb, notify, errMsg, Btn, cx, inputCls, carregarJSZip, aiCall,
+  sb, notify, errMsg, Btn, cx, inputCls, carregarJSZip, aiCall, supabaseUrl: cfg.SUPABASE_URL, anonKey: cfg.SUPABASE_ANON_KEY,
   registrarDesfazer, useAoDesfazer, desfazerCriacao, desfazerEdicao, desfazerExclusao,
 });
 
