@@ -3,10 +3,12 @@
 // Dados: public.fin_coproducao (linha única id=1: ciclos, total, funis; só select). A Edge Function
 // `coproducao-sheet` relê a aba Base da planilha: chamada sem force ao abrir a tela (ela mesma pula se o
 // último sync tem < 10 min), com force no botão "Atualizar da planilha" e por cron diário. Status em
-// sync_status chave 'coproducao-planilha'. Saldo Tia > 0 = Tia investiu/recebeu a menos que devia → a receber da Fad.
+// sync_status chave 'coproducao-planilha'. Filtros no topo (lembrados em localStorage): período (ciclo que cruza as datas),
+// tipo de ciclo (com valores / em aberto / saldo a receber / a pagar) e funil (só a tabela de regras); com filtro de ciclo,
+// cards e linha de total somam os ciclos filtrados (somarCiclos). Saldo Tia > 0 = Tia investiu/recebeu a menos que devia → a receber da Fad.
 import { html } from "htm/preact";
 import { useState, useEffect, useMemo, useRef } from "preact/hooks";
-import { os, FinPage, Icone, KpiCardDestaque, ErroCarga, Esqueleto, brl, brlCompacto, cn } from "./comum.js";
+import { os, FinPage, Icone, KpiCardDestaque, ErroCarga, Esqueleto, brl, brlCompacto, cn, normalizarTexto, useLocalState } from "./comum.js";
 
 const PLANILHA_URL = "https://docs.google.com/spreadsheets/d/1oqDiyFk2RzucGdIw0lDWoiIkJPh9ZeB6ifDIS-pnJ5Q/edit";
 
@@ -45,6 +47,42 @@ function periodoBR(ini, fim) {
 }
 /** Ciclo sem números ainda (meses futuros). */
 const emAberto = (c) => num(c.custo_total) === null && num(c.saldo_tia) === null && num(c.inv_real_tia) === null;
+/* ============================ Filtros (topo) ============================ */
+// Tipo do ciclo (a planilha não tem coluna de tipo): situação e sinal do Saldo Tia.
+const TIPOS_CICLO = [["all", "Todos os ciclos"], ["fechado", "Com valores"], ["aberto", "Em aberto"], ["receber", "Saldo Tia a receber"], ["pagar", "Saldo Tia a pagar"]];
+// Funil das regras: pelo começo do nome na planilha ("Perpetuo ...", "Lançamentos", "Inside sales ...").
+const TIPOS_FUNIL = [["all", "Todos os funis"], ["perpetuo", "Perpétuo"], ["lancamento", "Lançamentos"], ["inside", "Inside sales"]];
+function tipoFunil(nome) {
+  const t = normalizarTexto(nome);
+  return t.startsWith("perpetuo") ? "perpetuo" : t.startsWith("lancamento") ? "lancamento" : t.startsWith("inside") ? "inside" : "outro";
+}
+function cicloNoTipo(c, tipo) {
+  if (tipo === "all") return true;
+  if (tipo === "aberto") return emAberto(c);
+  if (tipo === "fechado") return !emAberto(c);
+  const s = num(c.saldo_tia);
+  return s !== null && (tipo === "receber" ? s >= 0 : s < 0);
+}
+/** Ciclo cruza o período [de, ate] (datas ISO; vazio = sem limite). Sem datas na planilha: só entra sem filtro de data. */
+function cicloNoPeriodo(c, de, ate) {
+  if (!de && !ate) return true;
+  const ini = String(c.data_inicial || "").slice(0, 10), fim = String(c.data_final || c.data_inicial || "").slice(0, 10);
+  if (!ini && !fim) return false;
+  return (!de || (fim || ini) >= de) && (!ate || (ini || fim) <= ate);
+}
+const CAMPOS_SOMA = ["custo_total", "inv_nec_tia", "inv_nec_fad", "inv_real_tia", "inv_real_fad", "receb_total", "receb_nec_tia", "receb_nec_fad", "receb_real_tia", "receb_real_fad", "saldo_tia", "saldo_fad"];
+/** Total dos ciclos filtrados (soma; participação = necessário ÷ custo total). */
+function somarCiclos(cs) {
+  const t = {};
+  for (const k of CAMPOS_SOMA) {
+    const vs = cs.map((c) => num(c[k])).filter((v) => v !== null);
+    t[k] = vs.length ? vs.reduce((a, b) => a + b, 0) : null;
+  }
+  t.part_tia = t.custo_total ? (t.inv_nec_tia || 0) / t.custo_total : null;
+  t.part_fad = t.custo_total ? (t.inv_nec_fad || 0) / t.custo_total : null;
+  return t;
+}
+
 const corSaldo = (v) => (num(v) === null ? "" : Number(v) >= 0 ? "text-emerald-700" : "text-rose-700");
 
 export function CoproducaoPage() {
@@ -54,6 +92,10 @@ export function CoproducaoPage() {
   const [sincronizando, setSincronizando] = useState(false);
   const [aviso, setAviso] = useState(null); // { tipo, texto }
   const vivo = useRef(true);
+  const [de, setDe] = useLocalState("coproducao:de", "");
+  const [ate, setAte] = useLocalState("coproducao:ate", "");
+  const [tipo, setTipo] = useLocalState("coproducao:tipo", "all");
+  const [funil, setFunil] = useLocalState("coproducao:funil", "all");
 
   async function recarregar() {
     try {
@@ -82,9 +124,15 @@ export function CoproducaoPage() {
     return () => { vivo.current = false; };
   }, []);
 
-  const ciclos = (dados && Array.isArray(dados.ciclos)) ? dados.ciclos : [];
-  const funis = (dados && Array.isArray(dados.funis)) ? dados.funis : [];
-  const t = (dados && dados.total) || {};
+  const todosCiclos = (dados && Array.isArray(dados.ciclos)) ? dados.ciclos : [];
+  const todosFunis = (dados && Array.isArray(dados.funis)) ? dados.funis : [];
+  const filtrando = !!(de || ate || tipo !== "all");
+  const ciclos = useMemo(() => todosCiclos.filter((c) => cicloNoTipo(c, tipo) && cicloNoPeriodo(c, de, ate)), [todosCiclos, tipo, de, ate]);
+  const funis = useMemo(() => (funil === "all" ? todosFunis : todosFunis.filter((f) => tipoFunil(f.funil) === funil)), [todosFunis, funil]);
+  // Sem filtro: total da própria planilha. Com filtro: soma dos ciclos que ficaram.
+  const totalTabela = filtrando ? (ciclos.length ? { ...somarCiclos(ciclos), _filtro: true } : null) : dados && dados.total;
+  const t = totalTabela || {};
+  const limpar = () => { setDe(""); setAte(""); setTipo("all"); setFunil("all"); };
   const carregando = dados === null && !erroCarga;
   const saldoTia = num(t.saldo_tia), saldoFad = num(t.saldo_fad);
 
@@ -117,6 +165,29 @@ export function CoproducaoPage() {
       <${Icone} nome="info" class="h-4 w-4 shrink-0 text-emerald-700" />
       Somente leitura. Para alterar, edite a planilha; o OS espelha automaticamente (todo dia às 9h20 e ao abrir esta tela).</p>
 
+    <section class="rounded-[1.4rem] border border-slate-200 bg-white p-3 shadow-sm" aria-label="Filtros">
+      <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        <label class="flex flex-col gap-1 px-1 text-[12px] font-bold text-slate-500">Data inicial
+          <input type="date" value=${de} onInput=${(e) => setDe(e.target.value)} class="filter-select h-11 py-0" /></label>
+        <label class="flex flex-col gap-1 px-1 text-[12px] font-bold text-slate-500">Data final
+          <input type="date" value=${ate} onInput=${(e) => setAte(e.target.value)} class="filter-select h-11 py-0" /></label>
+        <label class="flex flex-col gap-1 px-1 text-[12px] font-bold text-slate-500">Tipo de ciclo
+          <select value=${tipo} onChange=${(e) => setTipo(e.target.value)} class="filter-select h-11 py-0">
+            ${TIPOS_CICLO.map(([v, r]) => html`<option value=${v}>${r}</option>`)}
+          </select></label>
+        <label class="flex flex-col gap-1 px-1 text-[12px] font-bold text-slate-500">Funil (regras por funil)
+          <select value=${funil} onChange=${(e) => setFunil(e.target.value)} class="filter-select h-11 py-0">
+            ${TIPOS_FUNIL.map(([v, r]) => html`<option value=${v}>${r}</option>`)}
+          </select></label>
+      </div>
+      <div class="mt-2 flex flex-wrap items-center justify-between gap-2 px-2">
+        <p class="text-xs font-semibold text-slate-400">${filtrando
+          ? `${ciclos.length} de ${todosCiclos.length} ciclos · os cards e a linha de total somam só os ciclos filtrados.`
+          : "Sem filtro: cards e total são os da planilha. O ciclo entra no período se cruzar as datas escolhidas."}</p>
+        ${filtrando || funil !== "all" ? html`<button type="button" onClick=${limpar} class="text-xs font-bold text-emerald-700 hover:underline">Limpar filtros</button>` : null}
+      </div>
+    </section>
+
     ${erroCarga && !dados ? html`<${ErroCarga} titulo="Não foi possível carregar a co-produção" onRetry=${recarregar} />` : html`
       <section class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
         <${KpiCardDestaque} rotulo="Custo total compartilhado" valor=${num(t.custo_total) || 0} icone="wallet" tom="dark" carregando=${carregando}
@@ -137,7 +208,7 @@ export function CoproducaoPage() {
 
       <section class="overflow-hidden rounded-[1.5rem] border border-slate-200 bg-white">
         <div class="border-b border-slate-100 p-4 md:px-7"><h2 class="text-xl font-black tracking-tight">Ciclos de operação</h2></div>
-        ${carregando ? html`<div class="p-5"><${Esqueleto} class="h-64" /></div>` : html`<${TabelaCiclos} ciclos=${ciclos} total=${dados && dados.total} />`}
+        ${carregando ? html`<div class="p-5"><${Esqueleto} class="h-64" /></div>` : html`<${TabelaCiclos} ciclos=${ciclos} total=${totalTabela} filtrando=${filtrando} />`}
       </section>
 
       <section class="overflow-hidden rounded-[1.5rem] border border-slate-200 bg-white">
@@ -149,7 +220,7 @@ export function CoproducaoPage() {
           </tr></thead>
           <tbody>
             ${carregando ? html`<tr><td colSpan="6" class="p-12 text-center text-sm font-medium text-slate-500">Carregando...</td></tr>`
-              : !funis.length ? html`<tr><td colSpan="6" class="p-12 text-center text-sm font-medium text-slate-500">Nenhuma regra de funil na planilha.</td></tr>`
+              : !funis.length ? html`<tr><td colSpan="6" class="p-12 text-center text-sm font-medium text-slate-500">${funil !== "all" ? "Nenhuma regra deste funil." : "Nenhuma regra de funil na planilha."}</td></tr>`
               : funis.map((f, i) => html`<tr key=${i} class="border-t border-slate-100 text-sm font-semibold hover:bg-[#f8faf9]">
                   <td class="px-5 py-4 font-black text-slate-800">${f.funil}</td>
                   <td class="px-5 py-4 text-right tabular-nums">${pctFr(f.result_tia)}</td><td class="px-5 py-4 text-right tabular-nums">${pctFr(f.result_fad)}</td>
@@ -162,7 +233,7 @@ export function CoproducaoPage() {
   <//>`;
 }
 
-function TabelaCiclos({ ciclos, total }) {
+function TabelaCiclos({ ciclos, total, filtrando }) {
   const th = "whitespace-nowrap px-3 py-3";
   const grupo = "border-l border-slate-200 px-3 py-2 text-center";
   const td = "whitespace-nowrap px-3 py-3 text-right tabular-nums";
@@ -171,7 +242,7 @@ function TabelaCiclos({ ciclos, total }) {
     const v = (k) => (aberto ? "" : valor(c[k]));
     return html`<tr class=${cn("border-t text-[13.5px] font-semibold", ehTotal ? "border-emerald-200 bg-[#e8f8ef] font-black text-[#064e3b]" : "border-slate-100 hover:bg-[#f8faf9]", aberto && "text-slate-400")}>
       <th scope="row" class=${cn("sticky left-0 z-10 whitespace-nowrap px-3 py-3 text-left", ehTotal ? "bg-[#e8f8ef] font-black" : "bg-white font-black text-slate-800", aberto && "!text-slate-400")}>
-        ${ehTotal ? "TOTAL DO PERÍODO" : c.ciclo}
+        ${ehTotal ? (c._filtro ? "TOTAL DO FILTRO" : "TOTAL DO PERÍODO") : c.ciclo}
         ${aberto ? html`<span class="ml-2 rounded-md border border-dashed border-slate-300 px-1.5 py-0.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">em aberto</span>` : null}
       </th>
       <td class="whitespace-nowrap px-3 py-3">${ehTotal ? "" : periodoBR(c.data_inicial, c.data_final)}</td>
@@ -213,7 +284,7 @@ function TabelaCiclos({ ciclos, total }) {
       </tr>
     </thead>
     <tbody>
-      ${!ciclos.length ? html`<tr><td colSpan="17" class="p-12 text-center text-sm font-medium text-slate-500">Nenhum ciclo na planilha ainda.</td></tr>` : ciclos.map((c) => linha(c, false))}
+      ${!ciclos.length ? html`<tr><td colSpan="17" class="p-12 text-center text-sm font-medium text-slate-500">${filtrando ? "Nenhum ciclo neste filtro." : "Nenhum ciclo na planilha ainda."}</td></tr>` : ciclos.map((c) => linha(c, false))}
       ${total ? linha(total, true) : null}
     </tbody>
   </table></div>`;
