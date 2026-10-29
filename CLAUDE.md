@@ -84,7 +84,7 @@ como backend.
     (leitura; o insert público do teste continua) e `sync_status` (leitura das chaves `metas-planilha`,
     `mentorados-planilha`, `teste-vac-planilha`, `nivelamento-planilha`, `pesquisas-respostas`); RPCs `os_restaurar_cs_metas`/`os_restaurar_diagnostico`.
   - `conteudo`: `conteudo_calendario`, `conteudo_objetivo_resumo`, `conteudo_insights`, `ig_dia`, `ig_perfil`, `ig_post`,
-    `linkedin_posts`, `conteudo_carrosseis`; RPC `linkedin_conexao_status`.
+    `linkedin_posts`, `conteudo_carrosseis`, `conteudo_avatar` (escrita só ADM); RPC `linkedin_conexao_status`.
   - `financeiro`: `fin_contas`, `fin_dre_grupos` (sem insert/delete; trigger só deixa mudar `nome`), `fin_dre_categorias`
     (padrão protegidas por trigger; `fora_dre`), `fin_importacoes`, `fin_lancamentos` (remover = `cancelado_em`), `fin_vendas`,
     `fin_cobrancas` (OS só cria/edita/apaga `origem='manual'`; Hotmart só `observacoes`, trigger); cobranças NUNCA entram sozinhas no Fluxo/DRE — botão "Fluxo/DRE" cria `fin_lancamentos` manual conciliado com `cobranca_ref` ('hotmart:<chave_externa>' | 'manual:<id>', índice único entre não cancelados), `fin_hotmart_pedidos`
@@ -218,7 +218,12 @@ como backend.
   iguais aos de `MODELOS` no front (mantenha os dois). Histórico em `public.conteudo_carrosseis` (SQL
   `scripts/migrations/20261029h_conteudo_carrosseis.sql`; RLS `app.tem_area('conteudo')`, gatilhos `set_updated_at` e
   `zz_os_atividade`): gerar com IA já grava rascunho (origem `ia`), Salvar/Excluir com DESFAZER (escopo `conteudo/carrosseis`);
-  slides em jsonb sem as fotos. Pendente: Fase 3 (fotos do Drive "4. Materiais Visuais/1. Fotos & Videos" em
+  slides em jsonb sem as fotos. **Base do conteúdo e formato livre (29/10/2026)**: antes do tema a Tia escolhe 0+ itens de
+  `public.conteudo_avatar` (dor/desejo/mito/crenca/objecao, 10 de cada, curados das pesquisas da Mentoria
+  `mentoria-fluent-mind` + `pnl-mentoria`; SQL `20261029i_conteudo_avatar.sql`; leitura aba Conteúdo, escrita só ADM);
+  sem tema, a IA escolhe e devolve `tema`. Formato = modelo padrão, `livre` (descrição) ou `referencia` (link + nota;
+  `lerReferencia` em carrossel.ts busca título/og/texto só de host público, redirecionamento manual conferido, 7 s,
+  400 KB; Instagram costuma exigir login, aí a IA segue só a nota). Pendente: Fase 3 (fotos do Drive "4. Materiais Visuais/1. Fotos & Videos" em
   `conteudo_fotos` + bucket; logo branco "Logo Tia do Inglês branco.png" na marca d'água, hoje a forma do balão).
 
 - **Gerador de Materiais das Arenas** (`#/pedagogico/gerador-materiais`, `GeradorMateriaisPage`/`FormArena`/

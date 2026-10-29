@@ -128,7 +128,12 @@ export const FORMATOS = {
   cultura: { nome: "Lista de comportamentos / cultura", min: 5, sugerido: 8 },
   educativo: { nome: "Educativo / regras", min: 6, sugerido: 9 },
   storytelling: { nome: "Storytelling", min: 8, sugerido: 10 },
+  livre: { nome: "Formato novo (descrito)", min: 3, sugerido: 8, livre: true },
+  referencia: { nome: "Seguindo uma referência", min: 3, sugerido: 8, livre: true },
 };
+const FORMATOS_PADRAO = ["lista", "cultura", "educativo", "storytelling"];
+// Base do conteúdo (conteudo_avatar): dores, desejos, mitos, crenças e objeções das pesquisas da Mentoria.
+const CATEGORIAS_AVATAR = [["dor", "Dores"], ["desejo", "Desejos"], ["mito", "Mitos"], ["crenca", "Crenças"], ["objecao", "Objeções"]];
 const MAX_SLIDES = 20; // limite do Instagram
 
 const novo = (modelo, extra = {}) => ({ id: Math.random().toString(36).slice(2, 10), modelo, ...extra });
@@ -638,6 +643,11 @@ async function fetchCarrosseis() {
   if (error) throw error;
   return data || [];
 }
+async function fetchAvatar() {
+  const { data, error } = await os.sb.from("conteudo_avatar").select("id,categoria,ordem,texto,detalhe,origem").eq("ativo", true).order("ordem");
+  if (error) throw error;
+  return data || [];
+}
 // Fotos não vão para o banco (data URL pesada): fica só a referência e o enquadramento.
 const slidesParaSalvar = (slides) => slides.map((s) => ({ ...s }));
 
@@ -672,12 +682,13 @@ export function CarrosselPage() {
   const [atualId, setAtualId] = useState(r0?.atualId || null); // linha de conteudo_carrosseis em edição
   const [status, setStatus] = useState(r0?.status || "rascunho");
   const [historico, setHistorico] = useState(null);
+  const [avatar, setAvatar] = useState(null);
   const [gerando, setGerando] = useState(false);
   const [salvando, setSalvando] = useState(false);
   const [retorno, setRetorno] = useState(r0?.retorno || null); // { correcoes, duvidas, pendencias } da última geração
   const galeria = useRef(null);
   const recarregar = () => fetchCarrosseis().then(setHistorico).catch((e) => { notify(errMsg(e), "err"); setHistorico([]); });
-  useEffect(() => { recarregar(); }, []);
+  useEffect(() => { recarregar(); fetchAvatar().then(setAvatar).catch((e) => { notify(errMsg(e), "err"); setAvatar([]); }); }, []);
   os.useAoDesfazer(ESCOPO, () => { recarregar(); });
 
   useEffect(() => { document.fonts && document.fonts.ready.then(() => setTick((t) => t + 1)); }, []);
@@ -691,10 +702,14 @@ export function CarrosselPage() {
   });
 
   const setB = (k, v) => setBriefing((b) => ({ ...b, [k]: v }));
-  const fmt = FORMATOS[briefing.formato];
+  const fmt = FORMATOS[briefing.formato] || FORMATOS.lista;
+  const modoFormato = briefing.formato === "livre" || briefing.formato === "referencia" ? briefing.formato : "padrao";
+  const baseSel = new Set(briefing.base || []);
+  const toggleBase = (id) => setBriefing((b) => { const n = new Set(b.base || []); n.has(id) ? n.delete(id) : n.add(id); return { ...b, base: [...n] }; });
   const atual = slides[sel];
 
   function montar() {
+    if (briefing.tipo === "carrossel" && FORMATOS[briefing.formato]?.livre) return notify("Montar em branco só funciona com os formatos padrão. Para formato novo ou referência, use Gerar com IA.", "info");
     if (slides.length && !confirm("Substituir os slides atuais pela estrutura nova?")) return;
     let s;
     if (briefing.tipo === "unico") s = [novo(briefing.modeloUnico, briefing.modeloUnico === "capa" ? { headline: "Headline com a *palavra* grifada" } : {})];
@@ -704,7 +719,10 @@ export function CarrosselPage() {
   }
 
   async function gerarComIA() {
-    if (!briefing.tema.trim()) return notify("Escreva o tema do carrossel.", "err");
+    const base = (avatar || []).filter((a) => baseSel.has(a.id)).map(({ categoria, texto, detalhe }) => ({ categoria, texto, detalhe }));
+    if (briefing.tipo === "carrossel" && briefing.formato === "livre" && !String(briefing.formatoDescricao || "").trim()) return notify("Descreva o formato novo.", "err");
+    if (briefing.tipo === "carrossel" && briefing.formato === "referencia" && !/^https?:\/\//i.test(String(briefing.referenciaUrl || "").trim())) return notify("Cole o link da referência (começando com http).", "err");
+    if (!briefing.tema.trim() && !base.length && !(briefing.formato === "livre" && briefing.formatoDescricao)) return notify("Escreva o tema ou escolha pelo menos um item da base.", "err");
     if (briefing.ctaTipo === "comentario" && !String(briefing.palavra || "").trim()) return notify("Escreva a palavra-chave do comentário.", "err");
     if (slides.length && !confirm("Substituir os slides atuais pelo roteiro da IA?")) return;
     setGerando(true);
@@ -712,7 +730,8 @@ export function CarrosselPage() {
       const d = await os.aiCall("carrossel_roteiro", {
         tema: briefing.tema, tipo: briefing.tipo, formato: briefing.formato, qtd: briefing.qtd,
         cta_tipo: briefing.ctaTipo || "bio", palavra: briefing.palavra || "", modelo_unico: briefing.modeloUnico,
-        observacoes: briefing.observacoes || "",
+        observacoes: briefing.observacoes || "", base,
+        formato_descricao: briefing.formatoDescricao || "", referencia_url: briefing.referenciaUrl || "",
       });
       if (!d || d.configured === false) return notify((d && d.error) || "A IA não está conectada.", "err");
       if (d.paused || d.limite_diario) return notify(d.error, "err");
@@ -723,12 +742,15 @@ export function CarrosselPage() {
       if (!s.length) return notify("A IA não devolveu slides. Tente de novo.", "err");
       if (briefing.youtube && briefing.tipo !== "unico") s = comVersaoYoutube(s);
       const leg = d.legenda || "";
+      const temaFinal = briefing.tema.trim() || d.tema || "Carrossel";
+      if (!briefing.tema.trim()) setB("tema", temaFinal);
+      if (briefing.formato === "referencia" && d.referencia_lida === false) notify("Não consegui abrir o link da referência. A IA seguiu a sua descrição.", "info");
       const ret = { correcoes: d.correcoes || [], duvidas: d.duvidas || [], pendencias: d.pendencias || [] };
       setSlides(s); setLegenda(leg); setSel(0); setRetorno(ret); setStatus("rascunho");
       // Já entra no histórico como rascunho (origem ia); DESFAZER apaga.
       const { data: criado, error } = await os.sb.from(TABELA).insert({
-        tema: briefing.tema.trim(), tipo: briefing.tipo, formato: briefing.tipo === "unico" ? null : briefing.formato,
-        briefing, slides: slidesParaSalvar(s), legenda: leg, origem: "ia",
+        tema: temaFinal, tipo: briefing.tipo, formato: briefing.tipo === "unico" ? null : briefing.formato,
+        briefing: { ...briefing, tema: temaFinal }, slides: slidesParaSalvar(s), legenda: leg, origem: "ia",
       }).select("*").single();
       if (error) { setAtualId(null); notify("Roteiro gerado, mas não salvou no histórico: " + errMsg(error), "err"); }
       else {
@@ -880,28 +902,70 @@ export function CarrosselPage() {
       <p class="mt-1 text-xs text-muted">A IA escreve o roteiro nos modelos do Manual de carrosséis (guia na Base de Conhecimento), você revisa e exporta PNG 1080 × 1350. O banco de fotos do Drive chega na próxima fase.</p>
 
       <div class="mt-5 rounded-[1.6rem] border border-line bg-card shadow-card p-5">
+        <div class="flex flex-wrap items-baseline justify-between gap-2">
+          <div class="text-sm font-semibold text-ink">1. Base do conteúdo <span class="font-normal text-muted">(opcional: escolha uma, várias ou nenhuma)</span></div>
+          <div class="text-xs text-muted">${baseSel.size ? `${baseSel.size} escolhida${baseSel.size > 1 ? "s" : ""} · ` : ""}Fonte: pesquisas da Mentoria
+            ${baseSel.size ? html` · <button type="button" class="underline hover:text-ink" onClick=${() => setB("base", [])}>limpar</button>` : null}</div>
+        </div>
+        ${avatar === null ? html`<p class="mt-3 text-sm text-muted">Carregando…</p>` : html`
+          <div class="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            ${CATEGORIAS_AVATAR.map(([cat, nome]) => html`
+              <div class="rounded-xl border border-line p-3">
+                <div class="text-xs font-bold uppercase tracking-wide text-muted">${nome}</div>
+                <div class="mt-2 flex flex-col gap-1.5">
+                  ${avatar.filter((a) => a.categoria === cat).map((a) => html`
+                    <button type="button" key=${a.id} title=${a.detalhe || ""} onClick=${() => toggleBase(a.id)}
+                      class=${cx("rounded-lg border px-2.5 py-1.5 text-left text-[13px] leading-snug transition",
+                        baseSel.has(a.id) ? "border-emerald-500 bg-brand-light font-medium text-brand-dark" : "border-line text-ink/75 hover:bg-black/[0.04]")}>
+                      ${a.texto}
+                    </button>`)}
+                </div>
+              </div>`)}
+          </div>`}
+      </div>
+
+      <div class="mt-4 rounded-[1.6rem] border border-line bg-card shadow-card p-5">
         <div class="grid gap-4 lg:grid-cols-[1fr_auto]">
           <label class="block">
-            <span class="text-xs font-medium uppercase tracking-wide text-muted">Tema</span>
-            <input class=${cx(inputCls, "mt-1")} value=${briefing.tema} onInput=${(e) => setB("tema", e.target.value)} placeholder="Ex.: 5 palavras com duplo sentido" />
+            <span class="text-sm font-semibold text-ink">2. Tema</span>
+            <input class=${cx(inputCls, "mt-1")} value=${briefing.tema} onInput=${(e) => setB("tema", e.target.value)}
+              placeholder=${baseSel.size ? "Opcional: sem tema, a IA escolhe um a partir da base" : "Ex.: 5 palavras com duplo sentido"} />
           </label>
           <div>
-            <div class="text-xs font-medium uppercase tracking-wide text-muted">Tipo</div>
+            <div class="text-sm font-semibold text-ink">Tipo</div>
             <div class="mt-1 flex gap-2">
               <${Radio} val="carrossel" cur=${briefing.tipo} set=${(v) => setB("tipo", v)}>Carrossel<//>
               <${Radio} val="unico" cur=${briefing.tipo} set=${(v) => setB("tipo", v)}>Post único<//>
             </div>
           </div>
         </div>
-        <div class="mt-4 flex flex-wrap items-end gap-x-6 gap-y-3">
-          ${briefing.tipo === "carrossel" ? html`
-            <label class="block">
-              <span class="text-xs font-medium uppercase tracking-wide text-muted">Formato</span>
-              <select class=${cx(inputCls, "mt-1")} value=${briefing.formato}
-                onChange=${(e) => { const f = e.target.value; setBriefing((b) => ({ ...b, formato: f, qtd: FORMATOS[f].sugerido })); }}>
-                ${Object.entries(FORMATOS).map(([k, f]) => html`<option value=${k}>${f.nome}</option>`)}
-              </select>
-            </label>
+
+        ${briefing.tipo === "carrossel" ? html`
+          <div class="mt-5">
+            <div class="text-sm font-semibold text-ink">3. Formato</div>
+            <div class="mt-1 flex flex-wrap gap-2">
+              <${Radio} val="padrao" cur=${modoFormato} set=${() => setBriefing((b) => ({ ...b, formato: FORMATOS_PADRAO.includes(b.formatoPadrao) ? b.formatoPadrao : "lista" }))}>Modelo padrão<//>
+              <${Radio} val="livre" cur=${modoFormato} set=${() => setBriefing((b) => ({ ...b, formatoPadrao: FORMATOS_PADRAO.includes(b.formato) ? b.formato : b.formatoPadrao, formato: "livre" }))}>Descrever um novo<//>
+              <${Radio} val="referencia" cur=${modoFormato} set=${() => setBriefing((b) => ({ ...b, formatoPadrao: FORMATOS_PADRAO.includes(b.formato) ? b.formato : b.formatoPadrao, formato: "referencia" }))}>Seguir uma referência<//>
+            </div>
+            <div class="mt-3">
+              ${modoFormato === "padrao" ? html`
+                <select class=${cx(inputCls, "max-w-md")} value=${briefing.formato}
+                  onChange=${(e) => { const f = e.target.value; setBriefing((b) => ({ ...b, formato: f, formatoPadrao: f, qtd: FORMATOS[f].sugerido })); }}>
+                  ${FORMATOS_PADRAO.map((k) => html`<option value=${k}>${FORMATOS[k].nome}</option>`)}
+                </select>` : modoFormato === "livre" ? html`
+                <textarea rows="3" class=${inputCls} value=${briefing.formatoDescricao || ""} onInput=${(e) => setB("formatoDescricao", e.target.value)}
+                  placeholder="Ex.: pergunta na capa, cada slide responde com um erro comum e a forma certa, último slide com um desafio para comentar"></textarea>` : html`
+                <div class="grid gap-2">
+                  <input class=${inputCls} value=${briefing.referenciaUrl || ""} onInput=${(e) => setB("referenciaUrl", e.target.value.trim())}
+                    placeholder="Cole o link do post, carrossel ou página de referência" />
+                  <textarea rows="2" class=${inputCls} value=${briefing.formatoDescricao || ""} onInput=${(e) => setB("formatoDescricao", e.target.value)}
+                    placeholder="O que aproveitar da referência (opcional). Ex.: a sequência de perguntas e respostas; o gancho da capa"></textarea>
+                  <p class="text-xs text-muted">Links do Instagram costumam pedir login e nem sempre abrem; descreva o que você quer copiar para garantir.</p>
+                </div>`}
+            </div>
+          </div>
+          <div class="mt-4 flex flex-wrap items-end gap-x-6 gap-y-3">
             <label class="block w-32">
               <span class="text-xs font-medium uppercase tracking-wide text-muted">Nº de imagens</span>
               <input type="number" min=${fmt.min} max=${MAX_SLIDES} class=${cx(inputCls, "mt-1")} value=${briefing.qtd}
@@ -910,17 +974,19 @@ export function CarrosselPage() {
             <label class="flex items-center gap-2 pb-2 text-sm text-ink/80">
               <input type="checkbox" checked=${briefing.youtube} onChange=${(e) => setB("youtube", e.target.checked)} />
               Também vai para o YouTube (slide extra "link da legenda")
-            </label>` : html`
-            <label class="block">
-              <span class="text-xs font-medium uppercase tracking-wide text-muted">Modelo</span>
-              <select class=${cx(inputCls, "mt-1")} value=${briefing.modeloUnico} onChange=${(e) => setB("modeloUnico", e.target.value)}>
-                ${Object.entries(MODELOS).map(([k, m]) => html`<option value=${k}>${m.nome}</option>`)}
-              </select>
-            </label>`}
-        </div>
-        <div class="mt-4 grid gap-4 lg:grid-cols-[auto_1fr]">
+            </label>
+            <span class="pb-2 text-xs text-muted">${fmt.nome}: mínimo ${fmt.min}, sugerido ${fmt.sugerido} imagens (até ${MAX_SLIDES}).</span>
+          </div>` : html`
+          <label class="mt-5 block max-w-md">
+            <span class="text-sm font-semibold text-ink">3. Modelo do post</span>
+            <select class=${cx(inputCls, "mt-1")} value=${briefing.modeloUnico} onChange=${(e) => setB("modeloUnico", e.target.value)}>
+              ${Object.entries(MODELOS).map(([k, m]) => html`<option value=${k}>${m.nome}</option>`)}
+            </select>
+          </label>`}
+
+        <div class="mt-5 grid gap-4 lg:grid-cols-[auto_1fr]">
           <div>
-            <div class="text-xs font-medium uppercase tracking-wide text-muted">CTA</div>
+            <div class="text-sm font-semibold text-ink">4. CTA</div>
             <div class="mt-1 flex flex-wrap items-center gap-2">
               <${Radio} val="bio" cur=${briefing.ctaTipo || "bio"} set=${(v) => setB("ctaTipo", v)}>Link da bio<//>
               <${Radio} val="comentario" cur=${briefing.ctaTipo || "bio"} set=${(v) => setB("ctaTipo", v)}>Comentário com palavra-chave<//>
@@ -929,14 +995,14 @@ export function CarrosselPage() {
             </div>
           </div>
           <label class="block">
-            <span class="text-xs font-medium uppercase tracking-wide text-muted">Observações para a IA (opcional)</span>
+            <span class="text-sm font-semibold text-ink">Observações para a IA <span class="font-normal text-muted">(opcional)</span></span>
             <input class=${cx(inputCls, "mt-1")} value=${briefing.observacoes || ""} onInput=${(e) => setB("observacoes", e.target.value)}
               placeholder="Ex.: usar a história do carro esquecido no mercado; foco em quem viaja" />
           </label>
         </div>
-        <div class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div class="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2">
           <${Btn} onClick=${gerarComIA} loading=${gerando} disabled=${travado}>${gerando ? "Escrevendo o roteiro…" : "Gerar com IA"}<//>
-          <${Btn} variant="ghost" onClick=${montar} disabled=${gerando || travado}>Montar em branco<//>
+          ${modoFormato === "padrao" || briefing.tipo === "unico" ? html`<${Btn} variant="ghost" onClick=${montar} disabled=${gerando || travado}>Montar em branco<//>` : null}
           <span class="text-xs text-muted">Cada geração consome créditos da IA.</span>
           <div class="flex items-center gap-2 pb-1 text-xs text-muted">
             Exemplos:
@@ -944,12 +1010,11 @@ export function CarrosselPage() {
             <button type="button" class="underline hover:text-ink" onClick=${() => carregarExemplo("casa-americano")}>Casa de um americano</button>
           </div>
         </div>
-        ${briefing.tipo === "carrossel" ? html`<p class="mt-2 text-xs text-muted">${fmt.nome}: mínimo ${fmt.min}, sugerido ${fmt.sugerido} imagens (até ${MAX_SLIDES}).</p>` : null}
       </div>
 
       ${!slides.length ? html`
         <div class="mt-6 rounded-[1.6rem] border border-dashed border-slate-200 bg-white/80 px-6 py-14 text-center text-sm text-muted">
-          Escolha o formato e clique em <b>Montar estrutura</b>, ou abra um dos exemplos.
+          Escolha a base, o tema e o formato e clique em <b>Gerar com IA</b>, ou abra um dos exemplos.
         </div>` : html`
         ${retorno && (retorno.correcoes.length || retorno.duvidas.length || retorno.pendencias.length) ? html`
           <div class="mt-6 grid gap-4 lg:grid-cols-3">
