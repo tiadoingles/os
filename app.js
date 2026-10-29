@@ -126,12 +126,23 @@ function marcarAtividade(forcar) {
   const agora = Date.now();
   if (forcar || agora - ultimaAtividade() > 30 * 1000) lsSet(CHAVE_ATIVIDADE, String(agora));
 }
+// Último acesso (Administração → Usuários): grava profiles.ultimo_acesso_em no máximo a cada 5 min (todas as abas).
+// "Entrou no sistema" vai para o histórico (os_atividade) no login ou ao voltar depois de 30 min sem acesso.
+const CHAVE_ACESSO = "os.acessoRegistrado";
+function registrarAcesso(login) {
+  const agora = Date.now(), ult = Number(lsGet(CHAVE_ACESSO)) || 0;
+  const entrou = login || agora - ult > 30 * 60 * 1000;
+  if (!entrou && agora - ult < 5 * 60 * 1000) return;
+  lsSet(CHAVE_ACESSO, String(agora));
+  // setTimeout(0): fora do lock do GoTrue quando chamado de dentro do onAuthStateChange.
+  setTimeout(() => { sb.rpc("os_registrar_acesso", { p_login: entrou }).then(({ error }) => error && console.warn("acesso:", error.message)); }, 0);
+}
 function inativoDemais() { const u = ultimaAtividade(); return !!u && Date.now() - u > INATIVIDADE_MS; }
 function conferirInatividade() { if (sessaoAtiva && inativoDemais()) encerrarSessao(MSG_INATIVIDADE); }
 for (const ev of ["pointerdown", "mousemove", "keydown", "touchstart", "wheel", "scroll"]) {
   addEventListener(ev, () => {
     if (!sessaoAtiva) return;
-    if (inativoDemais()) conferirInatividade(); else marcarAtividade(false);
+    if (inativoDemais()) conferirInatividade(); else { marcarAtividade(false); registrarAcesso(false); }
   }, { passive: true, capture: true });
 }
 document.addEventListener("visibilitychange", () => {
@@ -2366,9 +2377,18 @@ function AdminPage({ me }) {
   const [showCreate, setShowCreate] = useState(false);
   const [editando, setEditando] = useState(null);
   const [tempResult, setTempResult] = useState(null);
+  const [historico, setHistorico] = useState(null);
 
   const load = useCallback(async () => {
-    try { const r = await adminCall({ action: "list" }); setUsers(r.users || []); }
+    try {
+      // Último acesso vem direto de profiles (ADM lê todos pela RLS); a Edge Function admin-users não traz.
+      const [r, acessos] = await Promise.all([
+        adminCall({ action: "list" }),
+        sb.from("profiles").select("id, ultimo_acesso_em").then(({ data }) => data || [], () => []),
+      ]);
+      const mapa = Object.fromEntries(acessos.map((a) => [a.id, a.ultimo_acesso_em]));
+      setUsers((r.users || []).map((u) => ({ ...u, ultimo_acesso_em: mapa[u.id] || null })));
+    }
     catch (e) { notify(errMsg(e), "err"); setUsers([]); }
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -2424,21 +2444,23 @@ function AdminPage({ me }) {
 
       ${tab === "usuarios" ? html`
       <div>
-        <p class="mt-3 text-sm text-muted">Crie contas, escolha as abas de cada pessoa (ou ADM) e gere senhas temporárias. Não é necessário e-mail de confirmação.</p>
+        <p class="mt-3 text-sm text-muted">Crie contas, escolha as abas de cada pessoa (ou ADM) e gere senhas temporárias. Não é necessário e-mail de confirmação. Clique no nome para ver o histórico do que a pessoa fez no OS.</p>
 
         <div class="mt-4 overflow-x-auto rounded-[1.35rem] border border-line bg-white shadow-card">
           ${users === null
             ? html`<div class="p-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
             : html`
-            <table class="w-full min-w-[640px] text-left text-sm">
+            <table class="w-full min-w-[760px] text-left text-sm">
               <thead class="border-b border-line text-xs uppercase tracking-wide text-muted">
-                <tr><th class="px-4 py-3 font-medium">Pessoa</th><th class="px-4 py-3 font-medium">Abas</th><th class="px-4 py-3 font-medium">Desde</th><th class="px-4 py-3"></th></tr>
+                <tr><th class="px-4 py-3 font-medium">Pessoa</th><th class="px-4 py-3 font-medium">Abas</th><th class="px-4 py-3 font-medium">No sistema desde</th><th class="px-4 py-3 font-medium">Último acesso</th><th class="px-4 py-3"></th></tr>
               </thead>
               <tbody class="divide-y divide-line">
                 ${users.map((u) => html`
                   <tr key=${u.id}>
                     <td class="px-4 py-3">
-                      <div class="font-medium text-ink">${u.nome || "—"}${u.id === me.id ? html`<span class="ml-1 text-xs font-normal text-muted">(você)</span>` : null}</div><div class="text-xs text-muted">${u.email}</div>
+                      <button type="button" class="group text-left" onClick=${() => setHistorico(u)} title="Ver o histórico do que esta pessoa fez no OS">
+                        <div class="font-medium text-ink group-hover:text-emerald-700 group-hover:underline">${u.nome || "—"}${u.id === me.id ? html`<span class="ml-1 text-xs font-normal text-muted">(você)</span>` : null}</div><div class="text-xs text-muted">${u.email}</div>
+                      </button>
                       ${u.precisa_trocar_senha ? html`<div class="mt-1"><${Badge} class=${PILL_WARN}>Troca de senha pendente<//></div>` : null}
                     </td>
                     <td class="px-4 py-3">
@@ -2446,8 +2468,10 @@ function AdminPage({ me }) {
                       ${u.id !== me.id ? html`<button class="mt-1.5 block text-xs font-medium text-emerald-700 hover:underline" onClick=${() => setEditando(u)}>Editar abas</button>` : null}
                     </td>
                     <td class="px-4 py-3 text-muted">${fmtDate(u.created_at)}</td>
+                    <td class="px-4 py-3 text-muted" title=${u.ultimo_acesso_em ? fmtDate(u.ultimo_acesso_em, true) : ""}>${u.ultimo_acesso_em ? haQuantoTempo(u.ultimo_acesso_em) : "Nunca acessou"}</td>
                     <td class="px-4 py-3 text-right">
                       <div class="flex justify-end gap-2">
+                        <button class="text-xs font-medium text-emerald-700 hover:underline" onClick=${() => setHistorico(u)}>Histórico</button>
                         <button class="text-xs text-muted hover:text-ink" onClick=${() => resetPw(u)}>Nova senha</button>
                         ${u.id !== me.id ? html`<button class="text-xs text-red-500 hover:text-red-700" onClick=${() => removeUser(u)}>Excluir</button>` : null}
                       </div>
@@ -2461,6 +2485,8 @@ function AdminPage({ me }) {
       ${showCreate && html`<${CreateUserModal} onClose=${() => setShowCreate(false)}
         onCreated=${async (res) => { setShowCreate(false); setTempResult(res); await load(); }} />`}
 
+      ${historico && html`<${HistoricoUsuarioModal} u=${historico} onClose=${() => setHistorico(null)} />`}
+
       ${editando && html`<${AcessoModal} u=${editando} onClose=${() => setEditando(null)} onSalvar=${(v) => salvarAcesso(editando, v)} />`}
 
       ${tempResult && html`
@@ -2473,6 +2499,112 @@ function AdminPage({ me }) {
           <div class="mt-4 flex justify-end"><${Btn} onClick=${() => { navigator.clipboard && navigator.clipboard.writeText(`E-mail: ${tempResult.email}\nSenha: ${tempResult.senha}`); notify("Copiado.", "ok"); }}>Copiar<//></div>
         <//>`}
     </div>`;
+}
+
+/* ---------- Histórico do usuário (os_atividade; só ADM lê) ---------- */
+function haQuantoTempo(iso) {
+  const min = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  if (min < 5) return "Agora há pouco";
+  if (min < 60) return `Há ${min} min`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `Há ${h} h`;
+  const d = Math.floor(h / 24);
+  if (d === 1) return "Ontem";
+  if (d < 30) return `Há ${d} dias`;
+  return fmtDate(iso);
+}
+// Nome amigável de cada tabela no histórico (área do OS + o que é). Tabela fora da lista aparece pelo nome técnico.
+const TABELAS_HISTORICO = {
+  kb_documents: "Base de Conhecimento · documento", kb_sections: "Base de Conhecimento · seção", kb_document_versions: "Base de Conhecimento · versão",
+  agenda_eventos: "Agenda · evento", aulas_agenda: "Agenda · aula", arena_regras: "Pedagógico · regras das Arenas",
+  materiais_pedidos: "Pedagógico · material", slides_pedidos: "Pedagógico · slides", fluent_mind_flashcards_banco: "Pedagógico · flash card",
+  livros_envios: "Pedagógico · envio de livro", nivelamento_respostas: "Pedagógico · nivelamento",
+  cs_mentorados: "CS · mentorado", cs_mentorado_notas: "CS · nota do mentorado", cs_mentorado_eventos: "CS · evento do mentorado",
+  cs_mentorado_vinculos: "CS · vínculo do mentorado", cs_metas: "CS · metas", cs_diagnosticos: "CS · diagnóstico", cs_nivelamento: "CS · nivelamento",
+  cs_pesquisa_respostas: "CS · pesquisa", cs_teste_vac: "CS · teste VAC", cs_clint: "CS · Clint", cs_whatsapp_dia: "CS · WhatsApp", cs_whatsapp_cobertura: "CS · WhatsApp",
+  faq_interacoes: "CS · FAQ", farol_config: "Comercial · farol", farol_indicadores: "Comercial · farol", pesquisa_avatar: "Comercial · pesquisa de avatar",
+  conteudo_calendario: "Conteúdo · calendário", conteudo_insights: "Conteúdo · insight", conteudo_objetivo_resumo: "Conteúdo · objetivo",
+  linkedin_posts: "Conteúdo · post do LinkedIn", ig_post: "Conteúdo · post do Instagram", ig_perfil: "Conteúdo · Instagram", ig_dia: "Conteúdo · Instagram",
+  fin_lancamentos: "Financeiro · lançamento", fin_contas: "Financeiro · conta bancária", fin_cobrancas: "Financeiro · cobrança",
+  fin_importacoes: "Financeiro · importação", fin_vendas: "Financeiro · venda", fin_dre_categorias: "Financeiro · categoria da DRE",
+  fin_dre_grupos: "Financeiro · linha da DRE", fin_coproducao: "Financeiro · coprodução", fin_hotmart_pedidos: "Financeiro · pedido à Hotmart",
+  profiles: "Administração · perfil", app_config: "Administração · configuração", os_ferramentas: "Ferramentas", os_squad_agentes: "Squad de agentes",
+};
+const ACAO_HISTORICO = {
+  entrou: ["Entrou no sistema", PILL_NEUTRAL], criou: ["Criou", PILL_OK], editou: ["Editou", PILL_WARN], excluiu: ["Excluiu", PILL_ERR],
+};
+const POR_PAGINA_HISTORICO = 100;
+
+function HistoricoUsuarioModal({ u, onClose }) {
+  const [itens, setItens] = useState(null);
+  const [fim, setFim] = useState(false);
+  const [carregando, setCarregando] = useState(false);
+  const [semAcessos, setSemAcessos] = useState(false);
+
+  const carregar = useCallback(async (antesDe) => {
+    setCarregando(true);
+    try {
+      let q = sb.from("os_atividade").select("id, quando, acao, tabela, item, campos").eq("user_id", u.id);
+      if (semAcessos) q = q.neq("acao", "entrou");
+      if (antesDe) q = q.lt("id", antesDe);
+      const { data, error } = await q.order("id", { ascending: false }).limit(POR_PAGINA_HISTORICO);
+      if (error) throw error;
+      setItens((atual) => (antesDe ? [...(atual || []), ...data] : data));
+      setFim(data.length < POR_PAGINA_HISTORICO);
+    } catch (e) { notify(errMsg(e), "err"); setItens((a) => a || []); }
+    finally { setCarregando(false); }
+  }, [u.id, semAcessos]);
+  useEffect(() => { setItens(null); carregar(null); }, [carregar]);
+
+  // Agrupa por dia (data local).
+  const dias = [];
+  for (const it of itens || []) {
+    const dia = new Date(it.quando).toLocaleDateString("pt-BR", { weekday: "long", day: "2-digit", month: "long", year: "numeric" });
+    if (!dias.length || dias[dias.length - 1].dia !== dia) dias.push({ dia, itens: [] });
+    dias[dias.length - 1].itens.push(it);
+  }
+
+  return html`
+    <${Modal} title=${"Histórico · " + (u.nome || u.email)} onClose=${onClose} wide>
+      <div class="flex flex-wrap items-center justify-between gap-3 text-sm text-muted">
+        <div>
+          <div>No sistema desde <b class="text-ink">${fmtDate(u.created_at)}</b></div>
+          <div>Último acesso: <b class="text-ink">${u.ultimo_acesso_em ? fmtDate(u.ultimo_acesso_em, true) : "nunca acessou"}</b></div>
+        </div>
+        <label class="flex cursor-pointer items-center gap-2 text-xs font-medium">
+          <input type="checkbox" class="h-4 w-4 accent-emerald-600" checked=${semAcessos} onChange=${(e) => setSemAcessos(e.target.checked)} />
+          Esconder as entradas no sistema
+        </label>
+      </div>
+      <p class="mt-2 text-xs text-muted">O histórico registra o que a pessoa criou, editou e excluiu no OS, e quando entrou. Começou a ser gravado em 29/10/2026; antes disso não há registro. Atualizações automáticas (sincronizações) não aparecem aqui.</p>
+
+      <div class="mt-4 max-h-[60vh] overflow-y-auto pr-1">
+        ${itens === null
+          ? html`<div class="p-6 text-sm text-muted"><span class="spinner mr-2"></span>Carregando…</div>`
+          : !itens.length
+            ? html`<${Empty} title="Nenhuma atividade registrada ainda" icon="🕘" />`
+            : dias.map((g) => html`
+              <div class="mb-4">
+                <div class="sticky top-0 z-10 bg-white py-1.5 text-xs font-semibold uppercase tracking-wide text-muted">${g.dia}</div>
+                <ul class="divide-y divide-line rounded-xl border border-line">
+                  ${g.itens.map((it) => {
+                    const [rot, pill] = ACAO_HISTORICO[it.acao] || [it.acao, PILL_NEUTRAL];
+                    return html`<li key=${it.id} class="flex items-start gap-3 px-3 py-2.5 text-sm">
+                      <span class="w-12 shrink-0 pt-0.5 text-xs tabular-nums text-muted">${new Date(it.quando).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}</span>
+                      <${Badge} class=${pill}>${rot}<//>
+                      ${it.acao === "entrou" ? null : html`<div class="min-w-0 flex-1">
+                        <div class="text-ink">${TABELAS_HISTORICO[it.tabela] || it.tabela}${it.item ? html`: <b class="font-medium">${it.item}</b>` : null}</div>
+                        ${it.campos && it.campos.length ? html`<div class="mt-0.5 truncate text-xs text-muted" title=${it.campos.join(", ")}>Campos alterados: ${it.campos.join(", ")}</div>` : null}
+                      </div>`}
+                    </li>`;
+                  })}
+                </ul>
+              </div>`)}
+        ${itens && itens.length && !fim ? html`<div class="flex justify-center py-2">
+          <${Btn} variant="ghost" disabled=${carregando} onClick=${() => carregar(itens[itens.length - 1].id)}>${carregando ? "Carregando…" : "Carregar mais"}<//>
+        </div>` : null}
+      </div>
+    <//>`;
 }
 
 function SincronizacoesPage() {
@@ -11065,6 +11197,7 @@ function App() {
       if (s && (event === "SIGNED_IN" || event === "INITIAL_SESSION") && !tinha) {
         if (event === "SIGNED_IN" || !ultimaAtividade()) marcarAtividade(true);
         if (event === "INITIAL_SESSION") conferirSessao(); // valida no servidor (getUser)
+        registrarAcesso(event === "SIGNED_IN");
       }
       if (event === "SIGNED_OUT" && tinha && !saindoAgora && !avisoSaida &&
           Date.now() - (Number(lsGet(CHAVE_SAIDA)) || 0) > 10 * 1000) {

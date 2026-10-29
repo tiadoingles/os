@@ -279,6 +279,13 @@ Bloco "Segurança da sessão" no topo do `app.js`:
 - **Inatividade**: `INATIVIDADE_MS` (8 h). Última interação em `localStorage os.ultimaAtividade` (todas as abas, grava a
   cada 30 s); confere a cada minuto, no foco e ao voltar para a aba; também ao abrir. Sai com "Você saiu por inatividade
   (8 h). Entre novamente." "Sair" = `sairDoSistema()` (marca `os.saidaIntencional` para as outras abas).
+- **Último acesso e histórico** (Administração → Usuários, v87; migration `20261029f_os_atividade_usuarios.sql`):
+  `registrarAcesso()` chama a rpc `os_registrar_acesso` (grava `profiles.ultimo_acesso_em`, no máx. 1x/5 min; com
+  `p_login` = login ou volta após 30 min, também grava "entrou" em `os_atividade`). Gatilho `zz_os_atividade`
+  (`app.os_atividade_registrar`) em TODAS as tabelas public (menos logs/caches/sync_status/snapshots) grava criou/editou/
+  excluiu só quando há `auth.uid()` (sincronizações/Edge Functions não entram), com resumo (nome/título) e campos
+  alterados. **Tabela nova no OS já ganha o gatilho? Não**: rode o mesmo `create trigger zz_os_atividade` nela e
+  ponha o nome amigável em `TABELAS_HISTORICO` (app.js). Só ADM lê; retenção 365 dias.
 
 ## Convenções
 
