@@ -241,6 +241,10 @@ como backend.
   "Ainda fora do manual" com a foto a fazer). Não repete foto do mesmo carrossel nem as já usadas no histórico. Botão "IA escolhe a
   foto" no editor. Base do conteúdo virou um campo único com várias escolhas e busca (`BaseSelect`). Imagem gerada por IA: a Tia
   decidiu por ora só fotos do Drive (sem gerador externo).
+  **Custo (30/10/2026, v95)**: a Tia achou caro no Sonnet (~R$0,22 o roteiro). As ações `carrossel_*` usam `MODEL_CARROSSEL`
+  (env `AI_MODEL_CARROSSEL`, padrão = Haiku `MODEL_RAPIDO`). E a foto sai primeiro de `fotoPorEtiqueta` no front (grátis: 2+
+  palavras da foto_sugerida batendo com etiquetas/descrição, fora as já usadas); só sem casamento chama `carrossel_foto`.
+  Quanto mais fotos etiquetadas, menos IA.
 
 - **Gerador de Materiais das Arenas** (`#/pedagogico/gerador-materiais`, `GeradorMateriaisPage`/`FormArena`/
   `PedidoArena`/`RegrasArena`; SQL em `scripts/migrations/20261016_arenas_previa_regras.sql`, teste de RLS em

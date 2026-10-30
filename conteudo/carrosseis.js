@@ -671,13 +671,34 @@ async function fetchCatalogo(forcar) {
   _catalogo = out;
   return out;
 }
-/** A IA olha as miniaturas do banco e escolhe a foto do slide (ação carrossel_foto da função ai). Banco vazio = sincroniza antes. */
+/** Custo zero: casa a foto_sugerida com as etiquetas/descrição que a Tia escreveu nas fotos (pasta e nome do arquivo não contam:
+ *  são genéricos demais). Precisa de 2+ palavras em comum; empate = sorteio, para não repetir sempre a mesma. */
+async function fotoPorEtiqueta({ descricao, excluir }) {
+  const ps = palavrasSug(descricao);
+  if (ps.length < 2) return null;
+  let uso = {};
+  try { uso = await fetchUsoFotos(); } catch { /* sem histórico: só não exclui as já usadas */ }
+  const fora = new Set([...(excluir || []), ...Object.keys(uso)]);
+  let melhor = [], nota = 1;
+  for (const f of _catalogo || []) {
+    if (fora.has(f.drive_id) || (!(f.etiquetas || []).length && !f.descricao)) continue;
+    const hay = new Set(palavrasSug([(f.etiquetas || []).join(" "), f.descricao].join(" ")));
+    const n = ps.filter((p) => hay.has(p)).length;
+    if (n > nota) { nota = n; melhor = [f]; } else if (n === nota && n > 1) melhor.push(f);
+  }
+  if (!melhor.length) return null;
+  const f = melhor[Math.floor(Math.random() * melhor.length)];
+  return { achou: true, foto: f, rosto_y: 40, motivo: `Pelas etiquetas (${nota} palavras batem com a cena), sem custo de IA.`, origem: "etiquetas" };
+}
+/** Primeiro tenta pelas etiquetas (grátis); se nenhuma bater, a IA olha as miniaturas (carrossel_foto, Haiku). Banco vazio = sincroniza antes. */
 async function escolherFotoIA({ descricao, texto, tema, excluir }) {
   if (!(await fetchCatalogo()).length) {
     const r = await (await chamarFotosDrive({ op: "sync" })).json();
     if (!r.ok) throw new Error(r.error || "Não consegui buscar a lista do Drive.");
     await fetchCatalogo(true);
   }
+  const local = await fotoPorEtiqueta({ descricao, excluir });
+  if (local) return local;
   const d = await os.aiCall("carrossel_foto", { descricao, texto, tema, excluir });
   if (!d || d.configured === false || d.paused || d.limite_diario) throw new Error((d && d.error) || "A IA não está conectada.");
   if (d.error) throw new Error(d.error);
@@ -1331,7 +1352,7 @@ function EditorSlide({ s, i, upd, fotos, escolherFoto, reescrever, travado, usoF
             <div class="text-xs font-medium uppercase tracking-wide text-muted">${rot}</div>
             ${s.foto_sugerida ? html`<div class="mt-1 rounded-lg bg-slate-50 px-2.5 py-1.5 text-xs text-ink/80">Foto sugerida pela IA: ${s.foto_sugerida}</div>` : null}
             <div class="mt-1 flex flex-wrap items-center gap-2">
-              <${Btn} variant="ghost" onClick=${fotoIA} loading=${escolhendo} disabled=${travado}>${escolhendo ? "A IA está olhando as fotos…" : s.foto && s.foto.driveId ? "IA escolhe outra" : "IA escolhe a foto"}<//>
+              <${Btn} variant="ghost" onClick=${fotoIA} loading=${escolhendo} disabled=${travado}>${escolhendo ? "Procurando a foto…" : s.foto && s.foto.driveId ? "IA escolhe outra" : "IA escolhe a foto"}<//>
               <${Btn} variant="ghost" onClick=${() => setBanco(true)} disabled=${travado}>Escolher do banco de fotos<//>
               <label class="cursor-pointer text-xs text-muted underline hover:text-ink">ou enviar do computador
                 <input type="file" accept="image/*" class="hidden" onChange=${(e) => { escolherFoto(i, e.target.files[0]); e.target.value = ""; }} /></label>

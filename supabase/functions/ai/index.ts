@@ -17,6 +17,7 @@ const WORKSPACE_ID_ENV = Deno.env.get("ANTHROPIC_WORKSPACE_ID") ?? "";
 // MODEL_RAPIDO = Haiku atual para tarefa mecânica e curta (classify: sugerir a seção de um documento).
 const MODEL = Deno.env.get("AI_MODEL") ?? "claude-sonnet-5-5";
 const MODEL_RAPIDO = Deno.env.get("AI_MODEL_RAPIDO") ?? "claude-haiku-5-5";
+const MODEL_CARROSSEL = Deno.env.get("AI_MODEL_CARROSSEL") ?? MODEL_RAPIDO;
 
 // ---------------------------------------------------------------------------
 // Custo estimado (para o card/gráfico de uso de tokens do Início) + botão de
@@ -395,8 +396,9 @@ Deno.serve(async (req: Request) => {
     if (ehCarrossel) {
       const ctx = {
         sb, sbGuia: sbService, uid: u.user.id,
-        anthropic: (system: string, user: string | unknown[], maxTokens: number, opts?: { schema?: unknown; effort?: string }) => anthropic(system, user, maxTokens, wsId, opts),
-        log: (origem: string, usage: any) => logAiUsage(sbService, origem, MODEL, usage, uid),
+        // Haiku por custo (30/10/2026: a Tia achou caro no Sonnet, ~R$0,22 o roteiro); o validador do manual pede correção se errar.
+        anthropic: (system: string, user: string | unknown[], maxTokens: number, opts?: { schema?: unknown; effort?: string }) => anthropic(system, user, maxTokens, wsId, { model: MODEL_CARROSSEL, ...opts }),
+        log: (origem: string, usage: any) => logAiUsage(sbService, origem, MODEL_CARROSSEL, usage, uid),
       };
       const r = action === "carrossel_roteiro" ? await carrosselRoteiro(ctx, body)
         : action === "carrossel_foto" ? await carrosselFoto(ctx, body) : await carrosselReescrever(ctx, body);
