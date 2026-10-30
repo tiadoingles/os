@@ -165,10 +165,10 @@ async function anthropic(system: SystemPrompt, user: string | unknown[], maxToke
 
 const STOP = new Set("para pelo pela como qual quais onde quando porque sobre nossa nosso nossas nossos esse essa este esta isso aqui tem ter uma outro outra mais menos entre desde ate".split(/\s+/));
 function keywords(q: string): string[] {
-  return [...new Set(q.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").split(/[^a-z0-9]+/).filter((w) => w.length >= 4 && !STOP.has(w)))];
+  return [...new Set(q.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/[^a-z0-9]+/).filter((w) => w.length >= 4 && !STOP.has(w)))];
 }
 function norm(s: string) {
-  return (s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
 // Extrai as linhas de controle "CONFIANCA: alta|baixa" e "TEMA: ..." do fim da

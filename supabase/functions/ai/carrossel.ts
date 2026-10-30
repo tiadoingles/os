@@ -107,7 +107,7 @@ function extrairObjeto(raw: string): any | null {
   try { return JSON.parse(raw.slice(i, j + 1)); } catch { return null; }
 }
 
-const semAcento = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "");
+const semAcento = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
 /** Limpa o slide: só modelos/campos conhecidos, textos sem espaço sobrando, fundo fixo onde o modelo pede. */
 function normalizarSlide(x: any) {
