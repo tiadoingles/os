@@ -9606,11 +9606,99 @@ function TemaArenaCombo({ valor, usados, onMudar }) {
     </div>`;
 }
 
+// Referência para o material (30/10/2026): texto colado ou .docx/.pdf com o texto extraído no navegador (mammoth /
+// pdf.js, carregados só ao escolher o arquivo). Vai em briefing.referencia; a IA usa como base do Reading Practice (RC)
+// e do Glossary/Questions. Limite ARENA_REF_MAX (igual ao corte em arena.ts); passou disso, avisa e corta.
+const ARENA_REF_MAX = 12000;
+const MAMMOTH_URL = "https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.8.0/mammoth.browser.min.js";
+const PDFJS_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+const PDFJS_WORKER_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+function arenaLimparTexto(t) {
+  return String(t || "").replace(/\r\n?/g, "\n").replace(/[ \t\u00a0]+/g, " ").replace(/ *\n */g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+function arenaCortarRef(t) {
+  if (t.length <= ARENA_REF_MAX) return t;
+  const c = t.slice(0, ARENA_REF_MAX);
+  const quebra = c.lastIndexOf("\n");
+  return (quebra > ARENA_REF_MAX * 0.8 ? c.slice(0, quebra) : c).trim();
+}
+async function arenaTextoDoArquivo(file) {
+  const nome = file.name.toLowerCase();
+  if (file.size > 20 * 1024 * 1024) throw new Error("Arquivo grande demais (máximo 20 MB).");
+  const buf = await file.arrayBuffer();
+  if (nome.endsWith(".docx")) {
+    if (!window.mammoth) await carregarScript(MAMMOTH_URL);
+    const r = await window.mammoth.extractRawText({ arrayBuffer: buf });
+    return arenaLimparTexto(r.value);
+  }
+  if (nome.endsWith(".pdf")) {
+    if (!window.pdfjsLib) await carregarScript(PDFJS_URL);
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+    const doc = await window.pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+    const paginas = [];
+    for (let i = 1; i <= doc.numPages; i++) {
+      const tc = await (await doc.getPage(i)).getTextContent();
+      paginas.push(tc.items.map((it) => (it.str || "") + (it.hasEOL ? "\n" : "")).join(""));
+      if (paginas.join("\n").length > ARENA_REF_MAX * 3) break;
+    }
+    const t = arenaLimparTexto(paginas.join("\n\n"));
+    if (!t) throw new Error("Este PDF não tem texto selecionável (parece uma imagem escaneada). Cole o texto no campo.");
+    return t;
+  }
+  throw new Error("Use um arquivo .docx ou .pdf (o .doc antigo não é aceito: salve como .docx).");
+}
+
+// valor = { modo: "texto"|"arquivo", texto, arquivo }. O texto do arquivo também fica em `texto` (já extraído).
+function ReferenciaArena({ valor, onMudar }) {
+  const [lendo, setLendo] = useState(false);
+  const [erro, setErro] = useState("");
+  const total = arenaLimparTexto(valor.texto).length;
+  async function escolher(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setErro(""); setLendo(true);
+    try {
+      const texto = await arenaTextoDoArquivo(file);
+      onMudar({ ...valor, texto, arquivo: file.name });
+    } catch (e2) { setErro(errMsg(e2)); onMudar({ ...valor, texto: "", arquivo: "" }); }
+    finally { setLendo(false); }
+  }
+  const aba = (m, l) => html`
+    <button type="button" onClick=${() => { setErro(""); onMudar({ modo: m, texto: "", arquivo: "" }); }}
+      class=${cx("rounded-lg px-3 py-1.5 text-xs font-semibold", valor.modo === m ? "bg-[#07110e] text-white" : "text-muted hover:text-ink")}>${l}</button>`;
+  return html`
+    <div>
+      <div class="inline-flex gap-1 rounded-xl bg-slate-100 p-1">${aba("texto", "Colar texto")}${aba("arquivo", "Enviar arquivo (.docx ou .pdf)")}</div>
+      <div class="mt-2">
+        ${valor.modo === "texto" ? html`
+          <textarea class=${cx(inputCls, "min-h-[110px]")} rows="5" placeholder="Cole aqui uma história real, um artigo ou outro texto que deve servir de base"
+            value=${valor.texto} onInput=${(e) => onMudar({ ...valor, texto: e.target.value })}></textarea>` : html`
+          <label class="flex cursor-pointer items-center gap-3 rounded-xl border border-dashed border-line bg-white px-4 py-3 text-sm hover:bg-slate-50">
+            <input type="file" accept=".docx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" class="hidden" onChange=${escolher} disabled=${lendo} />
+            ${lendo ? html`<span><span class="spinner mr-2"></span>Lendo o arquivo…</span>`
+              : valor.arquivo ? html`<span class="min-w-0 truncate"><span class="font-medium text-ink">${valor.arquivo}</span> <span class="text-muted">· clique para trocar</span></span>`
+              : html`<span class="text-muted">Clique para escolher um arquivo .docx ou .pdf</span>`}
+          </label>
+          ${valor.arquivo && total ? html`
+            <details class="mt-2 text-xs text-muted"><summary class="cursor-pointer">Ver o texto extraído</summary>
+              <div class="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap rounded-lg border border-line bg-slate-50 p-2 text-ink">${valor.texto.slice(0, ARENA_REF_MAX)}</div>
+            </details>
+            <button type="button" class="mt-1 text-xs font-medium text-emerald-700 hover:underline" onClick=${() => onMudar({ modo: "arquivo", texto: "", arquivo: "" })}>Remover arquivo</button>` : null}`}
+        ${erro ? html`<div class="mt-1 text-xs text-rose-700">${erro}</div>` : null}
+        ${total ? html`<div class=${cx("mt-1 text-xs", total > ARENA_REF_MAX ? "font-medium text-amber-700" : "text-muted")}>
+          ${total > ARENA_REF_MAX
+            ? `O texto tem ${total.toLocaleString("pt-BR")} caracteres. A IA vai usar só os primeiros ${ARENA_REF_MAX.toLocaleString("pt-BR")} (o resto será cortado).`
+            : `${total.toLocaleString("pt-BR")} de ${ARENA_REF_MAX.toLocaleString("pt-BR")} caracteres`}</div>` : null}
+      </div>
+    </div>`;
+}
+
 // Formulário enxuto (pedido da Tia, 16/10/2026): só Tema, Nível e Observações. Narrador, tom etc. ficam por conta
 // das regras (o narrador do RC roda sozinho na Edge Function). 1 material por nível marcado.
 function FormArena({ me, usados, onCriado }) {
   const [busy, setBusy] = useState(false);
-  const [f, setF] = useState({ tema: "", niveis: ["Recém Chegados", "BIA"], observacoes: "" });
+  const [f, setF] = useState({ tema: "", niveis: ["Recém Chegados", "BIA"], observacoes: "", ref: { modo: "texto", texto: "", arquivo: "" } });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const toggleNivel = (n) => setF((s) => ({ ...s, niveis: s.niveis.includes(n) ? s.niveis.filter((x) => x !== n) : [...s.niveis, n] }));
 
@@ -9625,6 +9713,12 @@ function FormArena({ me, usados, onCriado }) {
       const categoria = Object.keys(ARENA_TEMAS).find((c) => ARENA_TEMAS[c].some((t) => t.toLowerCase() === tema.toLowerCase())) || null;
       const plano = arenaPlano(tema, categoria, nvs, 1, usados);
       const briefing = { tema, categoria, niveis: nvs, quantidade: 1, temas: plano.temas, observacoes: f.observacoes.trim() };
+      const refTexto = arenaLimparTexto(f.ref.texto);
+      if (refTexto) {
+        briefing.referencia = arenaCortarRef(refTexto);
+        briefing.referencia_origem = f.ref.modo === "arquivo" && f.ref.arquivo ? f.ref.arquivo : "texto colado";
+        if (refTexto.length > ARENA_REF_MAX) briefing.referencia_cortada_de = refTexto.length;
+      }
       const { data, error } = await sb.from("materiais_pedidos").insert({
         criado_por: me ? me.id : null, tema, categoria, niveis: nvs, quantidade: 1,
         status: "gerando_previa", briefing, conteudo: plano.conteudo, ajustes: [],
@@ -9643,6 +9737,10 @@ function FormArena({ me, usados, onCriado }) {
         <div class="mt-0.5 text-xs text-muted">Clique no campo para ver a lista dos 30 temas, ou digite um tema seu.</div>
         <div class="mt-2"><${TemaArenaCombo} valor=${f.tema} usados=${usados} onMudar=${(v) => set("tema", v)} /></div>
       </div>
+
+      <${SlidesGrupo} label="Referência para o material (opcional)" hint="Uma história real, um artigo ou um material pronto. No RC o Reading Practice é escrito a partir dela; Glossary e Questions saem do tema e da referência.">
+        <${ReferenciaArena} valor=${f.ref} onMudar=${(v) => set("ref", v)} />
+      <//>
 
       <${SlidesGrupo} label="Nível" obrig hint="Marque um ou os dois. Sai 1 material por nível, com o mesmo tema.">
         ${ARENA_NIVEIS.map(([v, l]) => html`<${SlidesOpc} on=${f.niveis.includes(v)} click=${() => toggleNivel(v)}>${v === "Recém Chegados" ? "RC (Recém Chegados)" : l}<//>`)}
@@ -9967,6 +10065,8 @@ function PedidoArena({ id, me, podeEditar, onVoltar }) {
         <div class="min-w-0">
           <h1 class="os-titulo text-2xl sm:text-[1.75rem]">${p.tema}</h1>
           <div class="text-xs text-muted">${[(p.niveis || []).join(" + "), `${conteudo.length} material(is)`, b.turma, b.data_arena ? fmtDataISO(b.data_arena) : null].filter(Boolean).join(" · ")}</div>
+          ${b.referencia ? html`<details class="mt-1 text-xs text-muted"><summary class="cursor-pointer">Referência: ${b.referencia_origem || "texto"} · ${String(b.referencia).length.toLocaleString("pt-BR")} caracteres${b.referencia_cortada_de ? ` (cortada de ${Number(b.referencia_cortada_de).toLocaleString("pt-BR")})` : ""}</summary>
+            <div class="mt-1 max-h-48 max-w-3xl overflow-y-auto whitespace-pre-wrap rounded-lg border border-line bg-slate-50 p-2 text-ink">${b.referencia}</div></details>` : null}
         </div>
         <span class=${cx("rounded-full px-2.5 py-1 text-[11px] font-semibold", st.cls)}>${st.label}</span>
       </div>
