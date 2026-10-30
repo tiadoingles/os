@@ -23,6 +23,47 @@ const AUTO_SYNC_MS = 30 * 60 * 1000;
 const TIPOS = [["parcela", "Parcela"], ["boleto_pix", "Boleto/Pix"], ["assinatura", "Assinatura"], ["manual", "Manual"]];
 const ROT_TIPO = Object.fromEntries(TIPOS);
 
+/* ============================ Filtro de produtos (vários ao mesmo tempo) ============================ */
+/** Campo que abre uma lista com caixas de marcar. Nada marcado = todos os produtos. */
+function FiltroProdutos({ opcoes, selecionados, onChange }) {
+  const [aberto, setAberto] = useState(false);
+  const [busca, setBusca] = useState("");
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!aberto) return;
+    const fora = (e) => { if (ref.current && !ref.current.contains(e.target)) setAberto(false); };
+    const esc = (e) => { if (e.key === "Escape") setAberto(false); };
+    document.addEventListener("mousedown", fora);
+    document.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("mousedown", fora); document.removeEventListener("keydown", esc); };
+  }, [aberto]);
+  const sel = new Set(selecionados);
+  const alternar = (p) => onChange(sel.has(p) ? selecionados.filter((x) => x !== p) : [...selecionados, p]);
+  const q = normalizarTexto(busca);
+  const lista = q ? opcoes.filter((p) => normalizarTexto(p).includes(q)) : opcoes;
+  const rotulo = !selecionados.length ? "Todos os produtos" : selecionados.length === 1 ? selecionados[0] : `${selecionados.length} produtos`;
+  return html`<div ref=${ref} class="relative">
+    <button type="button" aria-label="Produto" aria-expanded=${aberto} onClick=${() => setAberto(!aberto)} title=${selecionados.join(", ")}
+      class="filter-select flex h-11 w-full items-center justify-between gap-2 py-0 text-left">
+      <span class="truncate">${rotulo}</span>
+      ${selecionados.length ? html`<span class="shrink-0 rounded-full bg-emerald-100 px-2 text-[11px] font-black text-emerald-800">${selecionados.length}</span>` : null}
+    </button>
+    ${aberto ? html`<div class="absolute left-0 z-30 mt-2 w-[min(22rem,85vw)] rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
+      <input value=${busca} onInput=${(e) => setBusca(e.target.value)} placeholder="Buscar produto..." class="filter-select h-10 py-0" />
+      <div class="mt-2 max-h-72 overflow-y-auto">
+        ${lista.length ? lista.map((p) => html`<label class="flex cursor-pointer items-start gap-3 rounded-xl px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+          <input type="checkbox" checked=${sel.has(p)} onChange=${() => alternar(p)} class="mt-0.5 h-4 w-4 shrink-0 accent-emerald-500" />
+          <span>${p}</span>
+        </label>`) : html`<p class="px-3 py-2 text-xs text-slate-500">Nenhum produto encontrado.</p>`}
+      </div>
+      <div class="mt-2 flex items-center justify-between border-t border-slate-100 px-2 pt-2">
+        <button type="button" onClick=${() => onChange([])} disabled=${!selecionados.length} class="text-xs font-bold text-emerald-700 hover:underline disabled:text-slate-300 disabled:no-underline">Limpar</button>
+        <button type="button" onClick=${() => setAberto(false)} class="rounded-xl bg-slate-900 px-4 py-1.5 text-xs font-bold text-white">Pronto</button>
+      </div>
+    </div>` : null}
+  </div>`;
+}
+
 /* ============================ Datas (sem fuso) ============================ */
 /** Hoje em "AAAA-MM-DD" pela data LOCAL do navegador (não UTC). */
 function hojeLocal() {
@@ -119,7 +160,7 @@ export function CobrancaPage({ me }) {
   const recup = aba === "recuperacao";
   const [situacao, setSituacao] = useLocalState("cobranca:situacao", "aberto");
   const [origem, setOrigem] = useLocalState("cobranca:origem", "all");
-  const [produto, setProduto] = useLocalState("cobranca:produto", "all");
+  const [produtosSel, setProdutosSel] = useLocalState("cobranca:produtos", []);
   const [tipo, setTipo] = useLocalState("cobranca:tipo", "all");
   const [de, setDe] = useLocalState("cobranca:de", "");
   const [ate, setAte] = useLocalState("cobranca:ate", "");
@@ -155,7 +196,7 @@ export function CobrancaPage({ me }) {
     if (Date.now() - ultimaOk > AUTO_SYNC_MS) sincronizar(false);
   }, [linhas, sync]);
   os.useAoDesfazer && os.useAoDesfazer(ESCOPO, carregar);
-  useEffect(() => { setLimite(POR_PAGINA); }, [aba, situacao, origem, produto, tipo, de, ate, previstas, busca]);
+  useEffect(() => { setLimite(POR_PAGINA); }, [aba, situacao, origem, produtosSel, tipo, de, ate, previstas, busca]);
 
   const produtos = useMemo(() => [...new Set((linhas || []).map((c) => c.produto).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR")), [linhas]);
 
@@ -171,10 +212,10 @@ export function CobrancaPage({ me }) {
     return (linhas || []).filter((c) =>
       ehRecuperacao(c) === recup &&
       (recup || ((origem === "all" || c.origem === origem) && (tipo === "all" || c.tipo === tipo) && (previstas || !c.previsto))) &&
-      (produto === "all" || c.produto === produto) &&
+      (!produtosSel.length || produtosSel.includes(c.produto)) &&
       (!de || c.vencimento >= de) && (!ate || c.vencimento <= ate) &&
       (!t || normalizarTexto(`${c.cliente_nome} ${c.cliente_email} ${c.transacao}`).includes(t)));
-  }, [linhas, recup, origem, produto, tipo, previstas, de, ate, busca]);
+  }, [linhas, recup, origem, produtosSel, tipo, previstas, de, ate, busca]);
 
   const cards = useMemo(() => {
     if (recup) {
@@ -332,10 +373,7 @@ export function CobrancaPage({ me }) {
         <select aria-label="Origem" value=${origem} onChange=${(e) => setOrigem(e.target.value)} class="filter-select h-11 py-0">
           <option value="all">Todas as origens</option><option value="hotmart">Hotmart</option><option value="manual">Manual</option>
         </select>`}
-        <select aria-label="Produto" value=${produto} onChange=${(e) => setProduto(e.target.value)} class="filter-select h-11 py-0">
-          <option value="all">Todos os produtos</option>
-          ${produtos.map((p) => html`<option value=${p}>${p}</option>`)}
-        </select>
+        <${FiltroProdutos} opcoes=${produtos} selecionados=${produtosSel} onChange=${setProdutosSel} />
         ${recup ? null : html`<select aria-label="Tipo" value=${tipo} onChange=${(e) => setTipo(e.target.value)} class="filter-select h-11 py-0">
           <option value="all">Todos os tipos</option>
           ${TIPOS.map(([v, r]) => html`<option value=${v}>${r}</option>`)}
