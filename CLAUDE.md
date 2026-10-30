@@ -259,7 +259,13 @@ como backend.
   **Formulário (pedido da Tia, 16/10/2026)**: só Tema (campo único `TemaArenaCombo`: digita livre ou, ao clicar, lista suspensa dos 30 de `ARENA_TEMAS` por categoria, filtrada pelo texto;
   os já usados aparecem marcados), Nível (RC e/ou BIA; 1 material por nível, `quantidade=1`) e Observações extras
   (opcional, `briefing.observacoes`). Narrador/tom/objetivo etc. saíram: o narrador do RC roda sozinho no `arena.ts`
-  e pedidos antigos com esses campos continuam abrindo. **Prévia**: Aprovar / Reprovar / campo de feedback livre
+  e pedidos antigos com esses campos continuam abrindo. **Referência para o material** (30/10/2026, abaixo do Tema;
+  `ReferenciaArena`): texto colado ou .docx/.pdf com o texto extraído no navegador (mammoth/pdf.js do cdnjs, sob demanda;
+  PDF escaneado não tem texto) em `briefing.referencia` (+ `referencia_origem`, `referencia_cortada_de`), limite 12.000
+  caracteres (`ARENA_REF_MAX` no app.js = `REF_MAX` no arena.ts; avisa e corta). `blocoReferencia` (arena.ts) entra no
+  `arena_gerar` e no `arena_ajustar` como dado entre `<referencia>`: no RC o Reading Practice reconta a referência;
+  Glossary/Questions saem do tema e dela; regras e temas proibidos continuam; com referência não há rodízio de narrador.
+  **Prévia**: Aprovar / Reprovar / campo de feedback livre
   ("Enviar feedback e gerar nova versão" = `arena_ajustar`). Reprovar (`ModalReprovarArena`): "Gerar outra versão do
   zero" (motivo opcional + variação da versão reprovada vão para `briefing.observacoes`, motivo também em
   `briefing.reprovacoes` e em `ajustes` com `escopo:"reprovacao"`; DESFAZER só depois da geração) ou "Descartar o
