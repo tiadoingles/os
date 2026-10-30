@@ -234,6 +234,13 @@ como backend.
   busca, marca "Usada" (foto.driveId nos slides de `conteudo_carrosseis`), sugere por etiquetas x `foto_sugerida` da IA e sincroniza
   sozinha se o catálogo estiver vazio. Slide guarda `foto.driveId` e a foto volta ao reabrir. Marca d'água = `assets/simbolo-branco.png`
   (recortado do "Logo Tia do Inglês branco.png" do Drive de Conteúdo). Se a pasta deixar de ser pública, a galeria e a exportação param.
+  **30/10/2026**: briefing com "Imagem: Com foto / Sem foto" (`briefing.imagem`; sem foto = sem capa/fotoFrase/finalFoto, slide 1
+  abertura azul e fecho em virada ou ctaComentario, validado em `validarRoteiro`; post único filtra o modelo). Com foto, depois do
+  roteiro o front chama `carrossel_foto` (função ai, `carrosselFoto`) para cada slide de foto: a IA aponta pastas pelo nome e depois
+  OLHA até 2 lotes de 20 miniaturas (base64, `sz=w400`) e devolve a foto com nota 0-10 e `rosto_y`; nota < 6 = nenhuma serve (vai para
+  "Ainda fora do manual" com a foto a fazer). Não repete foto do mesmo carrossel nem as já usadas no histórico. Botão "IA escolhe a
+  foto" no editor. Base do conteúdo virou um campo único com várias escolhas e busca (`BaseSelect`). Imagem gerada por IA: a Tia
+  decidiu por ora só fotos do Drive (sem gerador externo).
 
 - **Gerador de Materiais das Arenas** (`#/pedagogico/gerador-materiais`, `GeradorMateriaisPage`/`FormArena`/
   `PedidoArena`/`RegrasArena`; SQL em `scripts/migrations/20261016_arenas_previa_regras.sql`, teste de RLS em

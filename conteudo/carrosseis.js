@@ -671,6 +671,21 @@ async function fetchCatalogo(forcar) {
   _catalogo = out;
   return out;
 }
+/** A IA olha as miniaturas do banco e escolhe a foto do slide (ação carrossel_foto da função ai). Banco vazio = sincroniza antes. */
+async function escolherFotoIA({ descricao, texto, tema, excluir }) {
+  if (!(await fetchCatalogo()).length) {
+    const r = await (await chamarFotosDrive({ op: "sync" })).json();
+    if (!r.ok) throw new Error(r.error || "Não consegui buscar a lista do Drive.");
+    await fetchCatalogo(true);
+  }
+  const d = await os.aiCall("carrossel_foto", { descricao, texto, tema, excluir });
+  if (!d || d.configured === false || d.paused || d.limite_diario) throw new Error((d && d.error) || "A IA não está conectada.");
+  if (d.error) throw new Error(d.error);
+  return d;
+}
+const fotoDoBanco = (f, y) => ({ id: "drive:" + f.drive_id, driveId: f.drive_id, nome: f.nome, x: 50, y: Math.max(10, Math.min(90, y ?? 40)), zoom: 1, espelhar: false });
+const textoDoSlide = (s) => [s.headline, s.frase, s.texto, s.titulo].filter(Boolean).join(" ").replace(/[*_]/g, "").slice(0, 280);
+
 /** Onde cada foto do Drive já foi usada (slides salvos no histórico). driveId -> [{ tema, status, data }] */
 async function fetchUsoFotos(excetoId) {
   const { data, error } = await os.sb.from("conteudo_carrosseis").select("id,tema,status,updated_at,slides").order("updated_at", { ascending: false }).limit(300);
@@ -723,7 +738,7 @@ function salvarRascunho(d) { try { localStorage.setItem(CHAVE_RASCUNHO, JSON.str
 export function CarrosselPage() {
   const { Btn, cx, inputCls, notify, errMsg } = os;
   const r0 = useMemo(lerRascunho, []);
-  const [briefing, setBriefing] = useState(r0?.briefing || { tema: "", formato: "lista", tipo: "carrossel", qtd: 8, youtube: false, modeloUnico: "capa" });
+  const [briefing, setBriefing] = useState(r0?.briefing || { tema: "", formato: "lista", tipo: "carrossel", qtd: 8, youtube: false, modeloUnico: "capa", imagem: "com" });
   const [slides, setSlides] = useState(r0?.slides || []);
   const [legenda, setLegenda] = useState(r0?.legenda || "");
   const [sel, setSel] = useState(0);
@@ -737,6 +752,7 @@ export function CarrosselPage() {
   const [avatar, setAvatar] = useState(null);
   const [usoFotos, setUsoFotos] = useState({});
   const [gerando, setGerando] = useState(false);
+  const [buscandoFoto, setBuscandoFoto] = useState(""); // progresso da escolha automática de fotos
   const [salvando, setSalvando] = useState(false);
   const [retorno, setRetorno] = useState(r0?.retorno || null); // { correcoes, duvidas, pendencias } da última geração
   const galeria = useRef(null);
@@ -794,7 +810,7 @@ export function CarrosselPage() {
     try {
       const d = await os.aiCall("carrossel_roteiro", {
         tema: briefing.tema, tipo: briefing.tipo, formato: briefing.formato, qtd: briefing.qtd,
-        cta_tipo: briefing.ctaTipo || "bio", palavra: briefing.palavra || "", modelo_unico: briefing.modeloUnico,
+        cta_tipo: briefing.ctaTipo || "bio", palavra: briefing.palavra || "", modelo_unico: briefing.modeloUnico, imagem: briefing.imagem || "com",
         observacoes: briefing.observacoes || "", base,
         formato_descricao: briefing.formatoDescricao || "", referencia_url: briefing.referenciaUrl || "",
       });
@@ -823,8 +839,37 @@ export function CarrosselPage() {
         os.registrarDesfazer(ESCOPO, "Gerar carrossel com IA", os.desfazerCriacao(TABELA, criado, "carrossel"), { mensagem: "Roteiro gerado e salvo no histórico" });
         recarregar();
       }
+      setGerando(false);
+      if ((briefing.imagem || "com") === "com" && s.some((x) => MODELOS_COM_FOTO.has(x.modelo))) await fotosAutomaticas(s, temaFinal, error ? null : criado.id);
     } catch (e) { notify(errMsg(e), "err"); }
-    finally { setGerando(false); }
+    finally { setGerando(false); setBuscandoFoto(""); }
+  }
+
+  // Com foto: para cada slide de foto, a IA escolhe no banco do Drive (sem repetir no mesmo carrossel).
+  // Se nenhuma servir, o slide fica sem foto e o motivo vai para "Ainda fora do manual".
+  async function fotosAutomaticas(lista, tema, idLinha) {
+    const alvos = lista.filter((x) => MODELOS_COM_FOTO.has(x.modelo) && !x.foto);
+    const usadas = [], faltas = [];
+    let final = lista;
+    for (let k = 0; k < alvos.length; k++) {
+      const sl = alvos[k], n = lista.indexOf(sl) + 1;
+      setBuscandoFoto(`Escolhendo a foto ${k + 1} de ${alvos.length} no Drive…`);
+      try {
+        const d = await escolherFotoIA({ descricao: sl.foto_sugerida || "", texto: textoDoSlide(sl), tema, excluir: [...usadas] });
+        if (d.achou) {
+          usadas.push(d.foto.drive_id);
+          const foto = fotoDoBanco(d.foto, d.rosto_y);
+          final = final.map((x) => (x.id === sl.id ? { ...x, foto } : x));
+          setSlides((arr) => arr.map((x) => (x.id === sl.id && !x.foto ? { ...x, foto } : x)));
+        } else faltas.push(`Slide ${n}: nenhuma foto do Drive representou bem a cena. ${d.sugestao ? "Foto a fazer: " + d.sugestao : d.motivo || ""}`.trim());
+      } catch (e) { faltas.push(`Slide ${n}: não consegui escolher a foto (${errMsg(e)}).`); }
+    }
+    if (faltas.length) setRetorno((r) => ({ correcoes: [], duvidas: [], ...(r || {}), pendencias: [...((r && r.pendencias) || []), ...faltas] }));
+    if (idLinha && usadas.length) {
+      const { error } = await os.sb.from(TABELA).update({ slides: slidesParaSalvar(final) }).eq("id", idLinha);
+      if (error) notify("Fotos escolhidas, mas não salvaram no histórico: " + errMsg(error), "err"); else recarregar();
+    }
+    if (usadas.length) notify(usadas.length === 1 ? "Foto escolhida no Drive. Confira o enquadramento." : `${usadas.length} fotos escolhidas no Drive. Confira o enquadramento.`, "ok");
   }
 
   async function salvar(novoStatus) {
@@ -964,7 +1009,7 @@ export function CarrosselPage() {
     <div>
       <div class="os-eyebrow">Conteúdo</div>
       <h1 class="mt-2 os-titulo text-2xl sm:text-[1.75rem]">Produtor de carrosséis</h1>
-      <p class="mt-1 text-xs text-muted">A IA escreve o roteiro nos modelos do Manual de carrosséis (guia na Base de Conhecimento), você revisa e exporta PNG 1080 × 1350. O banco de fotos do Drive chega na próxima fase.</p>
+      <p class="mt-1 text-xs text-muted">A IA escreve o roteiro nos modelos do Manual de carrosséis (guia na Base de Conhecimento), você revisa e exporta PNG 1080 × 1350. Com foto, a IA escolhe a foto no banco do Drive.</p>
 
       <div class="mt-5 rounded-[1.6rem] border border-line bg-card shadow-card p-5">
         <div class="flex flex-wrap items-baseline justify-between gap-2">
@@ -972,21 +1017,7 @@ export function CarrosselPage() {
           <div class="text-xs text-muted">${baseSel.size ? `${baseSel.size} escolhida${baseSel.size > 1 ? "s" : ""} · ` : ""}Fonte: pesquisas da Mentoria
             ${baseSel.size ? html` · <button type="button" class="underline hover:text-ink" onClick=${() => setB("base", [])}>limpar</button>` : null}</div>
         </div>
-        ${avatar === null ? html`<p class="mt-3 text-sm text-muted">Carregando…</p>` : html`
-          <div class="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-            ${CATEGORIAS_AVATAR.map(([cat, nome]) => html`
-              <div class="rounded-xl border border-line p-3">
-                <div class="text-xs font-bold uppercase tracking-wide text-muted">${nome}</div>
-                <div class="mt-2 flex flex-col gap-1.5">
-                  ${avatar.filter((a) => a.categoria === cat).map((a) => html`
-                    <button type="button" key=${a.id} title=${a.detalhe || ""} onClick=${() => toggleBase(a.id)}
-                      class=${cx("rounded-lg border px-2.5 py-1.5 text-left text-[13px] leading-snug transition",
-                        baseSel.has(a.id) ? "border-emerald-500 bg-brand-light font-medium text-brand-dark" : "border-line text-ink/75 hover:bg-black/[0.04]")}>
-                      ${a.texto}
-                    </button>`)}
-                </div>
-              </div>`)}
-          </div>`}
+        ${avatar === null ? html`<p class="mt-3 text-sm text-muted">Carregando…</p>` : html`<${BaseSelect} avatar=${avatar} sel=${baseSel} toggle=${toggleBase} />`}
       </div>
 
       <div class="mt-4 rounded-[1.6rem] border border-line bg-card shadow-card p-5">
@@ -1045,9 +1076,20 @@ export function CarrosselPage() {
           <label class="mt-5 block max-w-md">
             <span class="text-sm font-semibold text-ink">3. Modelo do post</span>
             <select class=${cx(inputCls, "mt-1")} value=${briefing.modeloUnico} onChange=${(e) => setB("modeloUnico", e.target.value)}>
-              ${Object.entries(MODELOS).map(([k, m]) => html`<option value=${k}>${m.nome}</option>`)}
+              ${Object.entries(MODELOS).filter(([k]) => MODELOS_COM_FOTO.has(k) === ((briefing.imagem || "com") === "com")).map(([k, m]) => html`<option value=${k}>${m.nome}</option>`)}
             </select>
           </label>`}
+
+        <div class="mt-5">
+          <div class="text-sm font-semibold text-ink">Imagem</div>
+          <div class="mt-1 flex flex-wrap items-center gap-2">
+            <${Radio} val="com" cur=${briefing.imagem || "com"} set=${(v) => setBriefing((b) => ({ ...b, imagem: v, modeloUnico: MODELOS_COM_FOTO.has(b.modeloUnico) ? b.modeloUnico : "capa" }))}>Com foto<//>
+            <${Radio} val="sem" cur=${briefing.imagem || "com"} set=${(v) => setBriefing((b) => ({ ...b, imagem: v, modeloUnico: MODELOS_COM_FOTO.has(b.modeloUnico) ? "conteudo" : b.modeloUnico }))}>Sem foto<//>
+            <span class="text-xs text-muted">${(briefing.imagem || "com") === "com"
+              ? "A IA escolhe a foto da Tia no banco do Drive. Se nenhuma servir, avisa e o slide fica para você escolher."
+              : "Só slides de texto: a capa vira uma abertura azul e o final fecha sem foto."}</span>
+          </div>
+        </div>
 
         <div class="mt-5 grid gap-4 lg:grid-cols-[auto_1fr]">
           <div>
@@ -1066,7 +1108,8 @@ export function CarrosselPage() {
           </label>
         </div>
         <div class="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2">
-          <${Btn} onClick=${gerarComIA} loading=${gerando} disabled=${travado}>${gerando ? "Escrevendo o roteiro…" : "Gerar com IA"}<//>
+          <${Btn} onClick=${gerarComIA} loading=${gerando} disabled=${travado || !!buscandoFoto}>${gerando ? "Escrevendo o roteiro…" : "Gerar com IA"}<//>
+          ${buscandoFoto ? html`<span class="text-sm text-ink/80"><span class="spinner mr-1"></span>${buscandoFoto}</span>` : null}
           ${modoFormato === "padrao" || briefing.tipo === "unico" ? html`<${Btn} variant="ghost" onClick=${montar} disabled=${gerando || travado}>Montar em branco<//>` : null}
           <span class="text-xs text-muted">Cada geração consome créditos da IA.</span>
           <div class="flex items-center gap-2 pb-1 text-xs text-muted">
@@ -1120,7 +1163,8 @@ export function CarrosselPage() {
 
           <div class="rounded-[1.6rem] border border-line bg-card shadow-card p-5">
             ${atual ? html`<${EditorSlide} key=${atual.id} s=${atual} i=${sel} upd=${upd} fotos=${fotos} escolherFoto=${escolherFoto} reescrever=${reescrever} travado=${travado}
-              usoFotos=${usoFotos} atualId=${atualId} />` : null}
+              usoFotos=${usoFotos} atualId=${atualId} tema=${briefing.tema}
+              outrasFotos=${slides.filter((x) => x.id !== atual.id && x.foto && x.foto.driveId).map((x) => x.foto.driveId)} />` : null}
           </div>
         </div>
 
@@ -1181,10 +1225,74 @@ export function CarrosselPage() {
     </div>`;
 }
 
+/* ============================ Base do conteúdo (um campo, várias escolhas) ============================ */
+function BaseSelect({ avatar, sel, toggle }) {
+  const { cx, inputCls } = os;
+  const [aberto, setAberto] = useState(false);
+  const [busca, setBusca] = useState("");
+  const caixa = useRef(null);
+  useEffect(() => {
+    if (!aberto) return;
+    const fora = (e) => { if (caixa.current && !caixa.current.contains(e.target)) setAberto(false); };
+    const esc = (e) => { if (e.key === "Escape") setAberto(false); };
+    document.addEventListener("mousedown", fora); document.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("mousedown", fora); document.removeEventListener("keydown", esc); };
+  }, [aberto]);
+  const nomeCat = Object.fromEntries(CATEGORIAS_AVATAR);
+  const escolhidos = avatar.filter((a) => sel.has(a.id));
+  const sem = (t) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const q = sem(busca.trim());
+  const casa = (a) => !q || sem(`${a.texto} ${a.detalhe || ""} ${nomeCat[a.categoria]}`).includes(q);
+  return html`
+    <div ref=${caixa} class="relative mt-3">
+      <div role="button" tabindex="0" onClick=${() => setAberto(true)} onKeyDown=${(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setAberto(true); } }}
+        class=${cx(inputCls, "flex min-h-[44px] cursor-pointer flex-wrap items-center gap-1.5")}>
+        ${escolhidos.length ? escolhidos.map((a) => html`
+          <span key=${a.id} class="inline-flex items-center gap-1 rounded-lg border border-emerald-500 bg-brand-light px-2 py-0.5 text-[13px] text-brand-dark">
+            <span class="text-[10px] font-bold uppercase tracking-wide opacity-70">${nomeCat[a.categoria]}</span> ${a.texto}
+            <button type="button" aria-label=${"Tirar " + a.texto} class="ml-0.5 font-bold opacity-60 hover:opacity-100" onClick=${(e) => { e.stopPropagation(); toggle(a.id); }}>×</button>
+          </span>`) : html`<span class="text-sm text-muted">Clique para escolher dores, desejos, mitos, crenças ou objeções</span>`}
+        <span class="ml-auto pl-2 text-muted">▾</span>
+      </div>
+      ${aberto ? html`
+        <div class="absolute left-0 right-0 z-30 mt-1 rounded-xl border border-line bg-white p-3 shadow-xl">
+          <input class=${inputCls} placeholder="Buscar (ex.: vergonha, viagem, idade)" value=${busca} onInput=${(e) => setBusca(e.target.value)} autofocus />
+          <div class="mt-2 max-h-80 overflow-y-auto pr-1">
+            ${CATEGORIAS_AVATAR.map(([cat, nome]) => {
+              const itens = avatar.filter((a) => a.categoria === cat && casa(a));
+              if (!itens.length) return null;
+              return html`
+                <div key=${cat} class="mt-2 first:mt-0">
+                  <div class="sticky top-0 bg-white py-1 text-xs font-bold uppercase tracking-wide text-muted">${nome}</div>
+                  ${itens.map((a) => html`
+                    <label key=${a.id} title=${a.detalhe || ""} class=${cx("flex cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-black/[0.04]", sel.has(a.id) && "bg-brand-light/60")}>
+                      <input type="checkbox" class="mt-0.5" checked=${sel.has(a.id)} onChange=${() => toggle(a.id)} />
+                      <span class="text-ink/85">${a.texto}</span>
+                    </label>`)}
+                </div>`;
+            })}
+            ${CATEGORIAS_AVATAR.every(([cat]) => !avatar.some((a) => a.categoria === cat && casa(a))) ? html`<p class="py-3 text-sm text-muted">Nada encontrado.</p>` : null}
+          </div>
+          <div class="mt-2 flex justify-end"><button type="button" class="rounded-lg bg-brand-dark px-3 py-1.5 text-sm font-medium text-white" onClick=${() => setAberto(false)}>Pronto</button></div>
+        </div>` : null}
+    </div>`;
+}
+
 /* ============================ Editor do slide selecionado ============================ */
-function EditorSlide({ s, i, upd, fotos, escolherFoto, reescrever, travado, usoFotos, atualId }) {
+function EditorSlide({ s, i, upd, fotos, escolherFoto, reescrever, travado, usoFotos, atualId, tema, outrasFotos }) {
   const { cx, inputCls, Btn, notify, errMsg } = os;
   const [banco, setBanco] = useState(false);
+  const [escolhendo, setEscolhendo] = useState(false);
+  async function fotoIA() {
+    setEscolhendo(true);
+    try {
+      const atualDrive = s.foto && s.foto.driveId;
+      const d = await escolherFotoIA({ descricao: s.foto_sugerida || "", texto: textoDoSlide(s), tema, excluir: [...outrasFotos, ...(atualDrive ? [atualDrive] : [])] });
+      if (d.achou) { upd(i, { foto: fotoDoBanco(d.foto, d.rosto_y) }); notify(`Foto escolhida (${d.foto.pasta}). ${d.motivo || ""}`.trim(), "ok"); }
+      else notify(`Nenhuma foto do Drive serviu. ${d.sugestao ? "Foto a fazer: " + d.sugestao : d.motivo || ""}`.trim(), "info");
+    } catch (e) { notify(errMsg(e), "err"); }
+    finally { setEscolhendo(false); }
+  }
   const [instrucao, setInstrucao] = useState("");
   const [ocupado, setOcupado] = useState(false);
   async function pedirIA() {
@@ -1223,6 +1331,7 @@ function EditorSlide({ s, i, upd, fotos, escolherFoto, reescrever, travado, usoF
             <div class="text-xs font-medium uppercase tracking-wide text-muted">${rot}</div>
             ${s.foto_sugerida ? html`<div class="mt-1 rounded-lg bg-slate-50 px-2.5 py-1.5 text-xs text-ink/80">Foto sugerida pela IA: ${s.foto_sugerida}</div>` : null}
             <div class="mt-1 flex flex-wrap items-center gap-2">
+              <${Btn} variant="ghost" onClick=${fotoIA} loading=${escolhendo} disabled=${travado}>${escolhendo ? "A IA está olhando as fotos…" : s.foto && s.foto.driveId ? "IA escolhe outra" : "IA escolhe a foto"}<//>
               <${Btn} variant="ghost" onClick=${() => setBanco(true)} disabled=${travado}>Escolher do banco de fotos<//>
               <label class="cursor-pointer text-xs text-muted underline hover:text-ink">ou enviar do computador
                 <input type="file" accept="image/*" class="hidden" onChange=${(e) => { escolherFoto(i, e.target.files[0]); e.target.value = ""; }} /></label>

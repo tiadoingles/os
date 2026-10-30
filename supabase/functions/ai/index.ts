@@ -1,7 +1,7 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { linkedinSemana, linkedinReescrever } from "./linkedin.ts";
 import { arenaGerar, arenaAjustar, arenaRegrasSugerir } from "./arena.ts";
-import { carrosselRoteiro, carrosselReescrever } from "./carrossel.ts";
+import { carrosselRoteiro, carrosselReescrever, carrosselFoto } from "./carrossel.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -130,7 +130,7 @@ function blocosSystem(system: SystemPrompt) {
 
 // opts.schema: structured outputs (output_config.format json_schema => JSON garantido); opts.effort: low|medium|high;
 // opts.model: modelo da chamada (padrão MODEL). usage volta com os tokens de cache e o modelo usado (usage.modelo).
-async function anthropic(system: SystemPrompt, user: string, maxTokens: number, workspaceId: string, opts: { schema?: unknown; effort?: string; model?: string } = {}): Promise<{ text: string; usage: Uso; stop_reason?: string }> {
+async function anthropic(system: SystemPrompt, user: string | unknown[], maxTokens: number, workspaceId: string, opts: { schema?: unknown; effort?: string; model?: string } = {}): Promise<{ text: string; usage: Uso; stop_reason?: string }> {
   const modelo = opts.model || MODEL;
   const headers: Record<string, string> = {
     "x-api-key": ANTHROPIC_KEY,
@@ -306,7 +306,7 @@ function areaDaAcao(action: unknown, body: Record<string, any>): string | null {
     return s === "cs-suporte" ? "cs" : "bc";
   }
   if (action === "linkedin_semana" || action === "linkedin_reescrever") return "conteudo";
-  if (action === "carrossel_roteiro" || action === "carrossel_reescrever") return "conteudo";
+  if (action === "carrossel_roteiro" || action === "carrossel_reescrever" || action === "carrossel_foto") return "conteudo";
   if (action === "arena_gerar" || action === "arena_ajustar" || action === "arena_regras_sugerir") return "pedagogico";
   return null;
 }
@@ -325,7 +325,7 @@ Deno.serve(async (req: Request) => {
   try { body = await req.json(); } catch { /* vazio */ }
   const action = body.action;
   const ehArena = action === "arena_gerar" || action === "arena_ajustar" || action === "arena_regras_sugerir";
-  const ehCarrossel = action === "carrossel_roteiro" || action === "carrossel_reescrever";
+  const ehCarrossel = action === "carrossel_roteiro" || action === "carrossel_reescrever" || action === "carrossel_foto";
 
   // Modo de teste das ações arena_* (sem senha de usuário): header x-arena-teste igual ao token guardado em
   // app_config.chave='arena_teste_token' (tabela só-admin, lida com service_role). Sem essa linha na tabela,
@@ -395,10 +395,11 @@ Deno.serve(async (req: Request) => {
     if (ehCarrossel) {
       const ctx = {
         sb, sbGuia: sbService, uid: u.user.id,
-        anthropic: (system: string, user: string, maxTokens: number, opts?: { schema?: unknown; effort?: string }) => anthropic(system, user, maxTokens, wsId, opts),
+        anthropic: (system: string, user: string | unknown[], maxTokens: number, opts?: { schema?: unknown; effort?: string }) => anthropic(system, user, maxTokens, wsId, opts),
         log: (origem: string, usage: any) => logAiUsage(sbService, origem, MODEL, usage, uid),
       };
-      const r = action === "carrossel_roteiro" ? await carrosselRoteiro(ctx, body) : await carrosselReescrever(ctx, body);
+      const r = action === "carrossel_roteiro" ? await carrosselRoteiro(ctx, body)
+        : action === "carrossel_foto" ? await carrosselFoto(ctx, body) : await carrosselReescrever(ctx, body);
       return json(r.body, r.status);
     }
 

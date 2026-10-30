@@ -3,7 +3,7 @@
 // Nada aqui grava no banco: o front recebe os slides, a Tia revisa no editor e salva em conteudo_carrosseis.
 // Os nomes de modelo e campo são os de MODELOS em conteudo/carrosseis.js — mantenha os dois iguais.
 
-type Anthropic = (system: string, user: string, maxTokens: number, opts?: { schema?: unknown; effort?: string }) => Promise<{ text: string; usage: { input_tokens: number; output_tokens: number }; stop_reason?: string }>;
+type Anthropic = (system: string, user: string | unknown[], maxTokens: number, opts?: { schema?: unknown; effort?: string }) => Promise<{ text: string; usage: { input_tokens: number; output_tokens: number }; stop_reason?: string }>;
 type Ctx = { sb: any; sbGuia: any; uid: string; anthropic: Anthropic; log: (origem: string, usage: any) => Promise<void> };
 
 export const CHAVE_GUIA_CARROSSEL = "carrossel:manual";
@@ -124,11 +124,14 @@ function normalizarSlide(x: any) {
 }
 
 /** Regras duras (o que dá para conferir no código). Devolve a lista de problemas; vazia = ok. */
-export function validarRoteiro(slides: any[], b: { tipo: string; qtd: number; formato: string; cta_tipo: string; palavra: string }): string[] {
+const COM_FOTO = ["capa", "fotoFrase", "finalFoto"];
+export function validarRoteiro(slides: any[], b: { tipo: string; qtd: number; formato: string; cta_tipo: string; palavra: string; imagem?: string }): string[] {
   const e: string[] = [];
   const unico = b.tipo === "unico";
   if (unico && slides.length !== 1) e.push(`o post único tem que ter exatamente 1 slide (veio ${slides.length})`);
   if (!unico && slides.length !== b.qtd) e.push(`o carrossel tem que ter exatamente ${b.qtd} slides (veio ${slides.length})`);
+  const semFoto = b.imagem === "sem";
+  if (semFoto) slides.forEach((s, i) => { if (COM_FOTO.includes(s.modelo)) e.push(`slide ${i + 1}: a Tia pediu SEM foto, então não use ${s.modelo}`); });
   slides.forEach((s, i) => {
     for (const [c, lim] of Object.entries(LIMITE)) {
       const v = String(s[c] || "");
@@ -138,7 +141,18 @@ export function validarRoteiro(slides: any[], b: { tipo: string; qtd: number; fo
     if (/\p{Extended_Pictographic}/u.test(tudo)) e.push(`slide ${i + 1}: tem emoji`);
     if (/\bebook\b/i.test(tudo)) e.push(`slide ${i + 1}: escreva "e-book"`);
   });
-  if (!unico) {
+  if (!unico && semFoto) {
+    if (slides[0]?.modelo !== "abertura") e.push("sem foto, o slide 1 tem que ser uma abertura (capa sem foto)");
+    const ult = slides[slides.length - 1];
+    const fim = b.cta_tipo === "comentario" ? "ctaComentario" : "virada";
+    if (ult?.modelo !== fim) e.push(`sem foto, o último slide tem que ser ${fim}`);
+    else if (fim === "virada" && !/clica no link da bio\.?\s*$/i.test(String(ult.apoio || ""))) e.push("o apoio do último slide tem que terminar em \"Clica no link da bio\"");
+    for (let i = 1; i < slides.length; i++) {
+      const azul = (s: any) => ["abertura", "virada", "ctaComentario"].includes(s.modelo) || s.fundo === "azul";
+      if (azul(slides[i]) && azul(slides[i - 1])) e.push(`os slides ${i} e ${i + 1} estão os dois no azul (nunca dois azuis seguidos)`);
+    }
+  }
+  if (!unico && !semFoto) {
     if (slides[0]?.modelo !== "capa") e.push("o slide 1 tem que ser a capa");
     const capa = slides[0];
     if (capa) {
@@ -173,8 +187,21 @@ export function validarRoteiro(slides: any[], b: { tipo: string; qtd: number; fo
   return e;
 }
 
-function estruturaPedida(b: { tipo: string; qtd: number; formato: string; cta_tipo: string; palavra: string; modelo_unico: string }) {
-  if (b.tipo === "unico") return `POST ÚNICO: exatamente 1 slide, no modelo "${b.modelo_unico}".`;
+function estruturaPedida(b: { tipo: string; qtd: number; formato: string; cta_tipo: string; palavra: string; modelo_unico: string; imagem: string }) {
+  if (b.tipo === "unico") return `POST ÚNICO: exatamente 1 slide, no modelo "${b.modelo_unico}".` +
+    (COM_FOTO.includes(b.modelo_unico) ? " Ele leva uma foto da Marcela do banco do Drive: capriche no foto_sugerida, descrevendo a cena, a expressão e o gesto que a foto precisa ter." : "");
+  if (b.imagem === "sem") return [
+    `CARROSSEL de exatamente ${b.qtd} slides, formato ${FORMATOS[b.formato] || b.formato}, SEM FOTO (pedido da Tia).`,
+    "NÃO use os modelos capa, fotoFrase nem finalFoto. O slide 1 é uma abertura (azul) que faz o papel de capa: frase-gancho forte, com o final em _itálico_.",
+    b.formato === "livre" || b.formato === "referencia"
+      ? "No meio, monte a sequência que melhor realiza o formato descrito abaixo, só com os modelos sem foto."
+      : "No meio, siga a estrutura do formato trocando o que seria foto por slides de texto.",
+    b.cta_tipo === "comentario"
+      ? `Último slide: ctaComentario com a palavra-chave ${semAcento(b.palavra || "").toUpperCase() || "(curta, sem acento)"}.`
+      : "Último slide: virada (azul) com a frase de fechamento e o apoio terminando em \"Clica no link da bio\".",
+    "Ritmo de cores: como o slide 1 já é azul, o slide 2 fica no papel; azul de novo a cada 3 ou 4 slides em momento-chave; NUNCA dois slides azuis seguidos (abertura, virada e ctaComentario são sempre azuis).",
+    "Ajuste a quantidade de itens/regras/cenas para fechar exatamente o número de slides pedido. Deixe foto_sugerida vazio em todos.",
+  ].join("\n");
   const cta = b.cta_tipo === "comentario"
     ? `Antes do final, um slide ctaComentario com a palavra-chave ${semAcento(b.palavra || "").toUpperCase() || "(escolha uma palavra curta, sem acento)"}.`
     : "Sem slide de CTA de comentário: o CTA fica só no último slide.";
@@ -276,6 +303,7 @@ export async function carrosselRoteiro(ctx: Ctx, body: Record<string, any>) {
     cta_tipo: body.cta_tipo === "comentario" ? "comentario" : "bio",
     palavra: String(body.palavra ?? "").trim().slice(0, 30),
     modelo_unico: (MODELOS as readonly string[]).includes(body.modelo_unico) ? String(body.modelo_unico) : "capa",
+    imagem: body.imagem === "sem" ? "sem" : "com",
     observacoes: String(body.observacoes ?? "").trim().slice(0, 1500),
     formato_descricao: String(body.formato_descricao ?? "").trim().slice(0, 1500),
     referencia_url: String(body.referencia_url ?? "").trim().slice(0, 500),
@@ -379,4 +407,101 @@ export async function carrosselReescrever(ctx: Ctx, body: Record<string, any>) {
   const avisos: string[] = [];
   for (const [c, lim] of Object.entries(LIMITE)) if (String(novo[c] || "").length > lim) avisos.push(`O campo ${c} passou de ${lim} caracteres.`);
   return { status: 200, body: { configured: true, slide: novo, avisos } };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Escolha da foto no banco do Drive (conteudo_fotos, preenchido pela função fotos-drive). Duas etapas:
+// 1) pelo nome das pastas, a IA aponta onde procurar; 2) a IA OLHA até 2 lotes de 20 miniaturas e escolhe a que
+// melhor representa a cena, com nota de 0 a 10. Nota abaixo de NOTA_MINIMA = "nenhuma serve" (a Tia escolhe à mão).
+const NOTA_MINIMA = 6, LOTE_FOTOS = 20;
+const SCHEMA_PASTAS = { type: "object", additionalProperties: false, required: ["pastas"], properties: { pastas: { type: "array", items: S } } };
+const SCHEMA_ESCOLHA = {
+  type: "object", additionalProperties: false, required: ["escolhida", "nota", "motivo", "rosto_y", "sugestao"],
+  properties: { escolhida: { type: "integer" }, nota: { type: "integer" }, motivo: S, rosto_y: { type: "integer" }, sugestao: S },
+};
+
+function embaralhar<T>(a: T[]): T[] { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+
+async function miniatura(id: string): Promise<string | null> {
+  try {
+    const r = await fetch(`https://drive.google.com/thumbnail?id=${id}&sz=w400`, { redirect: "follow", signal: AbortSignal.timeout(12000) });
+    const tipo = r.headers.get("content-type") || "";
+    if (!r.ok || !/^image\/(jpeg|png|webp)/.test(tipo)) return null;
+    const buf = new Uint8Array(await r.arrayBuffer());
+    if (buf.length > 900000) return null;
+    let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+    return `${tipo.split(";")[0]}|${btoa(bin)}`;
+  } catch { return null; }
+}
+
+export async function carrosselFoto(ctx: Ctx, body: Record<string, any>) {
+  const erro = await exigirConteudo(ctx);
+  if (erro) return { status: 403, body: { error: erro } };
+  const cena = String(body.descricao ?? "").trim().slice(0, 300);
+  const tema = String(body.tema ?? "").trim().slice(0, 300);
+  const texto = String(body.texto ?? "").trim().slice(0, 300);
+  if (!cena && !tema) return { status: 400, body: { error: "Falta a descrição da foto." } };
+  const excluir = new Set((Array.isArray(body.excluir) ? body.excluir : []).map(String).slice(0, 500));
+
+  // Catálogo (só ativas) e fotos já usadas em carrosséis salvos.
+  const cat: any[] = [];
+  for (let de = 0; de < 20000; de += 1000) {
+    const { data, error } = await ctx.sb.from("conteudo_fotos").select("drive_id,nome,pasta,etiquetas,descricao").eq("ativo", true).range(de, de + 999);
+    if (error) return { status: 500, body: { error: error.message } };
+    cat.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  if (!cat.length) return { status: 200, body: { configured: true, achou: false, motivo: "O banco de fotos ainda está vazio. Abra \"Escolher do banco de fotos\" uma vez para buscar a lista do Drive." } };
+  const { data: usados } = await ctx.sb.from("conteudo_carrosseis").select("slides").order("updated_at", { ascending: false }).limit(300);
+  for (const c of usados || []) for (const sl of c.slides || []) if (sl?.foto?.driveId) excluir.add(String(sl.foto.driveId));
+  const livres = cat.filter((f) => !excluir.has(f.drive_id));
+
+  // 1) Pastas onde procurar.
+  const porPasta = new Map<string, number>();
+  for (const f of livres) porPasta.set(f.pasta, (porPasta.get(f.pasta) || 0) + 1);
+  const listaPastas = [...porPasta.entries()].map(([p, n]) => `${p} (${n})`).join("\n");
+  const pedido = `CENA PROCURADA: ${cena || tema}${texto ? `\nTEXTO DO SLIDE: ${texto}` : ""}${tema ? `\nTEMA DO POST: ${tema}` : ""}`;
+  const r1 = await ctx.anthropic(
+    "Você organiza o banco de fotos da Marcela Miranda (a Tia do Inglês). Pelos nomes das pastas, aponte até 5 pastas onde é mais provável achar uma foto DA MARCELA que represente a cena. Prefira pastas com fotos dela (Marcela, Trabalhando, Ensaios, Viagens, Casal). Evite pastas de alunas, família, amigos e eventos com outras pessoas, a não ser que a cena peça. Devolva os nomes exatamente como na lista, sem o número.",
+    `${pedido}\n\nPASTAS (nome e quantidade de fotos livres):\n${listaPastas}`, 1500, { schema: SCHEMA_PASTAS, effort: "low" });
+  await ctx.log("ai:carrossel_foto", r1.usage);
+  const escolhidas = new Set(((extrairObjeto(r1.text)?.pastas || []) as string[]).map((x) => String(x).replace(/\s*\(\d+\)\s*$/, "").trim()));
+  const palavras = (cena + " " + texto).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/[^a-z0-9]+/).filter((w) => w.length > 3);
+  const casaTexto = (f: any) => { const t = `${(f.etiquetas || []).join(" ")} ${f.descricao || ""}`.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""); return palavras.some((w) => t.includes(w)); };
+  let cand = livres.filter((f) => escolhidas.has(f.pasta) || casaTexto(f));
+  if (cand.length < LOTE_FOTOS) cand = livres.filter((f) => /marcela|trabalhando|ensaio|viage/i.test(f.pasta));
+  if (!cand.length) cand = livres;
+  // Etiquetadas que combinam vêm primeiro; o resto em ordem aleatória (cada geração vê fotos diferentes).
+  const fila = [...cand.filter(casaTexto), ...embaralhar(cand.filter((f) => !casaTexto(f)))];
+
+  // 2) Até 2 lotes de miniaturas.
+  let melhor: any = null, ultimoMotivo = "", sugestao = "";
+  for (let lote = 0; lote < 2 && fila.length; lote++) {
+    const grupo = fila.splice(0, LOTE_FOTOS + 6);
+    const imgs = (await Promise.all(grupo.map(async (f) => ({ f, img: await miniatura(f.drive_id) })))).filter((x) => x.img).slice(0, LOTE_FOTOS);
+    if (!imgs.length) continue;
+    const conteudo: unknown[] = [{ type: "text", text: `${pedido}\n\nAbaixo, ${imgs.length} fotos numeradas de 0 a ${imgs.length - 1}.` }];
+    imgs.forEach((x, i) => {
+      const [mt, dados] = x.img!.split("|");
+      conteudo.push({ type: "text", text: `Foto ${i}:` }, { type: "image", source: { type: "base64", media_type: mt, data: dados } });
+    });
+    const r2 = await ctx.anthropic(
+      ["Você escolhe a foto de um post do Instagram da Marcela Miranda (a Tia do Inglês, professora de inglês para mulheres de 40 a 70 anos).",
+        "Escolha a foto em que a MARCELA aparece e que melhor ajuda a interpretar a cena procurada (expressão, gesto, ambiente).",
+        "Nota de 0 a 10: 8+ = representa muito bem; 6-7 = serve; abaixo de 6 = nenhuma serve. Desclassifique: foto sem a Marcela (salvo se a cena pedir só objeto ou lugar), desfocada, escura, com outra pessoa em destaque, rosto cortado, print de tela, foto de grupo.",
+        "Se nenhuma servir, escolhida = -1 e, em sugestao, descreva em uma frase a foto que a Tia deveria fazer para esse post.",
+        "rosto_y: altura do rosto na foto escolhida, em % de cima para baixo (0 a 100), para o enquadramento. motivo: uma frase curta.",
+      ].join("\n"), conteudo, 2500, { schema: SCHEMA_ESCOLHA, effort: "low" });
+    await ctx.log("ai:carrossel_foto", r2.usage);
+    const o = extrairObjeto(r2.text);
+    if (!o) continue;
+    ultimoMotivo = String(o.motivo || ""); if (o.sugestao) sugestao = String(o.sugestao);
+    const i = Number(o.escolhida), nota = Number(o.nota);
+    if (i >= 0 && i < imgs.length && (!melhor || nota > melhor.nota)) melhor = { ...imgs[i].f, nota, motivo: ultimoMotivo, rosto_y: Math.max(0, Math.min(100, Number(o.rosto_y) || 40)) };
+    if (melhor && melhor.nota >= 8) break;
+  }
+  if (!melhor || melhor.nota < NOTA_MINIMA) {
+    return { status: 200, body: { configured: true, achou: false, motivo: ultimoMotivo || "Nenhuma foto do banco representou bem a cena.", sugestao } };
+  }
+  return { status: 200, body: { configured: true, achou: true, foto: { drive_id: melhor.drive_id, nome: melhor.nome, pasta: melhor.pasta }, nota: melhor.nota, motivo: melhor.motivo, rosto_y: melhor.rosto_y } };
 }
