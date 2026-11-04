@@ -70,6 +70,12 @@ Regras de acesso [C]:
 - **Repetição**: Não repetir / Diário / Semanal / Mensal / Personalizado (a cada N dias, dias úteis, semanas ou meses;
   dias da semana; termina em). CHECK via `app.tarefas_recorrencia_valida` (precisa de grant para authenticated).
 
+- **Só dias úteis** (migration `20261104e_tarefas_repeticao_dias_uteis.sql`, teste `teste_rls_tarefas_dias_uteis.sql` 13/13):
+  caixinha sempre ao lado do seletor de repetição (`recorrencia.uteis = true`). Diário conta só dias úteis; semanal/mensal
+  que cair no fim de semana vai para a segunda; no Personalizado, Sáb/Dom ficam bloqueados. Mensal guarda o dia de
+  referência (`dia`, gravado na 1ª repetição) para não escorregar. Feriados não contam (só fim de semana).
+  `{"freq":"dias_uteis"}` antigo = Diário + caixinha marcada.
+
 ## 3. Próximas fases
 - Ainda não feito: linha do tempo (Gantt), visões salvas, ações em massa.
 - Fase 3: Google Chat — Edge Function `tarefas-gchat`, fila `tarefas_notificacoes`, avisos no espaço do setor e

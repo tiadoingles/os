@@ -75,69 +75,109 @@ const TOM_PRAZO = {
 // A próxima ocorrência nasce quando esta é concluída (gatilho no banco).
 export const OPCOES_REPETICAO = [["", "Não repetir"], ["diario", "Diário"], ["semanal", "Semanal"], ["mensal", "Mensal"], ["personalizado", "Personalizado"]];
 const DIAS_CURTOS = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]; // índice + 1 = isodow
+/** Formato antigo {freq:"dias_uteis"} = diário + "só dias úteis". `uteis` só é gravado quando ligado. */
+function normalizarRep(r) {
+  if (!r || !r.freq) return null;
+  const x = { ...r };
+  if (x.freq === "dias_uteis") { x.freq = "diaria"; x.uteis = true; }
+  if (!x.uteis) delete x.uteis;
+  return x;
+}
 export function modoRepeticao(r) {
-  if (!r || !r.freq) return "";
+  r = normalizarRep(r);
+  if (!r) return "";
   const n = Number(r.intervalo || 1);
-  if (r.ate || (r.dias_semana && r.dias_semana.length) || n !== 1 || r.freq === "dias_uteis") return "personalizado";
+  if (r.ate || (r.dias_semana && r.dias_semana.length) || n !== 1) return "personalizado";
   return { diaria: "diario", semanal: "semanal", mensal: "mensal" }[r.freq] || "personalizado";
 }
 export function descreverRepeticao(r) {
-  if (!r || !r.freq) return "Não repete";
+  r = normalizarRep(r);
+  if (!r) return "Não repete";
   const n = Number(r.intervalo || 1);
-  const un = { diaria: ["dia", "dias"], dias_uteis: ["dia útil", "dias úteis"], semanal: ["semana", "semanas"], mensal: ["mês", "meses"] }[r.freq];
+  const un = r.freq === "diaria" && r.uteis ? ["dia útil", "dias úteis"]
+    : { diaria: ["dia", "dias"], semanal: ["semana", "semanas"], mensal: ["mês", "meses"] }[r.freq];
   let t = n === 1 ? `Todo ${un[0]}`.replace("Todo semana", "Toda semana") : `A cada ${n} ${un[1]}`;
   if (r.freq === "semanal" && r.dias_semana && r.dias_semana.length) t += " · " + [...r.dias_semana].sort().map((d) => DIAS_CURTOS[d - 1]).join(", ");
+  if (r.uteis && r.freq !== "diaria") t += " · só dias úteis (fim de semana passa para segunda)";
   if (r.ate) t += ` · até ${fmtDia(r.ate)}`;
   return t;
 }
 
-/** Seletor de repetição. `imediato`: chama onChange a cada mudança (formulário); senão, "Aplicar" no personalizado. */
+/** Seletor de repetição com a caixinha "Só dias úteis" ao lado.
+ *  `imediato`: chama onChange a cada mudança (formulário); senão, "Aplicar" no personalizado. */
 export function SeletorRepeticao({ valor, onChange, disabled, imediato, prazo }) {
-  const [modo, setModo] = useState(modoRepeticao(valor));
+  const v = normalizarRep(valor);
+  const [modo, setModo] = useState(modoRepeticao(v));
+  const [uteis, setUteis] = useState(!!(v && v.uteis));
   const isoHoje = prazo || hoje();
   const diaBase = ((new Date(...isoHoje.split("-").map((x, i) => (i === 1 ? x - 1 : +x))).getDay() + 6) % 7) + 1;
   const padraoPers = { freq: "semanal", intervalo: 1, dias_semana: [diaBase] };
-  const [rasc, setRasc] = useState(valor && modoRepeticao(valor) === "personalizado" ? valor : padraoPers);
-  useEffect(() => { setModo(modoRepeticao(valor)); if (valor && modoRepeticao(valor) === "personalizado") setRasc(valor); }, [JSON.stringify(valor || null)]);
+  const [rasc, setRasc] = useState(v && modoRepeticao(v) === "personalizado" ? v : padraoPers);
+  useEffect(() => {
+    setModo(modoRepeticao(v)); setUteis(!!(v && v.uteis));
+    if (v && modoRepeticao(v) === "personalizado") setRasc(v);
+  }, [JSON.stringify(v)]);
+  const comUteis = (r, u) => {
+    if (!r) return null;
+    const x = { ...r };
+    if (u) {
+      x.uteis = true;
+      if (x.dias_semana) { x.dias_semana = x.dias_semana.filter((d) => d < 6); if (!x.dias_semana.length) x.dias_semana = [1]; }
+    } else delete x.uteis;
+    return x;
+  };
+  const simples = (m, u) => (m ? comUteis({ freq: { diario: "diaria", semanal: "semanal", mensal: "mensal" }[m], intervalo: 1 }, u) : null);
   const escolher = (m) => {
     setModo(m);
-    if (m === "personalizado") { if (imediato) onChange(rasc); return; }
-    onChange(m ? { freq: { diario: "diaria", semanal: "semanal", mensal: "mensal" }[m], intervalo: 1 } : null);
+    if (m === "personalizado") { const r = comUteis(rasc, uteis); setRasc(r); if (imediato) onChange(r); return; }
+    onChange(simples(m, uteis));
+  };
+  const alternarUteis = (u) => {
+    setUteis(u);
+    if (modo === "personalizado") { const r = comUteis(rasc, u); setRasc(r); if (imediato) onChange(r); }
+    else if (modo) onChange(simples(modo, u));
   };
   const mudarRasc = (patch) => {
-    const r = { ...rasc, ...patch };
+    let r = { ...rasc, ...patch };
     if (r.freq !== "semanal") delete r.dias_semana;
-    if (r.freq === "semanal" && (!r.dias_semana || !r.dias_semana.length)) r.dias_semana = [diaBase];
+    if (r.freq === "semanal" && (!r.dias_semana || !r.dias_semana.length)) r.dias_semana = [uteis && diaBase > 5 ? 1 : diaBase];
     if (!r.ate) delete r.ate;
+    r = comUteis(r, uteis);
     setRasc(r);
     if (imediato) onChange(r);
   };
-  const mudou = JSON.stringify(rasc) !== JSON.stringify(valor || null);
+  const mudou = JSON.stringify(rasc) !== JSON.stringify(v);
   return html`<div class="space-y-2">
-    <select class=${os.inputCls + " max-w-[13rem]"} value=${modo} disabled=${disabled} onChange=${(e) => escolher(e.target.value)}>
-      ${OPCOES_REPETICAO.map(([k, n]) => html`<option key=${k} value=${k}>${n}</option>`)}
-    </select>
+    <div class="flex flex-wrap items-center gap-3">
+      <select class=${os.inputCls + " max-w-[13rem]"} value=${modo} disabled=${disabled} onChange=${(e) => escolher(e.target.value)}>
+        ${OPCOES_REPETICAO.map(([k, n]) => html`<option key=${k} value=${k}>${n}</option>`)}
+      </select>
+      <label class=${os.cx("inline-flex items-center gap-1.5 text-[13px] font-bold", modo ? "text-slate-600" : "text-slate-400")}
+        title="Conta só segunda a sexta. Se a data cair no sábado ou domingo, passa para a segunda-feira.">
+        <input type="checkbox" class="h-4 w-4 accent-emerald-600" checked=${uteis} disabled=${disabled || !modo}
+          onChange=${(e) => alternarUteis(e.target.checked)} />Só dias úteis</label>
+    </div>
     ${modo === "personalizado" ? html`<div class="space-y-2 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
       <div class="flex flex-wrap items-center gap-2 text-[13px] font-bold text-slate-600">A cada
         <input type="number" min="1" max="999" class=${os.inputCls + " !w-20 !py-1"} value=${rasc.intervalo || 1} disabled=${disabled}
           onInput=${(e) => mudarRasc({ intervalo: Math.min(999, Math.max(1, parseInt(e.target.value, 10) || 1)) })} />
         <select class=${os.inputCls + " !w-auto !py-1"} value=${rasc.freq} disabled=${disabled} onChange=${(e) => mudarRasc({ freq: e.target.value })}>
-          <option value="diaria">dia(s)</option><option value="dias_uteis">dia(s) útil(eis)</option>
+          <option value="diaria">${uteis ? "dia(s) útil(eis)" : "dia(s)"}</option>
           <option value="semanal">semana(s)</option><option value="mensal">mês(es)</option>
         </select>
       </div>
       ${rasc.freq === "semanal" ? html`<div class="flex flex-wrap gap-1">${DIAS_CURTOS.map((d, i) => {
-        const on = (rasc.dias_semana || []).includes(i + 1);
-        return html`<button key=${d} type="button" disabled=${disabled}
+        const on = (rasc.dias_semana || []).includes(i + 1), fds = i >= 5;
+        return html`<button key=${d} type="button" disabled=${disabled || (uteis && fds)} title=${uteis && fds ? "Desmarque Só dias úteis para usar o fim de semana" : d}
           onClick=${() => mudarRasc({ dias_semana: on ? rasc.dias_semana.filter((x) => x !== i + 1) : [...(rasc.dias_semana || []), i + 1].sort() })}
-          class=${os.cx("h-8 w-11 rounded-lg text-[12px] font-bold ring-1 ring-inset", on ? "bg-[#07110e] text-white ring-[#07110e]" : "bg-white text-slate-600 ring-slate-200")}>${d}</button>`;
+          class=${os.cx("h-8 w-11 rounded-lg text-[12px] font-bold ring-1 ring-inset disabled:opacity-40", on ? "bg-[#07110e] text-white ring-[#07110e]" : "bg-white text-slate-600 ring-slate-200")}>${d}</button>`;
       })}</div>` : null}
       <label class="flex flex-wrap items-center gap-2 text-[13px] font-bold text-slate-600">Termina em
         <input type="date" class=${os.inputCls + " !w-auto !py-1"} value=${rasc.ate || ""} disabled=${disabled} onInput=${(e) => mudarRasc({ ate: e.target.value || undefined })} />
         <span class="text-[11px] font-semibold text-slate-400">(vazio = sem fim)</span></label>
       <p class="text-[12px] font-semibold text-slate-500">${descreverRepeticao(rasc)}</p>
       ${!imediato ? html`<${os.Btn} variant="ghost" class="!px-3 !py-1.5 text-xs" disabled=${disabled || !mudou} onClick=${() => onChange(rasc)}>Aplicar repetição<//>` : null}
-    </div>` : null}
+    </div>` : modo && uteis ? html`<p class="text-[12px] font-semibold text-slate-500">${descreverRepeticao(simples(modo, true))}</p>` : null}
   </div>`;
 }
 
