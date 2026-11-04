@@ -31,18 +31,25 @@ export function fmtDia(iso) {
   return `${d} ${MESES_CURTOS[m - 1]}` + (y !== anoAtual ? ` ${y}` : "");
 }
 /** Prazo amigável + tom: "Hoje", "Amanhã", "Atrasada há 3 dias", "12 nov". */
+export function fmtHora(hhmm) { return hhmm ? String(hhmm).slice(0, 5) : ""; }
 export function infoPrazo(t) {
   if (!t.prazo) return null;
-  if (t.concluida_em) return { texto: fmtDia(t.prazo), tom: "neutro" };
+  const hr = t.prazo_hora ? ` às ${fmtHora(t.prazo_hora)}` : "";
+  if (t.concluida_em) return { texto: fmtDia(t.prazo) + hr, tom: "neutro" };
   const h = hoje();
+  if (t.prazo === h && t.prazo_hora) {
+    const agora = new Date(), [hh, mm] = String(t.prazo_hora).split(":").map(Number);
+    if (agora.getHours() * 60 + agora.getMinutes() > hh * 60 + mm) return { texto: `Atrasada (hoje${hr})`, tom: "atraso" };
+    return { texto: `Hoje${hr}`, tom: "hoje" };
+  }
   if (t.prazo < h) {
     const local = (iso) => { const [y, m, d] = iso.split("-").map(Number); return new Date(y, m - 1, d); };
     const dias = Math.round((local(h) - local(t.prazo)) / 86400000);
     return { texto: dias === 1 ? "Atrasada (ontem)" : `Atrasada há ${dias} dias`, tom: "atraso" };
   }
   if (t.prazo === h) return { texto: "Hoje", tom: "hoje" };
-  if (t.prazo === somaDias(h, 1)) return { texto: "Amanhã", tom: "breve" };
-  return { texto: fmtDia(t.prazo), tom: t.prazo <= somaDias(h, 7) ? "breve" : "neutro" };
+  if (t.prazo === somaDias(h, 1)) return { texto: "Amanhã" + hr, tom: "breve" };
+  return { texto: fmtDia(t.prazo) + hr, tom: t.prazo <= somaDias(h, 7) ? "breve" : "neutro" };
 }
 export function fmtQuando(ts) {
   if (!ts) return "";
@@ -63,25 +70,77 @@ const TOM_PRAZO = {
   breve: "text-emerald-800 bg-emerald-50 ring-emerald-100",
   neutro: "text-slate-600 bg-slate-100 ring-slate-200",
 };
-/** Repetição (recorrencia jsonb): a próxima ocorrência nasce quando esta é concluída. */
-export const RECORRENCIAS = {
-  "": "Não repete",
-  diaria: "Todo dia",
-  dias_uteis: "Todo dia útil",
-  semanal: "Toda semana",
-  quinzenal: "A cada 2 semanas",
-  mensal: "Todo mês",
-};
-export function recorrenciaDe(chave) {
-  if (!chave) return null;
-  if (chave === "quinzenal") return { freq: "semanal", intervalo: 2 };
-  return { freq: chave, intervalo: 1 };
-}
-export function chaveRecorrencia(r) {
+/* ============================ Repetição ============================ */
+// recorrencia jsonb = {freq: diaria|dias_uteis|semanal|mensal, intervalo, dias_semana?: [1..7] (1=seg), ate?: AAAA-MM-DD}.
+// A próxima ocorrência nasce quando esta é concluída (gatilho no banco).
+export const OPCOES_REPETICAO = [["", "Não repetir"], ["diario", "Diário"], ["semanal", "Semanal"], ["mensal", "Mensal"], ["personalizado", "Personalizado"]];
+const DIAS_CURTOS = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]; // índice + 1 = isodow
+export function modoRepeticao(r) {
   if (!r || !r.freq) return "";
-  if (r.freq === "semanal" && Number(r.intervalo) === 2) return "quinzenal";
-  return r.freq;
+  const n = Number(r.intervalo || 1);
+  if (r.ate || (r.dias_semana && r.dias_semana.length) || n !== 1 || r.freq === "dias_uteis") return "personalizado";
+  return { diaria: "diario", semanal: "semanal", mensal: "mensal" }[r.freq] || "personalizado";
 }
+export function descreverRepeticao(r) {
+  if (!r || !r.freq) return "Não repete";
+  const n = Number(r.intervalo || 1);
+  const un = { diaria: ["dia", "dias"], dias_uteis: ["dia útil", "dias úteis"], semanal: ["semana", "semanas"], mensal: ["mês", "meses"] }[r.freq];
+  let t = n === 1 ? `Todo ${un[0]}`.replace("Todo semana", "Toda semana") : `A cada ${n} ${un[1]}`;
+  if (r.freq === "semanal" && r.dias_semana && r.dias_semana.length) t += " · " + [...r.dias_semana].sort().map((d) => DIAS_CURTOS[d - 1]).join(", ");
+  if (r.ate) t += ` · até ${fmtDia(r.ate)}`;
+  return t;
+}
+
+/** Seletor de repetição. `imediato`: chama onChange a cada mudança (formulário); senão, "Aplicar" no personalizado. */
+export function SeletorRepeticao({ valor, onChange, disabled, imediato, prazo }) {
+  const [modo, setModo] = useState(modoRepeticao(valor));
+  const isoHoje = prazo || hoje();
+  const diaBase = ((new Date(...isoHoje.split("-").map((x, i) => (i === 1 ? x - 1 : +x))).getDay() + 6) % 7) + 1;
+  const padraoPers = { freq: "semanal", intervalo: 1, dias_semana: [diaBase] };
+  const [rasc, setRasc] = useState(valor && modoRepeticao(valor) === "personalizado" ? valor : padraoPers);
+  useEffect(() => { setModo(modoRepeticao(valor)); if (valor && modoRepeticao(valor) === "personalizado") setRasc(valor); }, [JSON.stringify(valor || null)]);
+  const escolher = (m) => {
+    setModo(m);
+    if (m === "personalizado") { if (imediato) onChange(rasc); return; }
+    onChange(m ? { freq: { diario: "diaria", semanal: "semanal", mensal: "mensal" }[m], intervalo: 1 } : null);
+  };
+  const mudarRasc = (patch) => {
+    const r = { ...rasc, ...patch };
+    if (r.freq !== "semanal") delete r.dias_semana;
+    if (r.freq === "semanal" && (!r.dias_semana || !r.dias_semana.length)) r.dias_semana = [diaBase];
+    if (!r.ate) delete r.ate;
+    setRasc(r);
+    if (imediato) onChange(r);
+  };
+  const mudou = JSON.stringify(rasc) !== JSON.stringify(valor || null);
+  return html`<div class="space-y-2">
+    <select class=${os.inputCls + " max-w-[13rem]"} value=${modo} disabled=${disabled} onChange=${(e) => escolher(e.target.value)}>
+      ${OPCOES_REPETICAO.map(([k, n]) => html`<option key=${k} value=${k}>${n}</option>`)}
+    </select>
+    ${modo === "personalizado" ? html`<div class="space-y-2 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
+      <div class="flex flex-wrap items-center gap-2 text-[13px] font-bold text-slate-600">A cada
+        <input type="number" min="1" max="999" class=${os.inputCls + " !w-20 !py-1"} value=${rasc.intervalo || 1} disabled=${disabled}
+          onInput=${(e) => mudarRasc({ intervalo: Math.min(999, Math.max(1, parseInt(e.target.value, 10) || 1)) })} />
+        <select class=${os.inputCls + " !w-auto !py-1"} value=${rasc.freq} disabled=${disabled} onChange=${(e) => mudarRasc({ freq: e.target.value })}>
+          <option value="diaria">dia(s)</option><option value="dias_uteis">dia(s) útil(eis)</option>
+          <option value="semanal">semana(s)</option><option value="mensal">mês(es)</option>
+        </select>
+      </div>
+      ${rasc.freq === "semanal" ? html`<div class="flex flex-wrap gap-1">${DIAS_CURTOS.map((d, i) => {
+        const on = (rasc.dias_semana || []).includes(i + 1);
+        return html`<button key=${d} type="button" disabled=${disabled}
+          onClick=${() => mudarRasc({ dias_semana: on ? rasc.dias_semana.filter((x) => x !== i + 1) : [...(rasc.dias_semana || []), i + 1].sort() })}
+          class=${os.cx("h-8 w-11 rounded-lg text-[12px] font-bold ring-1 ring-inset", on ? "bg-[#07110e] text-white ring-[#07110e]" : "bg-white text-slate-600 ring-slate-200")}>${d}</button>`;
+      })}</div>` : null}
+      <label class="flex flex-wrap items-center gap-2 text-[13px] font-bold text-slate-600">Termina em
+        <input type="date" class=${os.inputCls + " !w-auto !py-1"} value=${rasc.ate || ""} disabled=${disabled} onInput=${(e) => mudarRasc({ ate: e.target.value || undefined })} />
+        <span class="text-[11px] font-semibold text-slate-400">(vazio = sem fim)</span></label>
+      <p class="text-[12px] font-semibold text-slate-500">${descreverRepeticao(rasc)}</p>
+      ${!imediato ? html`<${os.Btn} variant="ghost" class="!px-3 !py-1.5 text-xs" disabled=${disabled || !mudou} onClick=${() => onChange(rasc)}>Aplicar repetição<//>` : null}
+    </div>` : null}
+  </div>`;
+}
+
 export const CORES = ["#07110e", "#10b981", "#3b82f6", "#8b5cf6", "#f59e0b", "#0ea5e9", "#e11d48", "#64748b"];
 
 /* ============================ Dados ============================ */
@@ -345,6 +404,7 @@ export function AbasTarefas({ tela, base }) {
     ["lista", "Lista", "lista"],
     ["calendario", "Calendário", "calendario"],
     ["painel", "Painel", "grafico"],
+    ["historico", "Histórico", "check"],
   ];
   if (base && (base.adm || base.meusSetores.some((s) => base.gestorDe(s.id)))) abas.push(["configuracoes", "Configurações", "engrenagem"]);
   return html`<div class="inline-flex flex-wrap gap-1 rounded-xl bg-slate-100 p-1">
@@ -419,7 +479,7 @@ export function NovaTarefaModal({ me, base, padrao = {}, onClose, onCriada }) {
   const [f, setF] = useState({
     titulo: "", projeto_id: padrao.projeto_id || (inicialPedido ? (pedidos[0] && pedidos[0].id) : (meus[0] && meus[0].id)) || "",
     responsavel_id: padrao.responsavel_id === undefined ? (inicialPedido ? null : me.id) : padrao.responsavel_id,
-    prazo: padrao.prazo || "", prioridade: "normal", status_id: padrao.status_id || null, descricao_md: "", repetir: "",
+    prazo: padrao.prazo || "", prazo_hora: "", prioridade: "normal", status_id: padrao.status_id || null, descricao_md: "", recorrencia: null,
   });
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setF((x) => ({ ...x, [k]: e && e.target ? e.target.value : e }));
@@ -437,9 +497,9 @@ export function NovaTarefaModal({ me, base, padrao = {}, onClose, onCriada }) {
     try {
       const t = await criarTarefa({
         titulo: f.titulo.trim(), projeto_id: f.projeto_id, responsavel_id: f.responsavel_id || null,
-        prazo: f.prazo || null, prioridade: f.prioridade, status_id: f.status_id || null,
+        prazo: f.prazo || null, prazo_hora: (f.prazo && f.prazo_hora) || null, prioridade: f.prioridade, status_id: f.status_id || null,
         descricao_md: f.descricao_md.trim() || null, ordem: Date.now(),
-        recorrencia: recorrenciaDe(f.repetir), mentorado_email: padrao.mentorado_email || null,
+        recorrencia: f.recorrencia, mentorado_email: padrao.mentorado_email || null,
       }, { rotulo: modo === "pedido" ? "enviar pedido" : "criar tarefa" });
       if (modo === "pedido") os.notify("Pedido enviado. O setor recebe um aviso e você acompanha em Minhas tarefas, na seção Meus pedidos.", "ok");
       onCriada && onCriada(t);
@@ -476,16 +536,18 @@ export function NovaTarefaModal({ me, base, padrao = {}, onClose, onCriada }) {
           </select></label>`}
         <label class="block">${rotulo(modo === "pedido" ? "Responsável (opcional, o setor decide)" : "Responsável")}
           <${SelectPessoa} pessoas=${base.pessoas} valor=${f.responsavel_id} onChange=${set("responsavel_id")} /></label>
-        <label class="block">${rotulo(modo === "pedido" ? "Preciso até" : "Prazo")}
-          <input type="date" class=${os.inputCls} value=${f.prazo} onInput=${set("prazo")} /></label>
+        <div class="block">${rotulo(modo === "pedido" ? "Preciso até" : "Prazo e horário limite")}
+          <div class="flex gap-2">
+            <input type="date" class=${os.inputCls} value=${f.prazo} onInput=${set("prazo")} aria-label="Data limite" />
+            <input type="time" class=${os.inputCls + " !w-32"} value=${f.prazo_hora} onInput=${set("prazo_hora")} disabled=${!f.prazo}
+              title=${f.prazo ? "Horário limite (opcional)" : "Escolha a data primeiro"} aria-label="Horário limite" />
+          </div></div>
         <label class="block">${rotulo("Prioridade")}
           <select class=${os.inputCls} value=${f.prioridade} onChange=${set("prioridade")}>
             ${Object.entries(PRIORIDADES).map(([k, v]) => html`<option key=${k} value=${k}>${v.rotulo}</option>`)}
           </select></label>
-        ${modo === "meu" ? html`<label class="block">${rotulo("Repetir")}
-          <select class=${os.inputCls} value=${f.repetir} onChange=${set("repetir")}>
-            ${Object.entries(RECORRENCIAS).map(([k, v]) => html`<option key=${k} value=${k}>${v}</option>`)}
-          </select></label>` : null}
+        ${modo === "meu" ? html`<div class="block sm:col-span-2">${rotulo("Repetir")}
+          <${SeletorRepeticao} valor=${f.recorrencia} imediato prazo=${f.prazo || undefined} onChange=${(r) => setF((x) => ({ ...x, recorrencia: r }))} /></div>` : null}
       </div>
       <label class="block">${rotulo(modo === "pedido" ? "Detalhes do pedido (contexto, links, como deve ficar)" : "Descrição (opcional, aceita Markdown)")}
         <textarea class=${os.inputCls} rows="3" value=${f.descricao_md} onInput=${set("descricao_md")}></textarea></label>

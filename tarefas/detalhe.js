@@ -2,7 +2,7 @@
 import { html } from "htm/preact";
 import { useState, useEffect, useCallback, useRef } from "preact/hooks";
 import {
-  os, ESCOPO, PRIORIDADES, RECORRENCIAS, recorrenciaDe, chaveRecorrencia, fmtQuando, podeEditar, atualizarTarefa,
+  os, ESCOPO, PRIORIDADES, SeletorRepeticao, fmtQuando, podeEditar, atualizarTarefa,
   alternarConclusao, criarTarefa, inserirFilha, editarFilha, excluirFilha, Avatar, PillPrazo, Icone, BotaoConcluir,
   SelectPessoa, SeletorEtiquetas,
 } from "./comum.js";
@@ -178,8 +178,11 @@ export function DetalheTarefa({ me, base, tarefaId, onClose, onMudou, onAbrir })
         onChange=${(v) => salvarCampo({ responsavel_id: v }, "mudar responsável")} />
       <${Rotulo}>Prazo<//>
       <div class="flex flex-wrap items-center gap-2">
-        <input type="date" class=${os.inputCls + " max-w-[11rem]"} value=${t.prazo || ""} disabled=${!pode || busy}
-          onChange=${(e) => salvarCampo({ prazo: e.target.value || null }, "mudar prazo")} />
+        <input type="date" class=${os.inputCls + " max-w-[11rem]"} value=${t.prazo || ""} disabled=${!pode || busy} aria-label="Data limite"
+          onChange=${(e) => salvarCampo(e.target.value ? { prazo: e.target.value } : { prazo: null, prazo_hora: null }, "mudar prazo")} />
+        <input type="time" class=${os.inputCls + " !w-32"} value=${t.prazo_hora ? String(t.prazo_hora).slice(0, 5) : ""} disabled=${!pode || busy || !t.prazo}
+          title=${t.prazo ? "Horário limite (opcional)" : "Escolha a data primeiro"} aria-label="Horário limite"
+          onChange=${(e) => salvarCampo({ prazo_hora: e.target.value || null }, "mudar horário limite")} />
         <${PillPrazo} t=${t} />
       </div>
       <${Rotulo}>Prioridade<//>
@@ -196,12 +199,10 @@ export function DetalheTarefa({ me, base, tarefaId, onClose, onMudou, onAbrir })
       <${SeletorEtiquetas} setor=${setor} valor=${t.etiquetas || []} disabled=${!pode || busy}
         onChange=${(v) => salvarCampo({ etiquetas: v }, "mudar etiquetas")} />
       <${Rotulo}>Repetir<//>
-      <div class="flex flex-wrap items-center gap-2">
-        <select class=${os.inputCls + " max-w-[13rem]"} value=${chaveRecorrencia(t.recorrencia)} disabled=${!pode || busy}
-          onChange=${(e) => salvarCampo({ recorrencia: recorrenciaDe(e.target.value) }, "mudar repetição")}>
-          ${Object.entries(RECORRENCIAS).map(([k, v]) => html`<option key=${k} value=${k}>${v}</option>`)}
-        </select>
-        ${t.recorrencia ? html`<span class="text-[11px] font-semibold text-slate-400">a próxima nasce quando esta for concluída</span>` : null}
+      <div>
+        <${SeletorRepeticao} valor=${t.recorrencia} prazo=${t.prazo || undefined} disabled=${!pode || busy}
+          onChange=${(r) => salvarCampo({ recorrencia: r }, "mudar repetição")} />
+        ${t.recorrencia ? html`<p class="mt-1 text-[11px] font-semibold text-slate-400">A próxima nasce quando esta for concluída.</p>` : null}
       </div>
       <${Rotulo}>Mentorada<//>
       <div class="flex flex-wrap items-center gap-2">
@@ -401,6 +402,7 @@ export function DetalheTarefa({ me, base, tarefaId, onClose, onMudou, onAbrir })
       ${dependencias}
       ${participantes}
       ${comentarios}
-      <p class="pt-2 text-[11px] font-semibold text-slate-400">Criada em ${fmtQuando(t.created_at)}${t.concluida_em ? ` · concluída em ${fmtQuando(t.concluida_em)}` : ""}</p>
+      <p class="pt-2 text-[11px] font-semibold text-slate-400">Criada em ${fmtQuando(t.created_at)}${t.criado_por && base.pessoa(t.criado_por) ? ` por ${base.pessoa(t.criado_por).nome}` : ""}${t.concluida_em
+        ? ` · concluída em ${fmtQuando(t.concluida_em)}${t.concluida_por && base.pessoa(t.concluida_por) ? ` por ${base.pessoa(t.concluida_por).nome}` : ""}` : ""}</p>
     </div>`);
 }

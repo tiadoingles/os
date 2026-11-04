@@ -62,6 +62,14 @@ Regras de acesso [C]:
 - Telas novas: Avisos, Calendário (arrastar muda o prazo), Painel do setor, Lixeira (restaurar); Quadro com todos os
   projetos do setor; botão "+ Tarefa" no topo de qualquer tela. Equipe sem aba entra direto em Minhas tarefas.
 
+## 2c. Ajustes de 04/11/2026 (migration `20261104d_tarefas_hora_historico_repeticao.sql`, teste `teste_rls_tarefas_hora_historico.sql` 13/13)
+- **Horário limite** (`tarefas.prazo_hora`): opcional, junto do prazo; "Atrasada (hoje às HH:MM)" quando passa. Cron
+  `tarefas-avisos-prazo` de hora em hora (minuto 5): atraso no mesmo dia sai na hora; "vence hoje" e atrasos antigos a partir das 8h.
+- **Histórico** (`#/tarefas/historico`): concluídas com dono (responsável), quem concluiu (`concluida_por`) e quando
+  (`concluida_em`), no prazo ou atrasada, filtros e CSV. Quem/quando gravados pelo banco (não-ADM não forja); reabrir limpa.
+- **Repetição**: Não repetir / Diário / Semanal / Mensal / Personalizado (a cada N dias, dias úteis, semanas ou meses;
+  dias da semana; termina em). CHECK via `app.tarefas_recorrencia_valida` (precisa de grant para authenticated).
+
 ## 3. Próximas fases
 - Ainda não feito: linha do tempo (Gantt), visões salvas, ações em massa.
 - Fase 3: Google Chat — Edge Function `tarefas-gchat`, fila `tarefas_notificacoes`, avisos no espaço do setor e

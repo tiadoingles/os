@@ -13,6 +13,7 @@ import { ListaPage } from "./lista.js";
 import { CalendarioPage } from "./calendario.js";
 import { PainelPage } from "./painel.js";
 import { LixeiraPage } from "./lixeira.js";
+import { HistoricoPage } from "./historico.js";
 import { ConfiguracoesPage } from "./configuracoes.js";
 import { DetalheTarefa } from "./detalhe.js";
 export { configurarTarefas } from "./comum.js";
@@ -20,7 +21,7 @@ export { configurarTarefas } from "./comum.js";
 // Mantenha igual a TELAS_TAREFAS no bloco <permissoes> do app.js.
 export const TELAS_TAR = {
   minhas: MinhasPage, avisos: AvisosPage, quadro: QuadroPage, lista: ListaPage, calendario: CalendarioPage,
-  painel: PainelPage, lixeira: LixeiraPage, configuracoes: ConfiguracoesPage,
+  painel: PainelPage, historico: HistoricoPage, lixeira: LixeiraPage, configuracoes: ConfiguracoesPage,
 };
 
 export function TarefasPage({ me, tela, query }) {

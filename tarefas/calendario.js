@@ -38,6 +38,7 @@ export function CalendarioPage({ me, base, query }) {
       if (!t.prazo || (soMinhas && t.responsavel_id !== me.id)) continue;
       (m[t.prazo] = m[t.prazo] || []).push(t);
     }
+    for (const k in m) m[k].sort((a, b) => (a.prazo_hora || "99").localeCompare(b.prazo_hora || "99"));
     return m;
   }, [tarefas, soMinhas, me.id]);
   const semPrazo = (tarefas || []).filter((t) => !t.prazo && !t.concluida_em && (!soMinhas || t.responsavel_id === me.id)).length;
@@ -90,7 +91,7 @@ export function CalendarioPage({ me, base, query }) {
                 title=${t.titulo}
                 class=${os.cx("truncate rounded-md px-1.5 py-0.5 text-[11px] font-bold ring-1 ring-inset",
                   t.concluida_em ? "bg-slate-50 text-slate-400 line-through ring-slate-200" : iso < h ? "bg-rose-50 text-rose-700 ring-rose-200" : "bg-white text-slate-700 ring-slate-200")}
-                style=${t.concluida_em ? "" : `border-left:3px solid ${p ? p.cor : "#94a3b8"}`}>${t.titulo}</div>`; })}
+                style=${t.concluida_em ? "" : `border-left:3px solid ${p ? p.cor : "#94a3b8"}`}>${t.prazo_hora ? html`<b>${String(t.prazo_hora).slice(0, 5)}</b> ` : null}${t.titulo}</div>`; })}
               ${its.length > 4 ? html`<div class="px-1 text-[11px] font-bold text-slate-500">+${its.length - 4} mais</div>` : null}
             </div>
           </div>`;

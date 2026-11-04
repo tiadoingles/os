@@ -39,7 +39,7 @@ export function MinhasPage({ me, base, query }) {
   const ehPedido = (t) => t.criado_por === me.id && t.responsavel_id !== me.id && base.projetosPedido.some((p) => p.id === t.projeto_id);
   const pedidos = useMemo(() => (tarefas || []).filter((t) => ehPedido(t) && !t.concluida_em), [tarefas, base]);
   const abertas = useMemo(() => (tarefas || []).filter((t) => !t.concluida_em && !ehPedido(t))
-    .sort((a, b) => (a.prazo || "9999").localeCompare(b.prazo || "9999") || PRIORIDADES[a.prioridade].peso - PRIORIDADES[b.prioridade].peso), [tarefas]);
+    .sort((a, b) => ((a.prazo || "9999") + (a.prazo_hora || "99")).localeCompare((b.prazo || "9999") + (b.prazo_hora || "99")) || PRIORIDADES[a.prioridade].peso - PRIORIDADES[b.prioridade].peso), [tarefas]);
   const concluidas = useMemo(() => (tarefas || []).filter((t) => t.concluida_em)
     .sort((a, b) => b.concluida_em.localeCompare(a.concluida_em)).slice(0, 30), [tarefas]);
   const contagem = (g) => abertas.filter((t) => grupoDe(t) === g).length;

@@ -321,7 +321,7 @@ const NAV = [
 const AREAS = NAV.map((g) => g.id);
 const NOME_AREA = Object.fromEntries(NAV.map((g) => [g.id, g.nome]));
 const ROTAS_BC = new Set(["base", "secao", "doc", "novo"]); // telas da Base de Conhecimento
-const TELAS_TAREFAS = ["minhas", "avisos", "quadro", "lista", "calendario", "painel", "lixeira", "configuracoes"]; // espelha TELAS_TAR em tarefas/index.js
+const TELAS_TAREFAS = ["minhas", "avisos", "quadro", "lista", "calendario", "painel", "historico", "lixeira", "configuracoes"]; // espelha TELAS_TAR em tarefas/index.js
 
 function ehAdmin(me) { return !!me && me.role === "admin"; }
 // Abas que a pessoa enxerga, na ordem do menu (ADM: todas).
