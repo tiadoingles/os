@@ -92,6 +92,10 @@ como backend.
     RPCs `fin_saldos_ate`, `fin_restaurar_estrutura_padrao` (security invoker); `fin_hotmart_carregar`/`_finalizar` só
     service_role.
   - `comercial`: nenhuma tabela ainda.
+  - **Exceção — Gestão de Tarefas** (`#/tarefas/*`, não é aba de `NAV`; spec `docs/tarefas-spec.md`): tabelas `tarefas_*`
+    com RLS **por setor da tarefa**, não por `app.tem_area`: vê quem é membro do setor (`tarefas_setor_membros`) ou está
+    envolvido (criador/responsável/participante, `app.tarefa_envolvido`); altera só o envolvido; setores/membros só ADM;
+    projetos/status ADM ou gestor do setor. Teste `scripts/migrations/teste_rls_tarefas.sql`.
   - **Só ADM**: `app_config`, `ai_usage_log`, `farol_config`, `farol_indicadores`, `os_ferramentas`, `os_squad_agentes`,
     `sync_status` (escrita e demais chaves), `automacao_estado` (escrita; a leitura é de qualquer logado porque as Edge
     Functions conferem a pausa com o JWT de quem chamou), `profiles` (escrita de outros).
@@ -404,7 +408,8 @@ cruza 2+ abas), `arquiteto-plataforma` (rotas/Shell/NAV/schema cross-módulo).
 **Maestro de cada aba** (7, um por grupo do menu) — ponto de entrada de
 qualquer pedido sobre aquela aba, delega pro pool/exclusivos certos:
 `maestro-base-conhecimento`, `maestro-agenda`, `maestro-pedagogico`,
-`maestro-cs`, `maestro-comercial`, `maestro-financeiro`, `maestro-conteudo`.
+`maestro-cs`, `maestro-comercial`, `maestro-financeiro`, `maestro-conteudo`; e `maestro-tarefas` (Gestão de
+Tarefas, link de topo `#/tarefas`, 04/11/2026).
 
 **Pool compartilhado** (7 — reutilizados por 2+ maestros, não duplique):
 `pesquisador-avatar` (dores/desejos da aluna), `designer-canva` (peças no

@@ -7,6 +7,8 @@ import { marked } from "marked";
 import { FinanceiroPage, configurarFinanceiro } from "./financeiro/index.js";
 // Conteúdo → Produtor de carrosséis: módulo próprio, versionado pelo importmap do index.html.
 import { CarrosselPage, configurarCarrosseis } from "./conteudo/carrosseis.js";
+// Gestão de Tarefas (#/tarefas/*): módulo próprio, versionado pelo importmap do index.html. Plano: docs/tarefas-spec.md.
+import { TarefasPage, configurarTarefas } from "./tarefas/index.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -319,6 +321,7 @@ const NAV = [
 const AREAS = NAV.map((g) => g.id);
 const NOME_AREA = Object.fromEntries(NAV.map((g) => [g.id, g.nome]));
 const ROTAS_BC = new Set(["base", "secao", "doc", "novo"]); // telas da Base de Conhecimento
+const TELAS_TAREFAS = ["minhas", "quadro", "lista", "configuracoes"]; // espelha TELAS_TAR em tarefas/index.js
 
 function ehAdmin(me) { return !!me && me.role === "admin"; }
 // Abas que a pessoa enxerga, na ordem do menu (ADM: todas).
@@ -349,6 +352,8 @@ function rotaPermitida(me, path) {
   const p0 = partes[0] || "";
   if (ehAdmin(me)) return true;
   if (p0 === "perfil") return partes.length === 1;
+  // Gestão de Tarefas: aberta a todo logado; quem vê o quê é decidido pelo setor no banco (RLS).
+  if (p0 === "tarefas") return partes.length === 1 || (partes.length === 2 && TELAS_TAREFAS.includes(partes[1]));
   const area = areaDaRota(path);
   if (!area || !temArea(me, area)) return false;
   if (area === "bc") return (p0 === "base" || p0 === "novo") ? partes.length === 1 : partes.length === 2;
@@ -370,6 +375,7 @@ function navPara(me) { return NAV.filter((g) => temArea(me, g.id)); }
 // Quem grava na tela de uma rota: o ADM sempre; a equipe, na rota de uma aba liberada.
 function podeEscreverRota(me, path) {
   if (ehAdmin(me)) return true;
+  if (partesRota(path)[0] === "tarefas") return rotaPermitida(me, path); // o banco decide tarefa a tarefa
   const area = areaDaRota(path);
   return !!area && temArea(me, area) && rotaPermitida(me, path);
 }
@@ -854,6 +860,7 @@ function escopoDesfazer(route) {
   if (p0 === "agenda") return "agenda";
   if (p0 === "financeiro" && p1) return "financeiro/" + p1; // escopoFin(slug) em financeiro/comum.js
   if (p0 === "farol") return "farol";
+  if (p0 === "tarefas") return "tarefas"; // ESCOPO em tarefas/comum.js
   if (p0 === "ferramentas") return "ferramentas";
   if (p0 === "conteudo" && p1 === "linkedin") return LI_ESCOPO;
   if (p0 === "conteudo" && p1 === "carrosseis") return "conteudo/carrosseis"; // ESCOPO em conteudo/carrosseis.js
@@ -1245,6 +1252,7 @@ const ICONES_OS = {
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>',
   menu: '<line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/>',
   chevron: '<path d="m6 9 6 6 6-6"/>',
+  tarefas: '<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>',
 };
 const ICONE_GRUPO = { bc: "book", agenda: "calendar", pedagogico: "cap", cs: "headset", comercial: "trending", financeiro: "wallet", conteudo: "megaphone" };
 function IconeOS({ nome, class: cls = "h-5 w-5" }) {
@@ -1255,7 +1263,7 @@ function IconeOS({ nome, class: cls = "h-5 w-5" }) {
 // Nome da tela atual para o cabeçalho (grupo do menu + item).
 function tituloDaRota(route) {
   const p0 = route.parts[0] || "";
-  const fixos = { "": "Início", farol: "Farol do Lucro", "pedir-ia": "Pedir a IA", squad: "Squad de Agentes",
+  const fixos = { "": "Início", tarefas: "Gestão de Tarefas", farol: "Farol do Lucro", "pedir-ia": "Pedir a IA", squad: "Squad de Agentes",
     ferramentas: "Ferramentas", admin: "Administração", perfil: "Meu perfil" };
   if (p0 in fixos) return { grupo: "Sistema Operacional", titulo: fixos[p0] };
   if (["base", "secao", "doc", "novo"].includes(p0)) return { grupo: "Sistema Operacional", titulo: "Base de Conhecimento" };
@@ -1366,6 +1374,7 @@ function Shell({ me, route, children }) {
       <nav ref=${navRef} class="os-sidebar relative flex-1 space-y-7 overflow-y-auto px-3 py-6">
         ${secao("Visão geral", [
           ok("/") ? linkItem("Início", "home", "/", homeActive) : null,
+          ok("/tarefas") ? linkItem("Gestão de Tarefas", "tarefas", "/tarefas/minhas", p0 === "tarefas") : null,
           ok("/farol") ? linkItem("Farol do Lucro", "gauge", "/farol", p0 === "farol") : null,
           ok("/pedir-ia") ? linkItem("Pedir a IA", "sparkles", "/pedir-ia", route.path === "/pedir-ia") : null,
           ok("/squad") ? linkItem("Squad de Agentes", "bot", "/squad", route.path === "/squad") : null,
@@ -1424,6 +1433,8 @@ function Shell({ me, route, children }) {
             ? children
             : finWide
             ? html`<div class="fin-shell">${children}</div>`
+            : p0 === "tarefas"
+            ? html`<div class="mx-auto w-full max-w-[1500px] px-4 py-6 sm:px-6 lg:px-8 lg:py-8">${children}</div>`
             : html`<div class="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">${children}</div>`}
         </main>
       </div>
@@ -2520,6 +2531,9 @@ function haQuantoTempo(iso) {
 }
 // Nome amigável de cada tabela no histórico (área do OS + o que é). Tabela fora da lista aparece pelo nome técnico.
 const TABELAS_HISTORICO = {
+  tarefas: "Tarefas · tarefa", tarefas_setores: "Tarefas · setor", tarefas_setor_membros: "Tarefas · pessoa no setor",
+  tarefas_projetos: "Tarefas · projeto", tarefas_status: "Tarefas · coluna", tarefas_participantes: "Tarefas · participante",
+  tarefas_checklist: "Tarefas · checklist", tarefas_comentarios: "Tarefas · comentário", tarefas_links: "Tarefas · link",
   conteudo_carrosseis: "Conteúdo · carrossel",
   kb_documents: "Base de Conhecimento · documento", kb_sections: "Base de Conhecimento · seção", kb_document_versions: "Base de Conhecimento · versão",
   agenda_eventos: "Agenda · evento", aulas_agenda: "Agenda · aula", arena_regras: "Pedagógico · regras das Arenas",
@@ -11249,6 +11263,7 @@ function Router({ route, me, sections, reload }) {
   if (p0 === "perfil") return html`<${ProfilePage} me=${me} onProfileChanged=${reload} />`;
   if (p0 === "admin" && ehAdmin(me)) return html`<${AdminPage} me=${me} />`;
   if (p0 === "farol") return html`<${FarolPage} me=${me} />`;
+  if (p0 === "tarefas") return html`<${TarefasPage} me=${me} tela=${p1} query=${route.query} />`;
   if (p0 === "conteudo" && (p1 === "metricas" || p1 === "instagram")) return html`<${ConteudoMetricasPage} />`;
   if (p0 === "conteudo" && p1 === "gerador-conteudos") return html`<${GeradorConteudosPage} />`;
   if (p0 === "conteudo" && p1 === "carrosseis") return html`<${CarrosselPage} />`;
@@ -11392,6 +11407,11 @@ configurarFinanceiro({
 
 configurarCarrosseis({
   sb, notify, errMsg, Btn, cx, inputCls, carregarJSZip, aiCall, supabaseUrl: cfg.SUPABASE_URL, anonKey: cfg.SUPABASE_ANON_KEY,
+  registrarDesfazer, useAoDesfazer, desfazerCriacao, desfazerEdicao, desfazerExclusao,
+});
+
+configurarTarefas({
+  sb, notify, errMsg, ehAdmin, Modal, Btn, cx, inputCls, Markdown,
   registrarDesfazer, useAoDesfazer, desfazerCriacao, desfazerEdicao, desfazerExclusao,
 });
 

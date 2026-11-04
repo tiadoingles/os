@@ -141,6 +141,15 @@ function executar(src) {
   confere("erro limite", m.mensagemErroLogin({ message: "x", status: 429 }), "Muitas tentativas seguidas. Aguarde alguns minutos e tente de novo.");
   confere("erro vazio", m.mensagemErroLogin(null), "Não foi possível entrar agora. Tente de novo em instantes.");
 
+  // --- Gestão de Tarefas (#/tarefas): aberta a todo logado; telas fora da lista e nomes de Object não passam ---
+  for (const u of [equipe(), equipe("cs"), equipe("financeiro", "conteudo")]) {
+    const q = JSON.stringify(u.areas);
+    for (const r of ["/tarefas", "/tarefas/minhas", "/tarefas/quadro", "/tarefas/lista", "/tarefas/configuracoes"]) {
+      confere("tarefas " + q + " " + r, m.rotaPermitida(u, r), true);
+      confere("tarefas escreve " + q + " " + r, m.podeEscreverRota(u, r), true);
+    }
+    for (const r of ["/tarefas/xyz", "/tarefas/constructor", "/tarefas/toString", "/tarefas/minhas/extra"]) confere("tarefas " + q + " " + r, m.rotaPermitida(u, r), false);
+  }
   return { total, falhas, linhas, matriz: matriz(m) };
 }
 
