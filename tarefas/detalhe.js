@@ -2,9 +2,19 @@
 import { html } from "htm/preact";
 import { useState, useEffect, useCallback, useRef } from "preact/hooks";
 import {
-  os, ESCOPO, PRIORIDADES, fmtQuando, podeEditar, atualizarTarefa, alternarConclusao, criarTarefa,
-  inserirFilha, editarFilha, excluirFilha, Avatar, PillPrazo, Icone, BotaoConcluir, SelectPessoa,
+  os, ESCOPO, PRIORIDADES, RECORRENCIAS, recorrenciaDe, chaveRecorrencia, fmtQuando, podeEditar, atualizarTarefa,
+  alternarConclusao, criarTarefa, inserirFilha, editarFilha, excluirFilha, Avatar, PillPrazo, Icone, BotaoConcluir,
+  SelectPessoa, SeletorEtiquetas,
 } from "./comum.js";
+
+const MAX_ANEXO = 50 * 1024 * 1024;
+function nomeSeguro(n) {
+  return String(n || "arquivo").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9._-]+/g, "-").slice(-120);
+}
+function tamanhoTxt(b) {
+  if (!b && b !== 0) return "";
+  return b < 1024 * 1024 ? Math.max(1, Math.round(b / 1024)) + " KB" : (b / 1024 / 1024).toFixed(1) + " MB";
+}
 
 async function carregarDetalhe(id) {
   const sb = os.sb;
@@ -12,17 +22,19 @@ async function carregarDetalhe(id) {
   if (error) throw error;
   if (!t) return null;
   const ids = [t.id, t.parent_id].filter(Boolean);
-  const [mae, parts, subs, chk, links, coms] = await Promise.all([
+  const [mae, parts, subs, chk, links, coms, deps, bloqueia] = await Promise.all([
     t.parent_id ? sb.from("tarefas").select("*").eq("id", t.parent_id).maybeSingle() : Promise.resolve({ data: null }),
     sb.from("tarefas_participantes").select("*").in("tarefa_id", ids),
     sb.from("tarefas").select("*").eq("parent_id", t.id).is("excluida_em", null).order("ordem").order("created_at"),
     sb.from("tarefas_checklist").select("*").eq("tarefa_id", t.id).order("ordem").order("created_at"),
     sb.from("tarefas_links").select("*").eq("tarefa_id", t.id).order("created_at"),
     sb.from("tarefas_comentarios").select("*").eq("tarefa_id", t.id).order("created_at"),
+    sb.from("tarefas_dependencias").select("*, depende_de:tarefas!depende_de_id(id,titulo,concluida_em,excluida_em)").eq("tarefa_id", t.id),
+    sb.from("tarefas_dependencias").select("id, tarefa:tarefas!tarefa_id(id,titulo,concluida_em,excluida_em)").eq("depende_de_id", t.id),
   ]);
-  for (const r of [mae, parts, subs, chk, links, coms]) if (r.error) throw r.error;
+  for (const r of [mae, parts, subs, chk, links, coms, deps, bloqueia]) if (r.error) throw r.error;
   return { t, mae: mae.data, participantes: parts.data || [], subs: subs.data || [], checklist: chk.data || [],
-    links: links.data || [], comentarios: coms.data || [] };
+    links: links.data || [], comentarios: coms.data || [], deps: deps.data || [], bloqueia: (bloqueia.data || []).filter((x) => x.tarefa && !x.tarefa.excluida_em) };
 }
 
 function Rotulo({ children }) {
@@ -60,6 +72,9 @@ export function DetalheTarefa({ me, base, tarefaId, onClose, onMudou, onAbrir })
   const [novoLink, setNovoLink] = useState({ url: "", titulo: "" });
   const [comentario, setComentario] = useState("");
   const [busy, setBusy] = useState(false);
+  const [maisCampos, setMaisCampos] = useState(false);
+  const [candidatas, setCandidatas] = useState(null); // tarefas do setor para "Esperando por"
+  const [mentorados, setMentorados] = useState(null);  // lista da aba CS (null = sem acesso ou não carregou)
 
   const carregar = useCallback(async () => {
     try {
@@ -95,16 +110,31 @@ export function DetalheTarefa({ me, base, tarefaId, onClose, onMudou, onAbrir })
     <div class="mt-4"><${os.Btn} variant="ghost" onClick=${onClose}>Fechar<//></div></div>`);
 
   const { t, mae } = d;
-  const partsT = d.participantes.filter((p) => p.tarefa_id === t.id).map((p) => p.user_id);
-  const partsMae = mae ? d.participantes.filter((p) => p.tarefa_id === mae.id).map((p) => p.user_id) : [];
+  const colab = (id) => d.participantes.filter((p) => p.tarefa_id === id && p.papel === "colaborador").map((p) => p.user_id);
+  const partsT = colab(t.id);
+  const partsMae = mae ? colab(mae.id) : [];
   const pode = podeEditar(me, base, t, partsT, mae, partsMae);
+  const minhaParticipacao = d.participantes.find((p) => p.tarefa_id === t.id && p.user_id === me.id);
   const projeto = base.projeto(t.projeto_id);
   const setor = base.setor(t.setor_id);
   const statusLista = base.statusDe(t.projeto_id);
-  const souParticipante = partsT.includes(me.id);
+  const souParticipante = !!minhaParticipacao;
   const projetosMover = base.projetos.filter((p) => !p.arquivado && p.setor_id === t.setor_id);
 
-  const salvarCampo = (patch, rotulo) => depois(() => atualizarTarefa(t, patch, { rotulo, toast: false }));
+  // Fora da aba (Ficha do Mentorado), o DESFAZER do topo é de outra tela: aí cada alteração mostra o aviso com DESFAZER.
+  const foraDaAba = !location.hash.startsWith("#/tarefas");
+  const salvarCampo = (patch, rotulo) => depois(() => atualizarTarefa(t, patch, { rotulo, toast: foraDaAba }));
+  async function carregarMentorados() {
+    if (mentorados !== null) return;
+    const { data, error } = await os.sb.from("cs_mentorados").select("email,nome").order("nome").limit(3000);
+    setMentorados(error ? [] : (data || []).filter((m) => m.email));
+  }
+  async function carregarCandidatas() {
+    if (candidatas !== null) return;
+    const { data, error } = await os.sb.from("tarefas").select("id,titulo,concluida_em").eq("setor_id", t.setor_id)
+      .is("excluida_em", null).is("concluida_em", null).neq("id", t.id).order("created_at", { ascending: false }).limit(500);
+    setCandidatas(error ? [] : data || []);
+  }
   const salvarTitulo = () => { const v = titulo.trim(); if (v && v !== t.titulo) salvarCampo({ titulo: v }, "renomear"); else setTitulo(t.titulo); };
 
   const cabecalho = html`
@@ -117,12 +147,13 @@ export function DetalheTarefa({ me, base, tarefaId, onClose, onMudou, onAbrir })
         </div>
       </div>
       <div class="flex shrink-0 items-center gap-1">
-        ${souParticipante
-          ? html`<${os.Btn} variant="ghost" class="!px-3 !py-1.5 text-xs" disabled=${busy} title="Deixar de receber avisos e de participar"
-              onClick=${() => depois(() => excluirFilha("tarefas_participantes", d.participantes.find((p) => p.tarefa_id === t.id && p.user_id === me.id), "deixar de seguir", false))}>
-              <${Icone} nome="olho" class="h-3.5 w-3.5" />Seguindo<//>`
-          : html`<${os.Btn} variant="ghost" class="!px-3 !py-1.5 text-xs" disabled=${busy} title="Participar desta tarefa (você passa a poder alterá-la)"
-              onClick=${() => depois(() => inserirFilha("tarefas_participantes", { tarefa_id: t.id, user_id: me.id }, "seguir tarefa", true))}>
+        ${t.criado_por === me.id || t.responsavel_id === me.id ? null : souParticipante
+          ? html`<${os.Btn} variant="ghost" class="!px-3 !py-1.5 text-xs" disabled=${busy}
+              title=${minhaParticipacao.papel === "seguidor" ? "Deixar de receber avisos desta tarefa" : "Sair da tarefa (deixa de poder alterá-la)"}
+              onClick=${() => depois(() => excluirFilha("tarefas_participantes", minhaParticipacao, minhaParticipacao.papel === "seguidor" ? "deixar de seguir" : "sair da tarefa", false))}>
+              <${Icone} nome="olho" class="h-3.5 w-3.5" />${minhaParticipacao.papel === "seguidor" ? "Seguindo" : "Participando"}<//>`
+          : html`<${os.Btn} variant="ghost" class="!px-3 !py-1.5 text-xs" disabled=${busy} title="Receber avisos desta tarefa (não dá poder de alterar)"
+              onClick=${() => depois(() => inserirFilha("tarefas_participantes", { tarefa_id: t.id, user_id: me.id, papel: "seguidor" }, "seguir tarefa", true))}>
               <${Icone} nome="olho" class="h-3.5 w-3.5" />Seguir<//>`}
         ${pode ? html`<button type="button" title="Excluir tarefa" class="rounded-xl p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-700"
             onClick=${() => confirm(`Excluir a tarefa "${t.titulo}"? Dá para desfazer pelo botão DESFAZER.`) &&
@@ -134,7 +165,7 @@ export function DetalheTarefa({ me, base, tarefaId, onClose, onMudou, onAbrir })
 
   const aviso = pode ? null : html`<div class="mb-4 flex items-start gap-2 rounded-xl bg-slate-50 px-3 py-2 text-[12px] font-semibold text-slate-600 ring-1 ring-slate-200">
     <${Icone} nome="cadeado" class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-    Você pode ver e comentar. Para alterar, é preciso estar envolvido (responsável, criador ou participante): use Seguir.</div>`;
+    Você pode ver, comentar e seguir. Para alterar, peça ao responsável para incluir você como participante.</div>`;
 
   const campos = html`
     <div class="grid grid-cols-[110px_1fr] items-start gap-x-3 gap-y-2 text-sm">
@@ -151,9 +182,6 @@ export function DetalheTarefa({ me, base, tarefaId, onClose, onMudou, onAbrir })
           onChange=${(e) => salvarCampo({ prazo: e.target.value || null }, "mudar prazo")} />
         <${PillPrazo} t=${t} />
       </div>
-      <${Rotulo}>Início<//>
-      <input type="date" class=${os.inputCls + " max-w-[11rem]"} value=${t.inicio || ""} disabled=${!pode || busy}
-        onChange=${(e) => salvarCampo({ inicio: e.target.value || null }, "mudar início")} />
       <${Rotulo}>Prioridade<//>
       <select class=${os.inputCls + " max-w-[11rem]"} value=${t.prioridade} disabled=${!pode || busy} onChange=${(e) => salvarCampo({ prioridade: e.target.value }, "mudar prioridade")}>
         ${Object.entries(PRIORIDADES).map(([k, v]) => html`<option key=${k} value=${k}>${v.rotulo}</option>`)}
@@ -165,10 +193,32 @@ export function DetalheTarefa({ me, base, tarefaId, onClose, onMudou, onAbrir })
           ${projetosMover.map((p) => html`<option key=${p.id} value=${p.id}>${p.nome}</option>`)}
         </select>` : null}
       <${Rotulo}>Etiquetas<//>
-      <input class=${os.inputCls} placeholder="separadas por vírgula" disabled=${!pode || busy}
-        value=${(t.etiquetas || []).join(", ")}
-        onChange=${(e) => salvarCampo({ etiquetas: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) }, "mudar etiquetas")} />
-    </div>`;
+      <${SeletorEtiquetas} setor=${setor} valor=${t.etiquetas || []} disabled=${!pode || busy}
+        onChange=${(v) => salvarCampo({ etiquetas: v }, "mudar etiquetas")} />
+      <${Rotulo}>Repetir<//>
+      <div class="flex flex-wrap items-center gap-2">
+        <select class=${os.inputCls + " max-w-[13rem]"} value=${chaveRecorrencia(t.recorrencia)} disabled=${!pode || busy}
+          onChange=${(e) => salvarCampo({ recorrencia: recorrenciaDe(e.target.value) }, "mudar repetição")}>
+          ${Object.entries(RECORRENCIAS).map(([k, v]) => html`<option key=${k} value=${k}>${v}</option>`)}
+        </select>
+        ${t.recorrencia ? html`<span class="text-[11px] font-semibold text-slate-400">a próxima nasce quando esta for concluída</span>` : null}
+      </div>
+      <${Rotulo}>Mentorada<//>
+      <div class="flex flex-wrap items-center gap-2">
+        <input class=${os.inputCls} list="tarefas-mentorados" placeholder="e-mail da Lista de Mentorados (opcional)" disabled=${!pode || busy}
+          value=${t.mentorado_email || ""} onFocus=${carregarMentorados}
+          onChange=${(e) => { const v = e.target.value.trim(); if (v && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)) { os.notify("Use o e-mail da mentorada (como está na Lista de Mentorados).", "err"); e.target.value = t.mentorado_email || ""; return; }
+            salvarCampo({ mentorado_email: v || null }, "vincular mentorada"); }} />
+        ${mentorados ? html`<datalist id="tarefas-mentorados">${mentorados.map((m) => html`<option key=${m.email} value=${m.email}>${m.nome}</option>`)}</datalist>` : null}
+        ${t.mentorado_email && os.temArea && os.temArea(me, "cs") ? html`<a class="text-[12px] font-bold text-emerald-700 hover:underline" href=${`#/cs/mentorados?ficha=${encodeURIComponent(t.mentorado_email)}`}>Abrir a ficha</a>` : null}
+      </div>
+    </div>
+    <button type="button" class="mt-2 text-[12px] font-bold text-slate-500 hover:text-slate-800" onClick=${() => setMaisCampos((v) => !v)}>${maisCampos ? "Menos campos" : "Mais campos"}</button>
+    ${maisCampos ? html`<div class="mt-2 grid grid-cols-[110px_1fr] items-start gap-x-3 gap-y-2 text-sm">
+      <${Rotulo}>Início<//>
+      <input type="date" class=${os.inputCls + " max-w-[11rem]"} value=${t.inicio || ""} disabled=${!pode || busy}
+        onChange=${(e) => salvarCampo({ inicio: e.target.value || null }, "mudar início")} />
+    </div>` : null}`;
 
   const descricao = html`
     <${Secao} icone="lista" titulo="Descrição" extra=${pode && !editDesc ? html`<button type="button" class="text-xs font-bold text-emerald-700 hover:underline" onClick=${() => setEditDesc(true)}>Editar</button>` : null}>
@@ -219,11 +269,33 @@ export function DetalheTarefa({ me, base, tarefaId, onClose, onMudou, onAbrir })
       </form>` : null}
     <//>`;
 
+  const abrirArquivo = async (l) => {
+    const { data, error } = await os.sb.storage.from("tarefas-anexos").createSignedUrl(l.path, 3600);
+    if (error) { os.notify(os.errMsg(error), "err"); return; }
+    window.open(data.signedUrl, "_blank", "noopener");
+  };
+  const enviarArquivos = (files) => depois(async () => {
+    for (const f of files) {
+      if (f.size > MAX_ANEXO) { os.notify(`"${f.name}" passa de 50 MB.`, "err"); continue; }
+      const path = `${t.id}/${Date.now()}-${nomeSeguro(f.name)}`;
+      const up = await os.sb.storage.from("tarefas-anexos").upload(path, f, { upsert: false, contentType: f.type || undefined });
+      if (up.error) throw up.error;
+      try {
+        await inserirFilha("tarefas_links", { tarefa_id: t.id, path, titulo: f.name, tamanho: f.size, tipo_mime: f.type || null }, "anexar arquivo", true);
+      } catch (err) { await os.sb.storage.from("tarefas-anexos").remove([path]).catch(() => {}); throw err; }
+    }
+  });
   const links = html`
-    <${Secao} icone="link" titulo="Links e arquivos">
+    <${Secao} icone="link" titulo="Links e arquivos" extra=${pode ? html`<label class="inline-flex cursor-pointer items-center gap-1 text-xs font-bold text-emerald-700 hover:underline">
+        <${Icone} nome="clipe" class="h-3.5 w-3.5" />Anexar arquivo
+        <input type="file" multiple class="hidden" disabled=${busy} onChange=${(e) => { const fs = [...e.target.files]; e.target.value = ""; fs.length && enviarArquivos(fs); }} />
+      </label>` : null}>
       <ul class="space-y-1">
         ${d.links.map((l) => html`<li key=${l.id} class="group flex items-center gap-2 text-sm">
-          <a href=${l.url} target="_blank" rel="noopener noreferrer" class="min-w-0 flex-1 truncate font-semibold text-emerald-700 hover:underline">${l.titulo || l.url}</a>
+          ${l.path
+            ? html`<button type="button" class="min-w-0 flex-1 truncate text-left font-semibold text-emerald-700 hover:underline" onClick=${() => abrirArquivo(l)}>
+                <${Icone} nome="clipe" class="mr-1 inline h-3.5 w-3.5" />${l.titulo || l.path.split("/").pop()} <span class="text-[11px] font-semibold text-slate-400">${tamanhoTxt(l.tamanho)}</span></button>`
+            : html`<a href=${l.url} target="_blank" rel="noopener noreferrer" class="min-w-0 flex-1 truncate font-semibold text-emerald-700 hover:underline">${l.titulo || l.url}</a>`}
           ${pode ? html`<button type="button" class="invisible rounded-lg p-1 text-slate-400 hover:text-rose-700 group-hover:visible" title="Remover link"
             onClick=${() => depois(() => excluirFilha("tarefas_links", l, "remover link"))}><${Icone} nome="x" class="h-3.5 w-3.5" /></button>` : null}
         </li>`)}
@@ -238,6 +310,27 @@ export function DetalheTarefa({ me, base, tarefaId, onClose, onMudou, onAbrir })
       </form>` : null}
     <//>`;
 
+  const dependencias = html`
+    <${Secao} icone="bloqueio" titulo="Dependências">
+      ${d.deps.length ? html`<p class="mb-1 text-[12px] font-bold text-slate-500">Esta tarefa espera por:</p>
+        <ul class="mb-2 space-y-1">${d.deps.map((x) => { const o = x.depende_de; return html`<li key=${x.id} class="group flex items-center gap-2 text-sm">
+          <span class=${os.cx("h-2 w-2 shrink-0 rounded-full", o && o.concluida_em ? "bg-emerald-500" : "bg-rose-500")}></span>
+          ${o ? html`<button type="button" class=${os.cx("min-w-0 flex-1 truncate text-left font-semibold hover:underline", o.concluida_em ? "text-slate-400 line-through" : "text-slate-800")} onClick=${() => onAbrir(o.id)}>${o.titulo}</button>`
+            : html`<span class="flex-1 text-slate-400">Tarefa sem acesso</span>`}
+          ${pode ? html`<button type="button" class="invisible rounded-lg p-1 text-slate-400 hover:text-rose-700 group-hover:visible" title="Remover dependência"
+            onClick=${() => depois(() => excluirFilha("tarefas_dependencias", x, "remover dependência"))}><${Icone} nome="x" class="h-3.5 w-3.5" /></button>` : null}
+        </li>`; })}</ul>` : null}
+      ${d.bloqueia.length ? html`<p class="mb-1 text-[12px] font-bold text-slate-500">Estas esperam por esta:</p>
+        <ul class="mb-2 space-y-1">${d.bloqueia.map((x) => html`<li key=${x.id}><button type="button" class="truncate text-left text-sm font-semibold text-slate-700 hover:underline" onClick=${() => onAbrir(x.tarefa.id)}>${x.tarefa.titulo}</button></li>`)}</ul>` : null}
+      ${!d.deps.length && !d.bloqueia.length && !pode ? html`<p class="text-sm font-medium text-slate-400">Sem dependências.</p>` : null}
+      ${pode ? html`<select class=${os.inputCls} value="" disabled=${busy} onFocus=${carregarCandidatas}
+          onChange=${(e) => e.target.value && depois(() => inserirFilha("tarefas_dependencias", { tarefa_id: t.id, depende_de_id: e.target.value }, "adicionar dependência", true))}>
+          <option value="">${candidatas === null ? "Esta tarefa espera por… (clique para carregar)" : "Esta tarefa espera por…"}</option>
+          ${(candidatas || []).filter((c) => !d.deps.some((x) => x.depende_de_id === c.id) && !d.bloqueia.some((x) => x.tarefa.id === c.id)
+              && !d.subs.some((x) => x.id === c.id) && c.id !== t.parent_id).map((c) => html`<option key=${c.id} value=${c.id}>${c.titulo}</option>`)}
+        </select>` : null}
+    <//>`;
+
   const pessoasParticipando = d.participantes.filter((p) => p.tarefa_id === t.id);
   const participantes = html`
     <${Secao} icone="pessoa" titulo="Participantes">
@@ -246,11 +339,12 @@ export function DetalheTarefa({ me, base, tarefaId, onClose, onMudou, onAbrir })
           <${Avatar} pessoa=${base.pessoa(t.criado_por)} tamanho="h-6 w-6" />${(base.pessoa(t.criado_por) || {}).nome || "—"} <span class="font-semibold text-slate-400">criou</span></span>` : null}
         ${pessoasParticipando.map((p) => { const ps = base.pessoa(p.user_id); return html`<span key=${p.id} class="inline-flex items-center gap-1.5 rounded-full bg-slate-50 py-0.5 pl-0.5 pr-1.5 text-[12px] font-bold text-slate-600 ring-1 ring-slate-200">
           <${Avatar} pessoa=${ps} tamanho="h-6 w-6" />${ps ? ps.nome : "—"}
+          ${p.papel === "seguidor" ? html`<span class="font-semibold text-slate-400">segue</span>` : null}
           ${pode || p.user_id === me.id ? html`<button type="button" class="rounded-full p-0.5 text-slate-400 hover:text-rose-700" title="Tirar"
             onClick=${() => depois(() => excluirFilha("tarefas_participantes", p, "tirar participante", false))}><${Icone} nome="x" class="h-3 w-3" /></button>` : null}</span>`; })}
         ${pode ? html`<select class=${os.inputCls + " !w-auto"} value="" disabled=${busy}
-          onChange=${(e) => e.target.value && depois(() => inserirFilha("tarefas_participantes", { tarefa_id: t.id, user_id: e.target.value }, "adicionar participante", true))}>
-          <option value="">Adicionar pessoa…</option>
+          onChange=${(e) => e.target.value && depois(() => inserirFilha("tarefas_participantes", { tarefa_id: t.id, user_id: e.target.value, papel: "colaborador" }, "adicionar participante", true))}>
+          <option value="">Incluir quem ajuda nesta tarefa…</option>
           ${base.pessoas.filter((p) => !pessoasParticipando.some((x) => x.user_id === p.id)).map((p) => html`<option key=${p.id} value=${p.id}>${p.nome}</option>`)}
         </select>` : null}
       </div>
@@ -304,6 +398,7 @@ export function DetalheTarefa({ me, base, tarefaId, onClose, onMudou, onAbrir })
       ${subtarefas}
       ${checklist}
       ${links}
+      ${dependencias}
       ${participantes}
       ${comentarios}
       <p class="pt-2 text-[11px] font-semibold text-slate-400">Criada em ${fmtQuando(t.created_at)}${t.concluida_em ? ` · concluída em ${fmtQuando(t.concluida_em)}` : ""}</p>

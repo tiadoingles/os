@@ -70,6 +70,8 @@ export function ListaPage({ me, base, query }) {
           ${c && c.sub ? html`<span>${c.subOk}/${c.sub} subtarefas</span>` : null}
           ${c && c.chk ? html`<span>${c.chkOk}/${c.chk} checklist</span>` : null}
           ${c && c.com ? html`<span>${c.com} comentário${c.com > 1 ? "s" : ""}</span>` : null}
+          ${c && c.bloq ? html`<span class="font-bold text-rose-700">bloqueada</span>` : null}
+          ${t.recorrencia ? html`<span>repete</span>` : null}
           ${(t.etiquetas || []).map((e) => html`<span key=${e} class="rounded bg-slate-100 px-1 text-slate-500">${e}</span>`)}
         </div>
       </td>
@@ -84,9 +86,10 @@ export function ListaPage({ me, base, query }) {
   return html`
     <${Cabecalho} titulo=${setor ? setor.nome : "Lista"} descricao="Todas as tarefas do setor, agrupadas por projeto.">
       <${AbasTarefas} tela="lista" base=${base} />
-      ${projetos.length ? html`<${os.Btn} onClick=${() => setNova({ projeto_id: projetoId || projetos[0].id })}><${Icone} nome="mais" />Nova tarefa<//>` : null}
+      ${projetos.length ? html`<${os.Btn} onClick=${() => setNova({ projeto_id: projetoId || (projetos.find((p) => !p.aceita_solicitacoes) || projetos[0]).id })}><${Icone} nome="mais" />Nova tarefa<//>` : null}
     <//>
-    <div class="mb-3"><${SeletorEscopo} base=${base} escopo=${escopo} /></div>
+    <div class="mb-3 flex flex-wrap items-center justify-between gap-2"><${SeletorEscopo} base=${base} escopo=${escopo} />
+      <a class="inline-flex items-center gap-1 text-[13px] font-bold text-slate-500 hover:text-slate-900" href=${`#/tarefas/lixeira?setor=${setorId}&projeto=${projetoId || ""}`}><${Icone} nome="lixo" class="h-3.5 w-3.5" />Lixeira</a></div>
     <div class="mb-4 flex flex-wrap items-center gap-2 rounded-[1.35rem] border border-slate-200 bg-white p-2 shadow-card">
       <div class="relative min-w-[12rem] flex-1">
         <span class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"><${Icone} nome="busca" /></span>

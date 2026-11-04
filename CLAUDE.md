@@ -95,7 +95,8 @@ como backend.
   - **Exceção — Gestão de Tarefas** (`#/tarefas/*`, não é aba de `NAV`; spec `docs/tarefas-spec.md`): tabelas `tarefas_*`
     com RLS **por setor da tarefa**, não por `app.tem_area`: vê quem é membro do setor (`tarefas_setor_membros`) ou está
     envolvido (criador/responsável/participante, `app.tarefa_envolvido`); altera só o envolvido; setores/membros só ADM;
-    projetos/status ADM ou gestor do setor. Teste `scripts/migrations/teste_rls_tarefas.sql`.
+    projetos/status ADM ou gestor do setor; seguidor só recebe avisos; projeto "Solicitações" de cada setor aceita pedido de
+    qualquer logado; avisos em `tarefas_notificacoes` só por gatilho. Testes `teste_rls_tarefas.sql` e `teste_rls_tarefas_fase2.sql`.
   - **Só ADM**: `app_config`, `ai_usage_log`, `farol_config`, `farol_indicadores`, `os_ferramentas`, `os_squad_agentes`,
     `sync_status` (escrita e demais chaves), `automacao_estado` (escrita; a leitura é de qualquer logado porque as Edge
     Functions conferem a pausa com o JWT de quem chamou), `profiles` (escrita de outros).

@@ -8,7 +8,7 @@ import { FinanceiroPage, configurarFinanceiro } from "./financeiro/index.js";
 // Conteúdo → Produtor de carrosséis: módulo próprio, versionado pelo importmap do index.html.
 import { CarrosselPage, configurarCarrosseis } from "./conteudo/carrosseis.js";
 // Gestão de Tarefas (#/tarefas/*): módulo próprio, versionado pelo importmap do index.html. Plano: docs/tarefas-spec.md.
-import { TarefasPage, configurarTarefas } from "./tarefas/index.js";
+import { TarefasPage, configurarTarefas, SinoTarefas, BotaoNovaTarefa, ResumoTarefasHome, TarefasDoMentorado } from "./tarefas/index.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -321,7 +321,7 @@ const NAV = [
 const AREAS = NAV.map((g) => g.id);
 const NOME_AREA = Object.fromEntries(NAV.map((g) => [g.id, g.nome]));
 const ROTAS_BC = new Set(["base", "secao", "doc", "novo"]); // telas da Base de Conhecimento
-const TELAS_TAREFAS = ["minhas", "quadro", "lista", "configuracoes"]; // espelha TELAS_TAR em tarefas/index.js
+const TELAS_TAREFAS = ["minhas", "avisos", "quadro", "lista", "calendario", "painel", "lixeira", "configuracoes"]; // espelha TELAS_TAR em tarefas/index.js
 
 function ehAdmin(me) { return !!me && me.role === "admin"; }
 // Abas que a pessoa enxerga, na ordem do menu (ADM: todas).
@@ -353,7 +353,7 @@ function rotaPermitida(me, path) {
   if (ehAdmin(me)) return true;
   if (p0 === "perfil") return partes.length === 1;
   // Gestão de Tarefas: aberta a todo logado; quem vê o quê é decidido pelo setor no banco (RLS).
-  if (p0 === "tarefas") return partes.length === 1 || (partes.length === 2 && TELAS_TAREFAS.includes(partes[1]));
+  if (p0 === "tarefas") return !!me && me.role === "equipe" && (partes.length === 1 || (partes.length === 2 && TELAS_TAREFAS.includes(partes[1])));
   const area = areaDaRota(path);
   if (!area || !temArea(me, area)) return false;
   if (area === "bc") return (p0 === "base" || p0 === "novo") ? partes.length === 1 : partes.length === 2;
@@ -366,7 +366,7 @@ function rotaPermitida(me, path) {
 function rotaEntrada(me) {
   if (ehAdmin(me)) return "/";
   const area = areasDe(me)[0];
-  if (!area) return "/perfil";
+  if (!area) return me && me.role === "equipe" ? "/tarefas/minhas" : "/perfil"; // sem aba: a Gestão de Tarefas é de todos
   if (area === "bc") return "/base";
   return "/" + area + "/" + NAV.find((g) => g.id === area).itens[0].slug;
 }
@@ -1412,6 +1412,7 @@ function Shell({ me, route, children }) {
       </div>
       <div class="flex shrink-0 items-center gap-3">
         ${podeDesfazer ? html`<${BotaoDesfazer} key=${escopoDesf} escopo=${escopoDesf} />` : null}
+        ${ok("/tarefas") ? html`<${BotaoNovaTarefa} me=${me} /><${SinoTarefas} />` : null}
         <a href=${ok("/perfil") ? "#/perfil" : undefined} class="flex items-center gap-3 rounded-xl" title="Meu perfil">
           <span class="hidden text-right md:block">
             <span class="block max-w-52 truncate text-xs font-black text-slate-900">${me.nome || me.email}</span>
@@ -2533,7 +2534,7 @@ function haQuantoTempo(iso) {
 const TABELAS_HISTORICO = {
   tarefas: "Tarefas · tarefa", tarefas_setores: "Tarefas · setor", tarefas_setor_membros: "Tarefas · pessoa no setor",
   tarefas_projetos: "Tarefas · projeto", tarefas_status: "Tarefas · coluna", tarefas_participantes: "Tarefas · participante",
-  tarefas_checklist: "Tarefas · checklist", tarefas_comentarios: "Tarefas · comentário", tarefas_links: "Tarefas · link",
+  tarefas_checklist: "Tarefas · checklist", tarefas_comentarios: "Tarefas · comentário", tarefas_links: "Tarefas · link", tarefas_dependencias: "Tarefas · dependência", tarefas_modelos: "Tarefas · modelo de projeto",
   conteudo_carrosseis: "Conteúdo · carrossel",
   kb_documents: "Base de Conhecimento · documento", kb_sections: "Base de Conhecimento · seção", kb_document_versions: "Base de Conhecimento · versão",
   agenda_eventos: "Agenda · evento", aulas_agenda: "Agenda · aula", arena_regras: "Pedagógico · regras das Arenas",
@@ -5513,6 +5514,7 @@ function FichaMentoradoPage({ email, me }) {
 
       <div class="mt-4 grid gap-4 lg:grid-cols-2">
         <div class="space-y-4">
+          <${SecaoFicha} titulo="Tarefas da equipe"><${TarefasDoMentorado} me=${me} email=${email} /><//>
           <${SecaoFicha} titulo="Anotações da equipe" n=${notas.length}>
             <${NotasFicha} email=${email} notas=${notas} me=${me} onMudou=${carregar} />
           <//>
@@ -10965,6 +10967,8 @@ function HomePage({ me, sections }) {
           </div>
         </div>
 
+        <${ResumoTarefasHome} me=${me} />
+
         <div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           <a href="#/base" class="rounded-[1.35rem] border border-line bg-card shadow-card p-4 transition hover:border-emerald-200">
             <div class="text-xs uppercase tracking-wide text-muted">Base de Conhecimento</div>
@@ -11411,7 +11415,7 @@ configurarCarrosseis({
 });
 
 configurarTarefas({
-  sb, notify, errMsg, ehAdmin, Modal, Btn, cx, inputCls, Markdown,
+  sb, notify, errMsg, ehAdmin, temArea, Modal, Btn, cx, inputCls, Markdown,
   registrarDesfazer, useAoDesfazer, desfazerCriacao, desfazerEdicao, desfazerExclusao,
 });
 

@@ -90,7 +90,8 @@ function executar(src) {
     const nome = "sem acesso(" + JSON.stringify(u) + ")";
     for (const r of [...todasRotas, ...rotasSoAdm]) confere(nome + " " + r, m.rotaPermitida(u, r), false);
     confere(nome + " /perfil", m.rotaPermitida(u, "/perfil"), true);
-    confere(nome + " entrada", m.rotaEntrada(u), "/perfil");
+    confere(nome + " entrada", m.rotaEntrada(u), u && u.role === "equipe" ? "/tarefas/minhas" : "/perfil");
+    if (!(u && u.role === "equipe")) confere(nome + " sem tarefas", m.rotaPermitida(u, "/tarefas/minhas"), false);
     confere(nome + " nav", m.navPara(u), []);
     confere(nome + " rótulo", m.rotuloAcesso(u), "Sem abas liberadas");
     for (const r of todasRotas) confere(nome + " escreve " + r, m.podeEscreverRota(u, r), false);

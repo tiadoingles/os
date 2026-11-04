@@ -42,9 +42,28 @@ Regras de acesso [C]:
   Markdown, subtarefas, checklist com barra, links (Drive/Canva), participantes, comentários com @menção.
 - **Configurações**: projetos e colunas (gestor/ADM); setores, pessoas e espaço do Google Chat (ADM).
 
+## 2b. Fase 2 (04/11/2026, migration `20261104c_tarefas_fase2.sql`, teste `teste_rls_tarefas_fase2.sql` 32/32)
+- **Avisos dentro do OS**: `tarefas_notificacoes` (gerada só por gatilhos; cada um lê/marca/apaga os próprios; coluna
+  `enviado_chat_em` reservada para a Fase 3). Tipos: atribuída, menção, comentário, concluída, prazo hoje, atrasada
+  (cron `tarefas-avisos-prazo` 08h de Brasília), pedido ao setor, incluído como participante. Só recebe quem pode abrir a
+  tarefa (`app.tarefas_pode_ver_por`). Sino no topo do OS (`SinoTarefas`), aba **Avisos**, cartão na Início.
+- **Pedidos entre setores**: cada setor tem o projeto **Solicitações** (`aceita_solicitacoes`, só o ADM liga); qualquer
+  logado abre tarefa ali e vê só as que abriu; gestores do setor (ou todos os membros, se não houver gestor) são avisados.
+- **Seguir só avisa**: `tarefas_participantes.papel` = `colaborador` (altera) | `seguidor` (só avisos). Só quem já está
+  envolvido inclui colaboradores.
+- **Recorrência** (`recorrencia` = {freq: diaria|dias_uteis|semanal|mensal, intervalo}): ao concluir nasce a próxima
+  (checklist desmarcado, mesmos colaboradores); reabrir/DESFAZER apaga a próxima se ninguém mexeu nela.
+- **Modelos de projeto** (`tarefas_modelos`, RPC `tarefas_aplicar_modelo`): 3 rascunhos iniciais (Fluxo semanal da aula,
+  Onboarding de mentorado, Lançamento) para a Tia ajustar; ao criar projeto, escolhe-se o modelo e a data de início.
+- **Dependências** (`tarefas_dependencias`, sem ciclos), selo "Bloqueada" nos cartões.
+- **Anexos**: bucket privado `tarefas-anexos`, caminho `<tarefa_id>/...`, até 50 MB; ver = quem vê a tarefa.
+- **Etiquetas por setor** (`tarefas_setores.etiquetas`, o gestor edita só isso), **mentorada** (`mentorado_email`, aparece
+  na Ficha do Mentorado em "Tarefas da equipe"), **3 prioridades** (alta, normal, baixa), campo Início em "Mais campos".
+- Telas novas: Avisos, Calendário (arrastar muda o prazo), Painel do setor, Lixeira (restaurar); Quadro com todos os
+  projetos do setor; botão "+ Tarefa" no topo de qualquer tela. Equipe sem aba entra direto em Minhas tarefas.
+
 ## 3. Próximas fases
-- Fase 2: calendário, linha do tempo, painel do setor, recorrência (pg_cron), modelos de projeto, dependências,
-  visões salvas, ações em massa, páginas do projeto (Notion), upload de anexos (bucket privado).
+- Ainda não feito: linha do tempo (Gantt), visões salvas, ações em massa.
 - Fase 3: Google Chat — Edge Function `tarefas-gchat`, fila `tarefas_notificacoes`, avisos no espaço do setor e
   mensagem direta, resumo diário 08h, comando `/tarefa`. Depende da Tia: app do Chat no Google Cloud, secret
   `GOOGLE_CHAT_SA_KEY`, instalação do app pelo Admin do Workspace, espaços por setor.
@@ -53,4 +72,3 @@ Regras de acesso [C]:
 
 ## 4. Decisões em aberto
 - [D] Lista "pessoa → setor(es)" e quem é gestor de cada setor (a Tia cria as contas individuais em Acessos).
-- [D] Se "Seguir" deve continuar dando poder de edição (hoje sim) ou virar só "receber avisos".

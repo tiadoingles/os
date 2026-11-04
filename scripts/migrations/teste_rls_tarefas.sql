@@ -81,9 +81,9 @@ with u as (update tarefas set titulo = 'mudou' where id = (select v from _ids wh
 insert into _r (teste, ok) select 'Membro não envolvido não edita', (select count(*) from u) = 0;
 insert into tarefas_comentarios (tarefa_id, texto_md) select v, 'pergunta' from _ids where k='tx';
 insert into _r (teste, ok) select 'Membro não envolvido comenta', exists (select 1 from tarefas_comentarios where tarefa_id = (select v from _ids where k='tx'));
-insert into tarefas_participantes (tarefa_id, user_id) select (select v from _ids where k='tx'), (select v from _ids where k='c');
+insert into tarefas_participantes (tarefa_id, user_id, papel) select (select v from _ids where k='tx'), (select v from _ids where k='c'), 'seguidor';
 with u as (update tarefas set titulo = 'agora pode' where id = (select v from _ids where k='tx') returning 1)
-insert into _r (teste, ok) select 'Depois de Seguir (participante), edita', (select count(*) from u) = 1;
+insert into _r (teste, ok) select 'Seguir (fase 2) só avisa: seguidor continua sem editar', (select count(*) from u) = 0;
 
 -- A tenta pendurar a tarefa X numa tarefa do setor Y (parent_id) e falsificar criado_por
 select pg_temp.como('a');
