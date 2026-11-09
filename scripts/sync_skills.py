@@ -30,6 +30,7 @@ ALLOWLIST = [
     ("avatar-tia-do-ingles",               "Avatar / Cliente Ideal",                 "avatar",       "cliente-e-avatar"),
     ("documento-de-marca-tia-do-ingles",   "Documento de Marca",                     "marca",        "documentacao-e-processos"),
     ("lego-approach",                      "LEGO Approach — Regras e Exemplos",      "metodologia",  "metodologia"),
+    ("materiais-de-segunda",               "Materiais de Segunda — Resumo da aula semanal (PDF)", "pedagogico", "pedagogico"),
     ("metodologia-tia-do-ingles",          "Metodologia — Pensamento Pedagógico",     "metodologia",  "metodologia"),
     ("mypa",                               "MYPA — Alfabeto Fonético",               "metodologia",  "metodologia"),
     ("tia-do-ingles-materials",            "Materiais e Roteiros de Aula",           "metodologia",  "metodologia"),
